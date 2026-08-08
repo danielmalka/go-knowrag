@@ -1,2 +1,3 @@
 docs
 bin/
+internal/schema/applied_state.json.tmp-*

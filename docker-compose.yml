@@ -1,0 +1,30 @@
+# Qdrant for local development and for manual inspection of what `cli schema apply` produced.
+#
+# The image tag is pinned to an exact patch, never `:latest`: the client module in go.mod and the
+# server here are re-pinned as a pair (see the qdrant/go-client require block), and a floating tag
+# would let the server half move on its own.
+#
+# The integration test does NOT use this file. It starts its own throwaway container on an ephemeral
+# port so that a `docker compose up` left running here cannot collide with a test run, or worse,
+# have its data wiped by one.
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.19.0
+    restart: unless-stopped
+    environment:
+      # No literal ever lives in this file. `?` makes a missing value a startup error rather than a
+      # Qdrant that silently comes up with authentication disabled.
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:?set QDRANT_API_KEY in the environment or in a .env file}
+    ports:
+      # gRPC, the only protocol this codebase speaks (PRD-contrato §2.3b).
+      - "6334:6334"
+      # REST, bound to loopback: it exists for a human with curl and the dashboard, not for the
+      # application, and nothing outside this machine has a reason to reach it.
+      - "127.0.0.1:6333:6333"
+    volumes:
+      - qdrant-storage:/qdrant/storage
+
+volumes:
+  # A named volume, so collections survive `docker compose down` and a container restart. Removing
+  # the data is then an explicit `docker compose down -v`, not a side effect of recreating.
+  qdrant-storage:
