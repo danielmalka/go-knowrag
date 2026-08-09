@@ -230,11 +230,77 @@ excluído é decisão declarada, desconhecido é erro.
 rejeitado — está ausente do schema publicado, então não é um valor que o modelo possa nomear,
 escrever errado, ou ser convencido a trocar por um trecho de nota hostil.
 
-### Um fork adapta dois pontos
+## O que suas notas precisam ter
 
-Os nomes de vault e o mapa de áreas são vocabulário fechado em `internal/schema/enums.go`, com um
-teste de arquitetura que recusa qualquer outro pacote redeclarando esses valores. Trocar os dois é a
-única mudança de código que um fork precisa antes de indexar as próprias notas.
+O sistema é **fail-closed**: uma nota fora do contrato faz o scan inteiro falhar, com o arquivo e a
+regra violada na mensagem. Isso é deliberado — indexar 729 de 730 notas e não avisar qual faltou é
+pior do que não indexar.
+
+### Frontmatter obrigatório
+
+```yaml
+uid: 0198a7f2-4b31-7c42-9e15-3d8a92c47b6a   # UUIDv7, forma canônica de 36 caracteres
+type: concept                                # vocabulário fechado, ver abaixo
+status: draft                                # draft | in-progress | stable | archived
+created: 2026-08-07                          # AAAA-MM-DD, sem hora
+tags: [golang, arquitetura]                  # lista não-vazia
+```
+
+Opcionais: `title`, `lang`, `visibility` (`private｜internal｜shareable`, default `internal`).
+
+`type` aceita: `concept, moc, project, post, lesson, reference, template, log, lore, character,
+script, prompt, index, agent, skill`.
+
+O `uid` precisa ser a forma canônica exata — minúscula, com hífens. `uuid.Parse` aceita mais quatro
+grafias do mesmo valor, e aceitá-las faria a identidade de uma nota depender de como alguém digitou.
+
+### `area` vem da pasta, não do frontmatter
+
+A **pasta de primeiro nível** define a `area`, em minúscula e sem normalização: `Research/` vira
+`research`, `00-Inbox/` vira `00-inbox`. Se você escrever `area:` no frontmatter, é ignorado.
+
+O segundo segmento do caminho vira `sub`, verbatim.
+
+**Pasta de primeiro nível que não está no mapa de áreas nem na lista de exclusão é erro.** A regra é
+*excluído é decisão declarada, desconhecido é erro* — nunca `area` vazia em silêncio. O mesmo vale
+para `.md` solto na raiz do vault: ou está na lista de exclusão, ou falha.
+
+### O acoplamento desta primeira versão
+
+> **Os nomes de vault e o mapa de `area` por vault estão cravados em
+> [`internal/schema/enums.go`](internal/schema/enums.go).** Não são configuração — são constantes de
+> compilação, com um teste de arquitetura que recusa qualquer outro pacote redeclarando esses
+> valores.
+
+Isso é dívida conhecida, não desenho pretendido. `type`, `status` e `visibility` são fechados **pelo
+contrato** e nenhuma instalação deveria mudá-los; nome de vault e mapa de áreas são **configuração de
+instalação** e não deveriam estar ali. A separação virá; por ora, saiba onde ela não existe.
+
+**Para adaptar a um fork, edite `internal/schema/enums.go`:**
+
+| O que mudar | Onde |
+|---|---|
+| Nomes de vault (`registerVault`) | um por vault seu |
+| Áreas por vault (`registerArea`) | o segundo argumento diz **em quais vaults** aquela área vale |
+
+A validade de `area` é **por vault**: a mesma pasta pode ser válida num e desconhecida no outro, e
+isso é intencional. `registerArea("00-inbox", vaultA, vaultB)` declara uma área compartilhada uma
+vez; `registerArea("carreira", vaultB)` declara uma exclusiva.
+
+Depois de editar, `go build` e o teste de arquitetura dizem se sobrou alguma lista paralela.
+
+### Padrões que evitam dor de cabeça
+
+- **Uma pasta de primeiro nível por área, e declare todas.** O erro mais comum é criar uma pasta nova
+  no Obsidian e a ingestão parar — por desenho, para você decidir se é área ou exclusão.
+- **Não use `|` num heading logo depois de uma tabela sem linha em branco.** O separador de tabela e
+  o heading competem; há teste para isso, mas a linha em branco é grátis.
+- **Symlinks são recusados**, arquivo e diretório. Link para fora do vault leria conteúdo de fora;
+  link para diretório sumiria com as notas dele em silêncio.
+- **Nota vazia é pulada e registrada**, não é erro.
+- **Bloco de código ou tabela acima de 8192 tokens é erro**, não truncamento. Truncar mudaria o texto
+  embedado sem mudar o texto guardado.
+- **`archived` é indexado**, e filtrado na consulta — não excluído da ingestão.
 
 ## Licença
 
