@@ -1,14 +1,16 @@
 package schema
 
-import (
-	"slices"
-
-	"github.com/qdrant/go-client/qdrant"
-)
+import "slices"
 
 // The Qdrant schema is code, not a curl script kept in a runbook. This file is the single source of
 // truth for what a collection must look like — dimension, distance, named vectors, payload indexes
-// and the pinned model revision — and Apply (apply.go) is the only thing that turns it into calls.
+// and the pinned model revision — and store.Apply is the only thing that turns it into calls.
+//
+// Nothing here imports the Qdrant client, and that is an invariant the module enforces mechanically
+// (internal/archtest): this package says *what* the collections must be, in the project's own
+// types, and internal/store owns *how* to make a server match it. The two enums below exist for
+// that reason — they replace qdrant.Distance and qdrant.FieldType, which would have dragged the
+// client in through a type declaration alone.
 //
 // Three collections, one per trust boundary (design brief §2.1): multi-tenancy happens *inside* a
 // collection through the indexed tenant_id payload field, never by minting a collection per tenant.
@@ -23,10 +25,54 @@ const (
 	SparseVectorName = "sparse"
 
 	// DenseDim is BGE-M3's dense output width, confirmed on the model card (PRD-contrato §2.3b).
-	// It is uint64 because that is what qdrant.VectorParams.Size is; converting at the call site
-	// would just move the conversion somewhere less visible.
+	// It is uint64 because that is the width the wire type wants; converting at the call site would
+	// just move the conversion somewhere less visible.
 	DenseDim uint64 = 1024
 )
+
+// Distance is the metric a collection's dense vectors are compared with.
+//
+// Only the one value this project uses is declared. A metric nobody provisions would be a value
+// internal/store had to translate and no test could reach, which is how a translation table grows
+// entries that are never right or wrong because they never run.
+type Distance int
+
+const (
+	// The zero value is deliberately not a metric. A CollectionManifest whose Distance was never
+	// set must not quietly provision as cosine — it was Qdrant's own UnknownDistance before this
+	// type existed, and internal/store still translates it to exactly that.
+	_ Distance = iota
+	DistanceCosine
+)
+
+func (d Distance) String() string {
+	if d == DistanceCosine {
+		return "Cosine"
+	}
+	return "unknown-distance"
+}
+
+// FieldType is how a payload field is indexed.
+//
+// FieldTypeKeyword is the zero value, matching Qdrant's own FieldType enum: a PayloadIndex whose
+// Kind was never set indexes as a keyword, here as before.
+type FieldType int
+
+const (
+	FieldTypeKeyword FieldType = iota
+	FieldTypeInteger
+)
+
+func (f FieldType) String() string {
+	switch f {
+	case FieldTypeKeyword:
+		return "FieldTypeKeyword"
+	case FieldTypeInteger:
+		return "FieldTypeInteger"
+	default:
+		return "unknown-field-type"
+	}
+}
 
 // CollectionManifest is the desired state of one Qdrant collection.
 //
@@ -37,7 +83,7 @@ type CollectionManifest struct {
 	Name             string
 	DenseVectorName  string
 	DenseDim         uint64
-	Distance         qdrant.Distance
+	Distance         Distance
 	SparseVectorName string
 
 	// ModelRevision is the embedding model revision these vectors were produced by. Changing it
@@ -53,7 +99,7 @@ type CollectionManifest struct {
 // filter on a field indexed as a keyword.
 type PayloadIndex struct {
 	Field    string
-	Kind     qdrant.FieldType
+	Kind     FieldType
 	IsTenant bool
 }
 
@@ -88,17 +134,17 @@ var manifest = []CollectionManifest{
 // bug rather than a design.
 func newCollectionManifest(name string) CollectionManifest {
 	keyword := func(field string) PayloadIndex {
-		return PayloadIndex{Field: field, Kind: qdrant.FieldType_FieldTypeKeyword}
+		return PayloadIndex{Field: field, Kind: FieldTypeKeyword}
 	}
 	return CollectionManifest{
 		Name:             name,
 		DenseVectorName:  DenseVectorName,
 		DenseDim:         DenseDim,
-		Distance:         qdrant.Distance_Cosine,
+		Distance:         DistanceCosine,
 		SparseVectorName: SparseVectorName,
 		ModelRevision:    BGEM3Revision,
 		// This list is derived from who filters, not from what looks important. Strict mode
-		// (apply.go) refuses a filter on an unindexed field, so a field this list misses is not a
+		// (store.Apply) refuses a filter on an unindexed field, so a field this list misses is not a
 		// slow query — it is an InvalidArgument at runtime, in whichever story owns the filter. Two
 		// stories filter today, and both are represented below; the rule for the next one is the
 		// same: add the filter, add the index in the same change.
@@ -107,13 +153,13 @@ func newCollectionManifest(name string) CollectionManifest {
 			// Qdrant then groups points by tenant on disk instead of merely filtering them. Both
 			// stories filter on it — S06a scopes every read and delete by it, S07 makes it a
 			// mandatory must condition.
-			{Field: "tenant_id", Kind: qdrant.FieldType_FieldTypeKeyword, IsTenant: true},
+			{Field: "tenant_id", Kind: FieldTypeKeyword, IsTenant: true},
 			// S06a: ScrollByUID filters tenant_id + uid, and DeleteByFilter adds
 			// chunk_index >= N to prune the tail of a note that got shorter. chunk_index is the
 			// one integer here — a range filter on a keyword index is refused, so the type is
 			// load-bearing, not decoration.
 			keyword("uid"),
-			{Field: "chunk_index", Kind: qdrant.FieldType_FieldTypeInteger},
+			{Field: "chunk_index", Kind: FieldTypeInteger},
 			// S07's facets.
 			keyword("status"),
 			keyword("area"),

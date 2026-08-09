@@ -1,6 +1,6 @@
 //go:build integration
 
-package schema
+package store
 
 import (
 	"context"
@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/qdrant/go-client/qdrant"
+
+	"github.com/danielmalka/go-knowrag/internal/schema"
 )
 
 // qdrantImage is pinned to the exact patch the deployed server runs (PRD-contrato §2.3b) and
@@ -30,16 +32,15 @@ const integrationAPIKey = "integration-test-key"
 // TestApply_Integration_FullLifecycle is the end-to-end proof of this story: every acceptance
 // criterion, against a real Qdrant, in the order an operator meets them.
 //
-// It talks to the container through qdrant.NewClient rather than store.NewQdrantClient because the
-// container publishes gRPC on an ephemeral host port, and store.NewQdrantClient deliberately pins
-// 6334 (see internal/store/client.go). An ephemeral port is what keeps this test from colliding
-// with a docker-compose.yml left running on 6334; the pinned-port rule itself is covered by unit
-// tests in internal/store.
+// It talks to the container through qdrant.NewClient rather than NewQdrantClient because the
+// container publishes gRPC on an ephemeral host port, and NewQdrantClient deliberately pins 6334
+// (see client.go). An ephemeral port is what keeps this test from colliding with a
+// docker-compose.yml left running on 6334; the pinned-port rule itself is covered by client_test.go.
 func TestApply_Integration_FullLifecycle(t *testing.T) {
 	client := startQdrant(t)
 	statePath := filepath.Join(t.TempDir(), "applied_state.json")
-	state := &FileAppliedStateStore{Path: statePath}
-	m := Manifest()
+	state := &schema.FileAppliedStateStore{Path: statePath}
+	m := schema.Manifest()
 
 	// (a) A clean instance: everything gets created.
 	counted := &countingAPI{QdrantAPI: client}
@@ -69,7 +70,7 @@ func TestApply_Integration_FullLifecycle(t *testing.T) {
 		t.Fatalf("loading applied state: %v", err)
 	}
 	for _, c := range m {
-		rec, ok := written.find(c.Name)
+		rec, ok := written.Find(c.Name)
 		if !ok {
 			t.Errorf("no applied-state record for %s", c.Name)
 			continue
@@ -96,14 +97,14 @@ func TestApply_Integration_FullLifecycle(t *testing.T) {
 	}
 
 	// (c) Dimension drift, against a live collection that really is 1024.
-	drifted := Manifest()
+	drifted := schema.Manifest()
 	drifted[0].DenseDim = 768
 	_, err = Apply(t.Context(), client, drifted, state)
 	assertIntegrationDrift(t, err, drifted[0].Name, "768")
 
 	// (d) Model-revision drift, with dimension and distance still matching — the half Qdrant
 	// cannot see, caught only because the record is compared against the manifest.
-	drifted = Manifest()
+	drifted = schema.Manifest()
 	drifted[0].ModelRevision = "bge-m3@a-different-revision"
 	_, err = Apply(t.Context(), client, drifted, state)
 	assertIntegrationDrift(t, err, drifted[0].Name, "bge-m3@a-different-revision")
@@ -184,7 +185,7 @@ func (c *countingAPI) CreateFieldIndex(ctx context.Context, request *qdrant.Crea
 	return c.QdrantAPI.CreateFieldIndex(ctx, request)
 }
 
-func assertLiveCollectionMatches(t *testing.T, client *qdrant.Client, c CollectionManifest) {
+func assertLiveCollectionMatches(t *testing.T, client *qdrant.Client, c schema.CollectionManifest) {
 	t.Helper()
 	info, err := client.GetCollectionInfo(t.Context(), c.Name)
 	if err != nil {
@@ -199,8 +200,8 @@ func assertLiveCollectionMatches(t *testing.T, client *qdrant.Client, c Collecti
 	if dense.GetSize() != c.DenseDim {
 		t.Errorf("%s: dense dimension = %d, want %d", c.Name, dense.GetSize(), c.DenseDim)
 	}
-	if dense.GetDistance() != c.Distance {
-		t.Errorf("%s: distance = %v, want %v", c.Name, dense.GetDistance(), c.Distance)
+	if want := qdrantDistance(c.Distance); dense.GetDistance() != want {
+		t.Errorf("%s: distance = %v, want %v", c.Name, dense.GetDistance(), want)
 	}
 	if _, ok := params.GetSparseVectorsConfig().GetMap()[c.SparseVectorName]; !ok {
 		t.Errorf("%s: no named sparse vector %q", c.Name, c.SparseVectorName)
@@ -213,7 +214,7 @@ func assertLiveCollectionMatches(t *testing.T, client *qdrant.Client, c Collecti
 	}
 }
 
-func assertTenantIndex(t *testing.T, client *qdrant.Client, c CollectionManifest) {
+func assertTenantIndex(t *testing.T, client *qdrant.Client, c schema.CollectionManifest) {
 	t.Helper()
 	info, err := client.GetCollectionInfo(t.Context(), c.Name)
 	if err != nil {
@@ -228,7 +229,7 @@ func assertTenantIndex(t *testing.T, client *qdrant.Client, c CollectionManifest
 		if want := payloadSchemaTypes[idx.Kind]; live.GetDataType() != want {
 			t.Errorf("%s: index %q data type = %v, want %v", c.Name, idx.Field, live.GetDataType(), want)
 		}
-		if idx.Kind != qdrant.FieldType_FieldTypeKeyword {
+		if idx.Kind != schema.FieldTypeKeyword {
 			continue
 		}
 		if got := live.GetParams().GetKeywordIndexParams().GetIsTenant(); got != idx.IsTenant {

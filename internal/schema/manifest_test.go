@@ -4,8 +4,6 @@ import (
 	"maps"
 	"slices"
 	"testing"
-
-	"github.com/qdrant/go-client/qdrant"
 )
 
 // The three collection names and the nine indexed fields are spelled out here as literals on
@@ -33,8 +31,8 @@ func TestManifest_ThreeCollectionsDefined(t *testing.T) {
 		if c.DenseDim != 1024 {
 			t.Errorf("%s: DenseDim = %d, want 1024 (PRD-contrato §2.3b)", c.Name, c.DenseDim)
 		}
-		if c.Distance != qdrant.Distance_Cosine {
-			t.Errorf("%s: Distance = %v, want %v", c.Name, c.Distance, qdrant.Distance_Cosine)
+		if c.Distance != DistanceCosine {
+			t.Errorf("%s: Distance = %v, want %v", c.Name, c.Distance, DistanceCosine)
 		}
 		if c.SparseVectorName != "sparse" {
 			t.Errorf("%s: SparseVectorName = %q, want %q", c.Name, c.SparseVectorName, "sparse")
@@ -53,16 +51,16 @@ func TestManifest_ThreeCollectionsDefined(t *testing.T) {
 // DeleteByFilter) and S07's six facets — and it is spelled out here so that adding a filter without
 // its index fails a test instead of failing in production.
 func TestManifest_PayloadIndexes_TenantIsTenantTrue(t *testing.T) {
-	wantKinds := map[string]qdrant.FieldType{
-		"tenant_id":   qdrant.FieldType_FieldTypeKeyword,
-		"uid":         qdrant.FieldType_FieldTypeKeyword,
-		"chunk_index": qdrant.FieldType_FieldTypeInteger,
-		"status":      qdrant.FieldType_FieldTypeKeyword,
-		"area":        qdrant.FieldType_FieldTypeKeyword,
-		"vault":       qdrant.FieldType_FieldTypeKeyword,
-		"type":        qdrant.FieldType_FieldTypeKeyword,
-		"visibility":  qdrant.FieldType_FieldTypeKeyword,
-		"tags":        qdrant.FieldType_FieldTypeKeyword,
+	wantKinds := map[string]FieldType{
+		"tenant_id":   FieldTypeKeyword,
+		"uid":         FieldTypeKeyword,
+		"chunk_index": FieldTypeInteger,
+		"status":      FieldTypeKeyword,
+		"area":        FieldTypeKeyword,
+		"vault":       FieldTypeKeyword,
+		"type":        FieldTypeKeyword,
+		"visibility":  FieldTypeKeyword,
+		"tags":        FieldTypeKeyword,
 	}
 
 	for _, c := range Manifest() {

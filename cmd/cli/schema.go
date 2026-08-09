@@ -78,10 +78,10 @@ func newSchemaCmd(cfg *config.Config) *cobra.Command {
 func runSchemaApply(
 	ctx context.Context,
 	out io.Writer,
-	api schema.QdrantAPI,
+	api store.QdrantAPI,
 	state schema.AppliedStateStore,
 ) (int, error) {
-	report, err := schema.Apply(ctx, api, schema.Manifest(), state)
+	report, err := store.Apply(ctx, api, schema.Manifest(), state)
 
 	// The report prints before the error check because a failed apply still did whatever it did to
 	// the collections it got through, and the operator needs to see that half.

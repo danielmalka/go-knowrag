@@ -1,4 +1,4 @@
-package schema
+package store
 
 import (
 	"context"
@@ -10,9 +10,16 @@ import (
 	"strings"
 
 	"github.com/qdrant/go-client/qdrant"
+
+	"github.com/danielmalka/go-knowrag/internal/schema"
 )
 
 // Apply makes a live Qdrant match the manifest, and refuses to make it match by force.
+//
+// It lives here rather than beside the manifest because everything below is Qdrant vocabulary —
+// requests, enums, the shape of a CollectionInfo — and this package is the only one allowed to
+// speak it (enforced by internal/archtest). internal/schema states what the collections must be;
+// this file is the translation of that statement into calls.
 //
 // The split that governs everything below: Qdrant is the authority on the properties it really
 // stores (named vectors, dimension, distance, payload indexes), and the applied-state record is the
@@ -97,8 +104,13 @@ func (r CollectionReport) String() string {
 //
 // On error the Report returned covers the collections completed before the failure — partial, and
 // labelled as such by simply being shorter than the manifest.
-func Apply(ctx context.Context, api QdrantAPI, manifest []CollectionManifest, store AppliedStateStore) (Report, error) {
-	loaded, err := store.Load()
+func Apply(
+	ctx context.Context,
+	api QdrantAPI,
+	manifest []schema.CollectionManifest,
+	state schema.AppliedStateStore,
+) (Report, error) {
+	loaded, err := state.Load()
 	if err != nil {
 		return Report{}, err
 	}
@@ -119,13 +131,13 @@ func Apply(ctx context.Context, api QdrantAPI, manifest []CollectionManifest, st
 		if err != nil {
 			return report, err
 		}
-		next = next.with(c.Name, c.ModelRevision)
+		next = next.With(c.Name, c.ModelRevision)
 	}
 
 	// Written last, and only when a revision actually changed: last so a failure above records no
 	// success, and only-when-changed so a no-op run stays a no-op all the way to disk.
-	if !next.sameRevisions(loaded) {
-		if err := store.Save(next); err != nil {
+	if !next.SameRevisions(loaded) {
+		if err := state.Save(next); err != nil {
 			return report, err
 		}
 	}
@@ -134,8 +146,8 @@ func Apply(ctx context.Context, api QdrantAPI, manifest []CollectionManifest, st
 
 // checkModelRevision compares the manifest against the committed record. No record is the first
 // run — or a checkout that has never applied — and is not drift.
-func checkModelRevision(state AppliedState, c CollectionManifest) error {
-	rec, ok := state.find(c.Name)
+func checkModelRevision(state schema.AppliedState, c schema.CollectionManifest) error {
+	rec, ok := state.Find(c.Name)
 	if !ok || rec.EmbeddingModel == c.ModelRevision {
 		return nil
 	}
@@ -150,7 +162,7 @@ func checkModelRevision(state AppliedState, c CollectionManifest) error {
 
 // applyCollection brings one collection to the manifest's state: create it if missing, verify it if
 // present, then fill in whichever payload indexes are absent.
-func applyCollection(ctx context.Context, api QdrantAPI, c CollectionManifest) (CollectionReport, error) {
+func applyCollection(ctx context.Context, api QdrantAPI, c schema.CollectionManifest) (CollectionReport, error) {
 	report := CollectionReport{Name: c.Name}
 
 	exists, err := api.CollectionExists(ctx, c.Name)
@@ -193,13 +205,34 @@ func applyCollection(ctx context.Context, api QdrantAPI, c CollectionManifest) (
 	return report, nil
 }
 
+// qdrantDistance and qdrantFieldType translate the manifest's own enums into the wire ones. They
+// are the whole reason internal/schema can describe a collection without importing this client.
+//
+// Both are total by falling back to the wire enum's zero value, which is exactly what the manifest
+// produced before these types existed: an unset schema.Distance was qdrant.Distance_UnknownDistance
+// — a metric the server rejects, not a silent default to cosine — and an unset schema.FieldType was
+// qdrant.FieldType_FieldTypeKeyword, since keyword is the zero value on both sides.
+var (
+	qdrantDistances = map[schema.Distance]qdrant.Distance{
+		schema.DistanceCosine: qdrant.Distance_Cosine,
+	}
+	qdrantFieldTypes = map[schema.FieldType]qdrant.FieldType{
+		schema.FieldTypeKeyword: qdrant.FieldType_FieldTypeKeyword,
+		schema.FieldTypeInteger: qdrant.FieldType_FieldTypeInteger,
+	}
+)
+
+func qdrantDistance(d schema.Distance) qdrant.Distance { return qdrantDistances[d] }
+
+func qdrantFieldType(f schema.FieldType) qdrant.FieldType { return qdrantFieldTypes[f] }
+
 // createCollectionRequest builds the create call from c alone — every value in it comes off the
 // manifest entry, so the three collections differ only where the manifest says they differ.
-func createCollectionRequest(c CollectionManifest) *qdrant.CreateCollection {
+func createCollectionRequest(c schema.CollectionManifest) *qdrant.CreateCollection {
 	return &qdrant.CreateCollection{
 		CollectionName: c.Name,
 		VectorsConfig: qdrant.NewVectorsConfigMap(map[string]*qdrant.VectorParams{
-			c.DenseVectorName: {Size: c.DenseDim, Distance: c.Distance},
+			c.DenseVectorName: {Size: c.DenseDim, Distance: qdrantDistance(c.Distance)},
 		}),
 		// The sparse side takes Qdrant's defaults: BGE-M3 emits learned lexical weights, so there
 		// is no IDF modifier to apply on top of them.
@@ -217,11 +250,11 @@ func createCollectionRequest(c CollectionManifest) *qdrant.CreateCollection {
 	}
 }
 
-func fieldIndexRequest(collection string, idx PayloadIndex) *qdrant.CreateFieldIndexCollection {
+func fieldIndexRequest(collection string, idx schema.PayloadIndex) *qdrant.CreateFieldIndexCollection {
 	req := &qdrant.CreateFieldIndexCollection{
 		CollectionName: collection,
 		FieldName:      idx.Field,
-		FieldType:      qdrant.PtrOf(idx.Kind),
+		FieldType:      qdrant.PtrOf(qdrantFieldType(idx.Kind)),
 		// Wait for the index to be built before returning: an apply that reports success while the
 		// index is still pending would let the very next run see it missing and create it again.
 		Wait: qdrant.PtrOf(true),
@@ -230,7 +263,7 @@ func fieldIndexRequest(collection string, idx PayloadIndex) *qdrant.CreateFieldI
 	// asks for and the params message has to match the field type — keyword params on an integer
 	// field is a request Qdrant rejects. The integer index takes the server's defaults (lookup and
 	// range both on), which is what a chunk_index >= N filter needs.
-	if idx.Kind == qdrant.FieldType_FieldTypeKeyword {
+	if idx.Kind == schema.FieldTypeKeyword {
 		req.FieldIndexParams = qdrant.NewPayloadIndexParamsKeyword(&qdrant.KeywordIndexParams{
 			IsTenant: qdrant.PtrOf(idx.IsTenant),
 		})
@@ -240,7 +273,7 @@ func fieldIndexRequest(collection string, idx PayloadIndex) *qdrant.CreateFieldI
 
 // checkVectorDrift compares the live collection's vector geometry against the manifest. It reads
 // only properties Qdrant genuinely stores and reports back.
-func checkVectorDrift(c CollectionManifest, info *qdrant.CollectionInfo) error {
+func checkVectorDrift(c schema.CollectionManifest, info *qdrant.CollectionInfo) error {
 	params := info.GetConfig().GetParams()
 
 	denseByName := params.GetVectorsConfig().GetParamsMap().GetMap()
@@ -264,11 +297,13 @@ func checkVectorDrift(c CollectionManifest, info *qdrant.CollectionInfo) error {
 			Observed:   "Qdrant",
 		}
 	}
-	if dense.GetDistance() != c.Distance {
+	// Compared after translation, not before: the manifest's metric and the live one are two
+	// spellings of the same thing, and the message names the wire spelling on both sides.
+	if want := qdrantDistance(c.Distance); dense.GetDistance() != want {
 		return &DriftError{
 			Collection: c.Name,
 			Property:   "dense vector distance",
-			Expected:   c.Distance.String(),
+			Expected:   want.String(),
 			Actual:     dense.GetDistance().String(),
 			Observed:   "Qdrant",
 		}
@@ -288,15 +323,15 @@ func checkVectorDrift(c CollectionManifest, info *qdrant.CollectionInfo) error {
 
 // payloadSchemaTypes maps the manifest's field types to what GetCollectionInfo reports for an
 // index of that type — two different enums for the same idea, with no conversion in the client.
-var payloadSchemaTypes = map[qdrant.FieldType]qdrant.PayloadSchemaType{
-	qdrant.FieldType_FieldTypeKeyword: qdrant.PayloadSchemaType_Keyword,
-	qdrant.FieldType_FieldTypeInteger: qdrant.PayloadSchemaType_Integer,
+var payloadSchemaTypes = map[schema.FieldType]qdrant.PayloadSchemaType{
+	schema.FieldTypeKeyword: qdrant.PayloadSchemaType_Keyword,
+	schema.FieldTypeInteger: qdrant.PayloadSchemaType_Integer,
 }
 
 // checkIndexDrift verifies an index that already exists actually matches the manifest. Presence
 // alone is not enough: an index on tenant_id built without is_tenant looks identical from a
 // distance and lays the collection out the wrong way.
-func checkIndexDrift(collection string, idx PayloadIndex, live *qdrant.PayloadSchemaInfo) error {
+func checkIndexDrift(collection string, idx schema.PayloadIndex, live *qdrant.PayloadSchemaInfo) error {
 	// ponytail: the table covers only the two field types the manifest actually uses; an unmapped
 	// kind skips the type check rather than inventing an expectation for it. Extend the table when
 	// a third type enters the manifest.
@@ -311,7 +346,7 @@ func checkIndexDrift(collection string, idx PayloadIndex, live *qdrant.PayloadSc
 	}
 	// is_tenant is a keyword-index property; on any other type there is nothing to compare and the
 	// manifest cannot ask for it either.
-	if idx.Kind != qdrant.FieldType_FieldTypeKeyword {
+	if idx.Kind != schema.FieldTypeKeyword {
 		return nil
 	}
 	if got := live.GetParams().GetKeywordIndexParams().GetIsTenant(); got != idx.IsTenant {

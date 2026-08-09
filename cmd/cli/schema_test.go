@@ -10,11 +10,12 @@ import (
 	"github.com/qdrant/go-client/qdrant"
 
 	"github.com/danielmalka/go-knowrag/internal/schema"
+	"github.com/danielmalka/go-knowrag/internal/store"
 )
 
 // cleanQdrant is a Qdrant with nothing in it. The command's own contract — exit code, report
 // output, error propagation — is all that is under test here; what Apply does with the manifest is
-// proven in internal/schema.
+// proven in internal/store.
 type cleanQdrant struct{}
 
 func (cleanQdrant) CollectionExists(context.Context, string) (bool, error) { return false, nil }
@@ -74,10 +75,10 @@ func TestSchemaApplyCmd_DriftError_ExitsNonZero(t *testing.T) {
 	if code == exitOK {
 		t.Errorf("exit code = %d on drift, want non-zero", code)
 	}
-	if !errors.Is(err, schema.ErrSchemaDrift) {
-		t.Fatalf("error = %v, want it to match schema.ErrSchemaDrift", err)
+	if !errors.Is(err, store.ErrSchemaDrift) {
+		t.Fatalf("error = %v, want it to match store.ErrSchemaDrift", err)
 	}
-	// The command is an adapter: it must hand the operator the explicit message internal/schema
+	// The command is an adapter: it must hand the operator the explicit message internal/store
 	// built, not a summary of its own.
 	if !strings.Contains(err.Error(), "bge-m3@a-previous-revision") {
 		t.Errorf("error %q lost the detail from the drift error", err)

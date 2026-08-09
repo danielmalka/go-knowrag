@@ -1,13 +1,14 @@
-package schema
+package store
 
 import (
 	"context"
 	"errors"
-	"slices"
 	"strings"
 	"testing"
 
 	"github.com/qdrant/go-client/qdrant"
+
+	"github.com/danielmalka/go-knowrag/internal/schema"
 )
 
 // fakeQdrant is the whole Qdrant side of Apply, in memory. Every write is recorded rather than
@@ -47,26 +48,26 @@ func (f *fakeQdrant) CreateFieldIndex(_ context.Context, req *qdrant.CreateField
 // fakeState is an AppliedStateStore that never touches disk and counts its writes, which is how
 // "second run writes nothing" is proven rather than assumed.
 type fakeState struct {
-	state  AppliedState
+	state  schema.AppliedState
 	writes int
 }
 
-func (f *fakeState) Load() (AppliedState, error) { return f.state, nil }
+func (f *fakeState) Load() (schema.AppliedState, error) { return f.state, nil }
 
-func (f *fakeState) Save(s AppliedState) error {
+func (f *fakeState) Save(s schema.AppliedState) error {
 	f.state = s
 	f.writes++
 	return nil
 }
 
 // liveInfo builds the CollectionInfo a Qdrant that already matches c would report.
-func liveInfo(c CollectionManifest) *qdrant.CollectionInfo {
+func liveInfo(c schema.CollectionManifest) *qdrant.CollectionInfo {
 	payload := map[string]*qdrant.PayloadSchemaInfo{}
 	for _, idx := range c.Indexes {
 		// The reported type follows the manifest entry's own kind: a fake that answered "keyword"
 		// for every field would let the integer index pass a drift check it would fail live.
 		live := &qdrant.PayloadSchemaInfo{DataType: payloadSchemaTypes[idx.Kind]}
-		if idx.Kind == qdrant.FieldType_FieldTypeKeyword {
+		if idx.Kind == schema.FieldTypeKeyword {
 			live.Params = qdrant.NewPayloadIndexParamsKeyword(&qdrant.KeywordIndexParams{
 				IsTenant: qdrant.PtrOf(idx.IsTenant),
 			})
@@ -77,7 +78,7 @@ func liveInfo(c CollectionManifest) *qdrant.CollectionInfo {
 		Config: &qdrant.CollectionConfig{
 			Params: &qdrant.CollectionParams{
 				VectorsConfig: qdrant.NewVectorsConfigMap(map[string]*qdrant.VectorParams{
-					c.DenseVectorName: {Size: c.DenseDim, Distance: c.Distance},
+					c.DenseVectorName: {Size: c.DenseDim, Distance: qdrantDistance(c.Distance)},
 				}),
 				SparseVectorsConfig: qdrant.NewSparseVectorsConfig(map[string]*qdrant.SparseVectorParams{
 					c.SparseVectorName: {},
@@ -89,12 +90,12 @@ func liveInfo(c CollectionManifest) *qdrant.CollectionInfo {
 }
 
 // upToDate is the fake pair for "a Qdrant and a state record that already match the manifest".
-func upToDate(m []CollectionManifest) (*fakeQdrant, *fakeState) {
+func upToDate(m []schema.CollectionManifest) (*fakeQdrant, *fakeState) {
 	api := &fakeQdrant{info: map[string]*qdrant.CollectionInfo{}}
-	state := AppliedState{}
+	state := schema.AppliedState{}
 	for _, c := range m {
 		api.info[c.Name] = liveInfo(c)
-		state = state.with(c.Name, c.ModelRevision)
+		state = state.With(c.Name, c.ModelRevision)
 	}
 	return api, &fakeState{state: state}
 }
@@ -109,7 +110,7 @@ func denseParams(t *testing.T, req *qdrant.CreateCollection, name string) *qdran
 }
 
 func TestApply_CreatesCollectionsFromManifest_WhenNoneExist(t *testing.T) {
-	m := Manifest()
+	m := schema.Manifest()
 	api := &fakeQdrant{}
 	state := &fakeState{}
 
@@ -129,8 +130,8 @@ func TestApply_CreatesCollectionsFromManifest_WhenNoneExist(t *testing.T) {
 		if dense.GetSize() != want.DenseDim {
 			t.Errorf("%s: dense size = %d, want %d", want.Name, dense.GetSize(), want.DenseDim)
 		}
-		if dense.GetDistance() != want.Distance {
-			t.Errorf("%s: dense distance = %v, want %v", want.Name, dense.GetDistance(), want.Distance)
+		if wantDistance := qdrantDistance(want.Distance); dense.GetDistance() != wantDistance {
+			t.Errorf("%s: dense distance = %v, want %v", want.Name, dense.GetDistance(), wantDistance)
 		}
 		if _, ok := req.GetSparseVectorsConfig().GetMap()[want.SparseVectorName]; !ok {
 			t.Errorf("%s: CreateCollection carries no named sparse vector %q", want.Name, want.SparseVectorName)
@@ -142,7 +143,7 @@ func TestApply_CreatesCollectionsFromManifest_WhenNoneExist(t *testing.T) {
 // collection: given a manifest that contains none of the three real names, it must provision
 // exactly what it was handed.
 func TestApply_UsesTheManifestItWasGiven(t *testing.T) {
-	custom := Manifest()[:1]
+	custom := schema.Manifest()[:1]
 	custom[0].Name = "collection-that-is-not-in-the-real-manifest"
 	api := &fakeQdrant{}
 
@@ -160,7 +161,7 @@ func TestApply_UsesTheManifestItWasGiven(t *testing.T) {
 
 func TestApply_CreatesCollection_WithStrictModeEnabled(t *testing.T) {
 	api := &fakeQdrant{}
-	if _, err := Apply(t.Context(), api, Manifest(), &fakeState{}); err != nil {
+	if _, err := Apply(t.Context(), api, schema.Manifest(), &fakeState{}); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 
@@ -180,8 +181,33 @@ func TestApply_CreatesCollection_WithStrictModeEnabled(t *testing.T) {
 	}
 }
 
+// TestEnumTranslation_MatchesTheWireEnum spells the translation table out a second time, in
+// literals, for the same reason manifest_test.go spells out the collection names: every other test
+// in this file routes both sides of its comparison through qdrantDistance/qdrantFieldType, so a
+// wrong entry there would make them agree with each other and with nothing else. This is the one
+// place that states what the mapping must be rather than reading it.
+func TestEnumTranslation_MatchesTheWireEnum(t *testing.T) {
+	for kind, want := range map[schema.FieldType]qdrant.FieldType{
+		schema.FieldTypeKeyword: qdrant.FieldType_FieldTypeKeyword,
+		schema.FieldTypeInteger: qdrant.FieldType_FieldTypeInteger,
+	} {
+		if got := qdrantFieldType(kind); got != want {
+			t.Errorf("qdrantFieldType(%v) = %v, want %v", kind, got, want)
+		}
+	}
+	if got := qdrantDistance(schema.DistanceCosine); got != qdrant.Distance_Cosine {
+		t.Errorf("qdrantDistance(%v) = %v, want %v", schema.DistanceCosine, got, qdrant.Distance_Cosine)
+	}
+	// The unset value is not a metric and must not translate into one: it was Qdrant's
+	// UnknownDistance before schema.Distance existed, and a silent fallback to cosine here would
+	// provision a collection nobody asked for.
+	if got := qdrantDistance(0); got != qdrant.Distance_UnknownDistance {
+		t.Errorf("qdrantDistance(unset) = %v, want %v", got, qdrant.Distance_UnknownDistance)
+	}
+}
+
 func TestApply_CreatesPayloadIndexes_IncludingTenantIsTenant(t *testing.T) {
-	m := Manifest()
+	m := schema.Manifest()
 	api := &fakeQdrant{info: map[string]*qdrant.CollectionInfo{}}
 	for _, c := range m {
 		// The collections exist, but with no payload index at all.
@@ -200,14 +226,14 @@ func TestApply_CreatesPayloadIndexes_IncludingTenantIsTenant(t *testing.T) {
 			len(api.fieldIndexes), wantCalls, len(m), len(m[0].Indexes))
 	}
 
-	kinds := map[string]qdrant.FieldType{}
+	kinds := map[string]schema.FieldType{}
 	for _, idx := range m[0].Indexes {
 		kinds[idx.Field] = idx.Kind
 	}
 
 	tenantCalls := 0
 	for _, req := range api.fieldIndexes {
-		if want := kinds[req.GetFieldName()]; req.GetFieldType() != want {
+		if want := qdrantFieldType(kinds[req.GetFieldName()]); req.GetFieldType() != want {
 			t.Errorf("%s/%s: field type = %v, want %v",
 				req.GetCollectionName(), req.GetFieldName(), req.GetFieldType(), want)
 		}
@@ -226,7 +252,7 @@ func TestApply_CreatesPayloadIndexes_IncludingTenantIsTenant(t *testing.T) {
 }
 
 func TestApply_SecondRun_NoWrites(t *testing.T) {
-	m := Manifest()
+	m := schema.Manifest()
 	api, state := upToDate(m)
 
 	report, err := Apply(t.Context(), api, m, state)
@@ -255,7 +281,7 @@ func TestApply_SecondRun_NoWrites(t *testing.T) {
 }
 
 func TestApply_DimensionMismatch_ReturnsExplicitError(t *testing.T) {
-	m := Manifest()
+	m := schema.Manifest()
 	api, state := upToDate(m)
 	drifted := m[0]
 	drifted.DenseDim = 768
@@ -275,18 +301,23 @@ func TestApply_DimensionMismatch_ReturnsExplicitError(t *testing.T) {
 }
 
 func TestApply_DistanceMismatch_ReturnsExplicitError(t *testing.T) {
-	m := Manifest()
+	m := schema.Manifest()
 	api, state := upToDate(m)
-	drifted := m[0]
-	drifted.Distance = qdrant.Distance_Dot
-	api.info[m[0].Name] = liveInfo(drifted)
+	// The drifted metric is set on the Qdrant side rather than by mutating the manifest, because
+	// schema.Distance declares only the one metric this project provisions — a manifest asking for
+	// Dot is not a state this codebase can reach, while a live collection reporting it is exactly
+	// what this check exists for.
+	info := liveInfo(m[0])
+	info.GetConfig().GetParams().GetVectorsConfig().GetParamsMap().GetMap()[m[0].DenseVectorName].
+		Distance = qdrant.Distance_Dot
+	api.info[m[0].Name] = info
 
 	_, err := Apply(t.Context(), api, m, state)
 	assertDrift(t, err, m[0].Name, qdrant.Distance_Dot.String(), qdrant.Distance_Cosine.String())
 }
 
 func TestApply_MissingNamedVector_ReturnsExplicitError(t *testing.T) {
-	m := Manifest()
+	m := schema.Manifest()
 	api, state := upToDate(m)
 	drifted := m[0]
 	drifted.SparseVectorName = "something-else"
@@ -300,9 +331,9 @@ func TestApply_MissingNamedVector_ReturnsExplicitError(t *testing.T) {
 // an empty collection has no point to compare against, and Qdrant stores no "which model wrote
 // this" attribute, so the only oracle is the record this repo commits alongside the manifest.
 func TestApply_ModelRevisionMismatch_ReturnsExplicitError(t *testing.T) {
-	m := Manifest()
+	m := schema.Manifest()
 	api, state := upToDate(m)
-	state.state = state.state.with(m[0].Name, "bge-m3@a-previous-revision")
+	state.state = state.state.With(m[0].Name, "bge-m3@a-previous-revision")
 
 	_, err := Apply(t.Context(), api, m, state)
 	assertDrift(t, err, m[0].Name, "bge-m3@a-previous-revision", m[0].ModelRevision)
@@ -317,7 +348,7 @@ func TestApply_ModelRevisionMismatch_ReturnsExplicitError(t *testing.T) {
 }
 
 func TestApply_FirstRun_WritesAppliedState(t *testing.T) {
-	m := Manifest()
+	m := schema.Manifest()
 	state := &fakeState{}
 
 	if _, err := Apply(t.Context(), &fakeQdrant{}, m, state); err != nil {
@@ -331,7 +362,7 @@ func TestApply_FirstRun_WritesAppliedState(t *testing.T) {
 		t.Fatalf("applied state holds %d record(s), want %d", len(state.state.Collections), len(m))
 	}
 	for _, c := range m {
-		rec, ok := state.state.find(c.Name)
+		rec, ok := state.state.Find(c.Name)
 		if !ok {
 			t.Errorf("no applied-state record for %s", c.Name)
 			continue
@@ -349,7 +380,7 @@ func TestApply_FirstRun_WritesAppliedState(t *testing.T) {
 // never applied anything has no record, and treating "no record" as a mismatch would make every
 // first run fail.
 func TestApply_EmptyState_IsNotDrift(t *testing.T) {
-	m := Manifest()
+	m := schema.Manifest()
 	api, _ := upToDate(m)
 
 	report, err := Apply(t.Context(), api, m, &fakeState{})
@@ -381,35 +412,5 @@ func assertDrift(t *testing.T, err error, collection, actual, expected string) {
 	// The operator has to learn from the message itself that this is not a fix-in-place situation.
 	if !strings.Contains(msg, "three collections") {
 		t.Errorf("error %q does not state the reindex-all-three rule", msg)
-	}
-}
-
-// TestAppliedState_With_DoesNotMutateTheReceiver guards the property Apply relies on to leave the
-// loaded state untouched until every collection has succeeded.
-func TestAppliedState_With_DoesNotMutateTheReceiver(t *testing.T) {
-	loaded := AppliedState{}.with("interno", "rev-a")
-	updated := loaded.with("interno", "rev-b")
-
-	rec, _ := loaded.find("interno")
-	if rec.EmbeddingModel != "rev-a" {
-		t.Errorf("with() changed the receiver: %q, want %q", rec.EmbeddingModel, "rev-a")
-	}
-	rec, _ = updated.find("interno")
-	if rec.EmbeddingModel != "rev-b" {
-		t.Errorf("with() returned %q, want %q", rec.EmbeddingModel, "rev-b")
-	}
-}
-
-// TestAppliedState_With_KeepsRecordsSorted keeps the committed applied_state.json diff readable:
-// map iteration order must never reach the file.
-func TestAppliedState_With_KeepsRecordsSorted(t *testing.T) {
-	s := AppliedState{}.with("interno", "r").with("base_paga", "r").with("clientes", "r")
-
-	names := make([]string, len(s.Collections))
-	for i, c := range s.Collections {
-		names[i] = c.ManagedCollection
-	}
-	if !slices.IsSorted(names) {
-		t.Errorf("applied-state records are %v, want them sorted by collection name", names)
 	}
 }

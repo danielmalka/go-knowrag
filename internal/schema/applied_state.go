@@ -25,8 +25,8 @@ import (
 // Known and accepted gap: a checkout that never applied — a second operator machine pointed at an
 // already-provisioned Qdrant, say — has no record, and model-revision drift is undetectable for
 // that run. There is no oracle in Qdrant to fall back to. Dimension/distance drift still fires
-// (apply.go), so a changed schema is still caught; a revision-only bump on an unclaimed checkout is
-// not. This is why the file is meant to be committed.
+// (store.Apply), so a changed schema is still caught; a revision-only bump on an unclaimed checkout
+// is not. This is why the file is meant to be committed.
 
 // DefaultAppliedStatePath is where the committed record lives, relative to the repository root.
 // `cli schema apply` therefore expects to run from the repo root, or to be pointed elsewhere with
@@ -46,9 +46,13 @@ type AppliedCollection struct {
 	AppliedAt         time.Time `json:"applied_at"`
 }
 
-// find returns the record for the named collection. ok is false when there is none, which is the
+// Find returns the record for the named collection. ok is false when there is none, which is the
 // first-run case and explicitly not drift.
-func (s AppliedState) find(name string) (AppliedCollection, bool) {
+//
+// Find, With and SameRevisions are exported because the only caller that drives them is
+// store.Apply, in the package that owns the Qdrant side — this package owns the record's shape and
+// its invariants (copy-on-write, sorted, revision-only comparison), not the apply sequence.
+func (s AppliedState) Find(name string) (AppliedCollection, bool) {
 	i := slices.IndexFunc(s.Collections, func(c AppliedCollection) bool {
 		return c.ManagedCollection == name
 	})
@@ -58,12 +62,12 @@ func (s AppliedState) find(name string) (AppliedCollection, bool) {
 	return s.Collections[i], true
 }
 
-// with returns a copy of s carrying model for the named collection, stamped now.
+// With returns a copy of s carrying model for the named collection, stamped now.
 //
 // It copies rather than mutates because Apply builds the next state while still holding the loaded
 // one: it compares the two to decide whether writing is necessary at all, and an in-place update
 // would make that comparison compare a value against itself.
-func (s AppliedState) with(name, model string) AppliedState {
+func (s AppliedState) With(name, model string) AppliedState {
 	next := AppliedState{Collections: slices.Clone(s.Collections)}
 	rec := AppliedCollection{
 		ManagedCollection: name,
@@ -83,17 +87,17 @@ func (s AppliedState) with(name, model string) AppliedState {
 	return next
 }
 
-// sameRevisions reports whether s and other record the same revision for the same collections.
+// SameRevisions reports whether s and other record the same revision for the same collections.
 //
 // AppliedAt is deliberately excluded: it moves on every apply, and comparing it would turn every
 // no-op run into a file write — churning a committed file, and breaking the "second run performs
 // zero writes" guarantee that proves idempotency.
-func (s AppliedState) sameRevisions(other AppliedState) bool {
+func (s AppliedState) SameRevisions(other AppliedState) bool {
 	if len(s.Collections) != len(other.Collections) {
 		return false
 	}
 	for _, c := range s.Collections {
-		rec, ok := other.find(c.ManagedCollection)
+		rec, ok := other.Find(c.ManagedCollection)
 		if !ok || rec.EmbeddingModel != c.EmbeddingModel {
 			return false
 		}

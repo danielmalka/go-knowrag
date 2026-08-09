@@ -3,6 +3,7 @@ package schema
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -14,7 +15,7 @@ import (
 func TestFileAppliedStateStore_RoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "applied_state.json")
 	store := &FileAppliedStateStore{Path: path}
-	want := AppliedState{}.with("interno", "bge-m3@rev-a").with("clientes", "bge-m3@rev-b")
+	want := AppliedState{}.With("interno", "bge-m3@rev-a").With("clientes", "bge-m3@rev-b")
 
 	if err := store.Save(want); err != nil {
 		t.Fatalf("Save: %v", err)
@@ -28,7 +29,7 @@ func TestFileAppliedStateStore_RoundTrip(t *testing.T) {
 		t.Fatalf("loaded %d record(s), want %d", len(got.Collections), len(want.Collections))
 	}
 	for _, w := range want.Collections {
-		rec, ok := got.find(w.ManagedCollection)
+		rec, ok := got.Find(w.ManagedCollection)
 		if !ok {
 			t.Errorf("no record for %s survived the round trip", w.ManagedCollection)
 			continue
@@ -90,7 +91,7 @@ func TestFileAppliedStateStore_Save_ReplacesRatherThanTruncates(t *testing.T) {
 	path := filepath.Join(dir, "applied_state.json")
 	store := &FileAppliedStateStore{Path: path}
 
-	if err := store.Save(AppliedState{}.with("interno", "bge-m3@rev-a")); err != nil {
+	if err := store.Save(AppliedState{}.With("interno", "bge-m3@rev-a")); err != nil {
 		t.Fatalf("first Save: %v", err)
 	}
 	before, err := os.Stat(path)
@@ -98,7 +99,7 @@ func TestFileAppliedStateStore_Save_ReplacesRatherThanTruncates(t *testing.T) {
 		t.Fatalf("stat after first Save: %v", err)
 	}
 
-	if err := store.Save(AppliedState{}.with("interno", "bge-m3@rev-b")); err != nil {
+	if err := store.Save(AppliedState{}.With("interno", "bge-m3@rev-b")); err != nil {
 		t.Fatalf("second Save: %v", err)
 	}
 	after, err := os.Stat(path)
@@ -127,7 +128,7 @@ func TestFileAppliedStateStore_Save_ReplacesRatherThanTruncates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load after second Save: %v", err)
 	}
-	if rec, _ := state.find("interno"); rec.EmbeddingModel != "bge-m3@rev-b" {
+	if rec, _ := state.Find("interno"); rec.EmbeddingModel != "bge-m3@rev-b" {
 		t.Errorf("loaded revision %q, want %q", rec.EmbeddingModel, "bge-m3@rev-b")
 	}
 }
@@ -150,11 +151,41 @@ func TestFileAppliedStateStore_Save_UnwritableDirectory_ReportsTheFile(t *testin
 	}
 
 	path := filepath.Join(dir, "applied_state.json")
-	err := (&FileAppliedStateStore{Path: path}).Save(AppliedState{}.with("interno", "bge-m3@rev-a"))
+	err := (&FileAppliedStateStore{Path: path}).Save(AppliedState{}.With("interno", "bge-m3@rev-a"))
 	if err == nil {
 		t.Fatal("Save into a read-only directory = nil error, want a failure")
 	}
 	if !strings.Contains(err.Error(), path) {
 		t.Errorf("error %q does not name the file it failed to write (%s)", err, path)
+	}
+}
+
+// TestAppliedState_With_DoesNotMutateTheReceiver guards the property Apply relies on to leave the
+// loaded state untouched until every collection has succeeded.
+func TestAppliedState_With_DoesNotMutateTheReceiver(t *testing.T) {
+	loaded := AppliedState{}.With("interno", "rev-a")
+	updated := loaded.With("interno", "rev-b")
+
+	rec, _ := loaded.Find("interno")
+	if rec.EmbeddingModel != "rev-a" {
+		t.Errorf("with() changed the receiver: %q, want %q", rec.EmbeddingModel, "rev-a")
+	}
+	rec, _ = updated.Find("interno")
+	if rec.EmbeddingModel != "rev-b" {
+		t.Errorf("with() returned %q, want %q", rec.EmbeddingModel, "rev-b")
+	}
+}
+
+// TestAppliedState_With_KeepsRecordsSorted keeps the committed applied_state.json diff readable:
+// map iteration order must never reach the file.
+func TestAppliedState_With_KeepsRecordsSorted(t *testing.T) {
+	s := AppliedState{}.With("interno", "r").With("base_paga", "r").With("clientes", "r")
+
+	names := make([]string, len(s.Collections))
+	for i, c := range s.Collections {
+		names[i] = c.ManagedCollection
+	}
+	if !slices.IsSorted(names) {
+		t.Errorf("applied-state records are %v, want them sorted by collection name", names)
 	}
 }
