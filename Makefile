@@ -1,7 +1,15 @@
-.PHONY: test lint build test-integration
+.PHONY: test lint build test-integration cover
 
 test:
 	go test ./...
+
+# The coverage number S07's acceptance criterion names (≥80% for internal/retrieval, error paths
+# included). It runs the same hermetic suite as `test` above and then prints the per-function
+# breakdown, because a package total can clear 80% with every error branch untested — reading the
+# function list is what makes that visible.
+cover:
+	go test -coverprofile=cover.out ./...
+	go tool cover -func=cover.out
 
 # Tests behind the `integration` build tag need a live Qdrant, a real embedder and the real vault
 # corpus, so `make test` above cannot run them — and excluding them is only safe because this
