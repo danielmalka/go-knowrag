@@ -230,6 +230,36 @@ excluído é decisão declarada, desconhecido é erro.
 rejeitado — está ausente do schema publicado, então não é um valor que o modelo possa nomear,
 escrever errado, ou ser convencido a trocar por um trecho de nota hostil.
 
+## Quando a ingestão acontece
+
+**Só quando você roda o comando.** Não há gatilho, watcher de sistema de arquivos, daemon nem cron:
+`knowrag ingest` é um processo que começa, faz o trabalho e termina.
+
+Isso é escolha, não lacuna a ser tapada com um `while true`. A ingestão lê o vault inteiro, fala com
+um serviço de embedding e escreve num banco remoto; um watcher disparando a cada salvamento no
+Obsidian faria isso dezenas de vezes por sessão de escrita, e reindexar durante a edição gasta
+GPU e rede para indexar texto que ainda vai mudar.
+
+**Rodar de novo é seguro e converge.** Cada nota carrega uma fingerprint (`point_hash`) que cobre o
+texto do chunk, os metadados, a config do pipeline e a config confirmada do embedder. Uma nota cujos
+pontos batem é pulada sem escrever nada, então a segunda execução sobre um vault inalterado não
+reembeda — apenas verifica. A consequência prática é que **você não precisa saber o que mudou**:
+rode o comando e ele descobre.
+
+**O caminho normal é rodar quando fizer sentido para você** — depois de uma sessão de escrita, antes
+de uma pesquisa importante, ou por um agendador seu (`cron`, `systemd timer`, Task Scheduler)
+chamando o mesmo binário. O projeto não instala agendador nenhum, de propósito: quem sabe a cadência
+certa é quem escreve as notas.
+
+> **Limitação conhecida desta versão.** Verificar um corpus inalterado ainda leva minutos, não
+> segundos, porque cada nota é verificada individualmente. Para um agendador diário isso é
+> irrelevante; para rodar à mão esperando resposta, incomoda. A causa está medida e a correção
+> identificada.
+
+Não existe ainda ingestão parcial (`--only <glob>`), remoção de órfãos sob comando (`--prune`) nem
+lock de execução concorrente — está tudo especificado e ainda não implementado. **Não rode duas
+ingestões ao mesmo tempo contra a mesma collection** enquanto o lock não existir.
+
 ## O que suas notas precisam ter
 
 O sistema é **fail-closed**: uma nota fora do contrato faz o scan inteiro falhar, com o arquivo e a
