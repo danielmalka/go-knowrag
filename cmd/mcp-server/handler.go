@@ -64,7 +64,9 @@ func newServer(cfg Config, searcher Searcher) *mcp.Server {
 // values it advertises come from internal/schema's accessors — the single registry — instead of a
 // hand-copied list that goes stale the day an area is added.
 func toolDescription() string {
-	return "Search Daniel's indexed knowledge base and return the matching chunks as untrusted " +
+	// No owner name here. This string is public code and it is also shipped to whatever agent
+	// connects, so it describes the tool rather than whose notes it happens to hold.
+	return "Search the indexed knowledge base and return the matching chunks as untrusted " +
 		"retrieved content. Valid `area` values: " + strings.Join(canonicalAreas(), ", ") +
 		". Valid `type` values: " + strings.Join(canonicalNoteTypes(), ", ") + "."
 }

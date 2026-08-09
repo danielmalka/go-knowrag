@@ -147,6 +147,95 @@ sistema não finge que garante. Em vez de assumir escrita atômica, cada ponto �
 individualmente contra quatro condições, e qualquer estado parcial converge na execução seguinte.
 
 
+## Como rodar
+
+Três processos: o serviço de embedding (Python, precisa da GPU), o Qdrant (container), e os binários
+Go. O serviço de embedding é **residente** — carregar o modelo leva ~11 s, e um processo que carrega
+por consulta transformaria uma busca de 70 ms em uma de onze segundos.
+
+### 1. Qdrant
+
+```bash
+QDRANT_API_KEY=$(openssl rand -base64 32) docker compose up -d
+```
+
+O `docker-compose.yml` na raiz exige a variável e falha se ela faltar, em vez de subir um banco sem
+autenticação.
+
+### 2. Serviço de embedding
+
+```bash
+python3 -m venv ~/.venvs/knowrag && ~/.venvs/knowrag/bin/pip install FlagEmbedding
+~/.venvs/knowrag/bin/python scripts/embedder-service/server.py --port 7999
+```
+
+Ele recusa subir se o modelo não normalizar os vetores ou não devolver a metade esparsa — as duas
+propriedades de que o resto do pipeline depende, verificadas contra um vetor real no startup em vez
+de assumidas.
+
+Primeira execução baixa ~2,3 GB de pesos. Com cache, sobe em segundos. `--fp32` troca precisão por
+VRAM; o default é fp16, que ocupa ~1,2 GB.
+
+### 3. Provisionar o schema e ingerir
+
+```bash
+go build -o ~/bin/knowrag ./cmd/cli
+knowrag schema apply                 # idempotente: rodar de novo não escreve nada
+knowrag ingest --vault both --dry-run  # conta chunks sem gastar GPU nem rede
+knowrag ingest --vault both
+```
+
+### 4. Servidor MCP
+
+```bash
+go build -o ~/bin/knowrag-mcp ./cmd/mcp-server
+```
+
+Transporte stdio: o cliente MCP o executa como processo filho. Não abra porta, não rode como daemon.
+
+## Configuração
+
+Tudo por variável de ambiente, ou por arquivo YAML apontado por `KNOWRAG_CONFIG_FILE` com as mesmas
+chaves em `snake_case`. A obrigatoriedade é **por comando** — `schema apply` não exige as variáveis
+do embedder, que ele nunca usa.
+
+### CLI (`knowrag`)
+
+| Variável | Para quê |
+|---|---|
+| `QDRANT_ENDPOINT` | `host:6334` — gRPC, o único protocolo que o código fala |
+| `QDRANT_API_KEY` | chave do Qdrant |
+| `EMBEDDER_ENDPOINT` | URL do serviço de embedding, ex.: `http://127.0.0.1:7999` |
+| `DEFAULT_COLLECTION` | collection alvo |
+| `LOG_LEVEL` | opcional, default `info` |
+| `KNOWRAG_VAULT_<NOME>_PATH` | raiz do vault no disco |
+| `KNOWRAG_VAULT_<NOME>_EXCLUDE_FOLDERS` | pastas de 1º nível ignoradas, separadas por vírgula |
+| `KNOWRAG_VAULT_<NOME>_EXCLUDE_ROOT_FILES` | arquivos `.md` na raiz ignorados, separados por vírgula |
+
+As exclusões vêm de configuração, não do código: re-incluir uma pasta excluída é uma linha de
+config. Pasta de 1º nível que não está nem no mapa de áreas nem na lista de exclusão é **erro** —
+excluído é decisão declarada, desconhecido é erro.
+
+### Servidor MCP (`knowrag-mcp`)
+
+| Variável | Para quê |
+|---|---|
+| `MCP_QDRANT_ENDPOINT` | `host:6334` |
+| `MCP_QDRANT_API_KEY` | chave do Qdrant |
+| `MCP_EMBEDDER_ENDPOINT` | URL do serviço de embedding |
+| `MCP_COLLECTION` | collection consultada |
+| `MCP_TENANT_ID` | tenant de toda busca |
+
+`MCP_TENANT_ID` vem do ambiente e **não existe** como parâmetro da ferramenta. Não é validado e
+rejeitado — está ausente do schema publicado, então não é um valor que o modelo possa nomear,
+escrever errado, ou ser convencido a trocar por um trecho de nota hostil.
+
+### Um fork adapta dois pontos
+
+Os nomes de vault e o mapa de áreas são vocabulário fechado em `internal/schema/enums.go`, com um
+teste de arquitetura que recusa qualquer outro pacote redeclarando esses valores. Trocar os dois é a
+única mudança de código que um fork precisa antes de indexar as próprias notas.
+
 ## Licença
 
 MIT — ver [`LICENSE.md`](LICENSE.md).
