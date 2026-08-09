@@ -7,3 +7,8 @@ internal/schema/applied_state.json.tmp-*
 .env
 .env.*
 !.env.example
+
+# binarios compilados na raiz — `go build` sem -o deixa um com o nome do pacote
+/mcp-server
+/cli
+/knowrag
