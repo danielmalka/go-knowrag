@@ -347,6 +347,12 @@ func TestPayloadRoundTrip(t *testing.T) {
 // TestStore_NoExportedSearchFunction mirrors S07's own acceptance criterion from this side: search
 // belongs to internal/retrieval, and a query path growing in here would be a second place the
 // mandatory tenant_id filter has to be remembered.
+//
+// S07 T8 landed the fuller version of this check in architecture_test.go — an allowlist plus a
+// signature check, rather than a substring denylist — and sanctioned exactly one exception,
+// ExecuteQuery: it transcribes an already-finished retrieval.SearchRequest onto the wire and makes
+// no search decision of its own. This test keeps the cruder check as a second net and carries that
+// one exception; anything else matching the banned substrings still fails here.
 func TestStore_NoExportedSearchFunction(t *testing.T) {
 	entries, err := os.ReadDir(".")
 	if err != nil {
@@ -368,7 +374,7 @@ func TestStore_NoExportedSearchFunction(t *testing.T) {
 
 		for _, decl := range file.Decls {
 			fn, ok := decl.(*ast.FuncDecl)
-			if !ok || !fn.Name.IsExported() {
+			if !ok || !fn.Name.IsExported() || fn.Name.Name == "ExecuteQuery" {
 				continue
 			}
 			for _, banned := range []string{"Search", "Query", "Recommend", "Discover"} {

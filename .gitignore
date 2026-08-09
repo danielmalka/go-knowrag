@@ -1,5 +1,6 @@
 docs
 bin/
+cover.out
 internal/schema/applied_state.json.tmp-*
 
 # secrets — nunca commitar num repo publico
