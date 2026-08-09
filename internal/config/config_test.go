@@ -7,20 +7,24 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/danielmalka/go-knowrag/internal/schema"
 )
 
 // allEnvVars is every variable Load consults, required or not. Tests clear all of them so an
-// operator's ambient environment cannot make a case pass or fail by accident.
-var allEnvVars = []string{
-	"KNOWRAG_CONFIG_FILE",
-	"QDRANT_ENDPOINT",
-	"QDRANT_API_KEY",
-	"EMBEDDER_ENDPOINT",
-	"DEFAULT_COLLECTION",
-	"LOG_LEVEL",
-}
+// operator's ambient environment cannot make a case pass or fail by accident. It is derived from
+// the same `fields` slice Load reads rather than retyped, so a setting added there cannot be
+// forgotten here and start leaking the host's environment into a test.
+var allEnvVars = func() []string {
+	out := []string{configFileEnv}
+	for _, f := range fields {
+		out = append(out, f.env)
+	}
+	return out
+}()
 
 // clearEnv unsets every variable Load reads, restoring the originals when the test ends.
 // t.Setenv registers the restore; the immediate Unsetenv is what actually clears the value.
@@ -34,13 +38,18 @@ func clearEnv(t *testing.T) {
 	}
 }
 
-// setRequiredEnv sets every required variable to a recognizable value.
+// allNeeds is every Need bit, so a test can ask for "everything a command could require".
+const allNeeds = NeedQdrant | NeedCollection | NeedEmbedder | NeedVaultMalkaLife | NeedVaultMalkaWay
+
+// setRequiredEnv sets every variable some command requires to a recognizable value.
 func setRequiredEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("QDRANT_ENDPOINT", "qdrant.example:6334")
 	t.Setenv("QDRANT_API_KEY", "env-key")
 	t.Setenv("EMBEDDER_ENDPOINT", "http://embedder.example:8080")
 	t.Setenv("DEFAULT_COLLECTION", "knowrag_interno")
+	t.Setenv("KNOWRAG_VAULT_MALKALIFE_PATH", "/vaults/MalkaLife")
+	t.Setenv("KNOWRAG_VAULT_MALKAWAY_PATH", "/vaults/MalkaWay")
 }
 
 func writeConfigFile(t *testing.T, contents string) string {
@@ -59,6 +68,12 @@ qdrant_api_key: file-key
 embedder_endpoint: http://file-embedder:8080
 default_collection: knowrag_file
 log_level: debug
+vault_malkalife:
+  path: /vaults/MalkaLife
+  exclude_folders: PowerAI, resources
+  exclude_root_files: AGENTS.md
+vault_malkaway:
+  path: /vaults/MalkaWay
 `)
 	t.Setenv("KNOWRAG_CONFIG_FILE", path)
 
@@ -72,6 +87,12 @@ log_level: debug
 		EmbedderEndpoint:  "http://file-embedder:8080",
 		DefaultCollection: "knowrag_file",
 		LogLevel:          "debug",
+		VaultMalkaLife: VaultSettings{
+			Path:             "/vaults/MalkaLife",
+			ExcludeFolders:   "PowerAI, resources",
+			ExcludeRootFiles: "AGENTS.md",
+		},
+		VaultMalkaWay: VaultSettings{Path: "/vaults/MalkaWay"},
 	}
 	if *cfg != want {
 		t.Fatalf("Load() = %+v, want %+v", *cfg, want)
@@ -108,20 +129,31 @@ func TestLoad_AllRequiredPresent_ReturnsConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() returned error with no config file and all required vars set: %v", err)
 	}
+	if err := cfg.Require(allNeeds); err != nil {
+		t.Fatalf("Require(allNeeds) with every required var set: %v", err)
+	}
 	want := Config{
 		QdrantEndpoint:    "qdrant.example:6334",
 		QdrantAPIKey:      "env-key",
 		EmbedderEndpoint:  "http://embedder.example:8080",
 		DefaultCollection: "knowrag_interno",
 		LogLevel:          "info",
+		VaultMalkaLife:    VaultSettings{Path: "/vaults/MalkaLife"},
+		VaultMalkaWay:     VaultSettings{Path: "/vaults/MalkaWay"},
 	}
 	if *cfg != want {
 		t.Fatalf("Load() = %+v, want %+v", *cfg, want)
 	}
 }
 
-func TestLoad_MissingRequiredVar_ReturnsError(t *testing.T) {
-	missing := []string{"QDRANT_ENDPOINT", "QDRANT_API_KEY", "EMBEDDER_ENDPOINT", "DEFAULT_COLLECTION"}
+// TestRequire_MissingVar_ReturnsError asserts the check that used to live inside Load: every
+// setting some command requires, absent, is reported by name. It asks for every Need at once, which
+// is the "all of them" case the old all-or-nothing Load covered.
+func TestRequire_MissingVar_ReturnsError(t *testing.T) {
+	missing := []string{
+		"QDRANT_ENDPOINT", "QDRANT_API_KEY", "EMBEDDER_ENDPOINT", "DEFAULT_COLLECTION",
+		"KNOWRAG_VAULT_MALKALIFE_PATH", "KNOWRAG_VAULT_MALKAWAY_PATH",
+	}
 
 	for _, name := range missing {
 		t.Run(name, func(t *testing.T) {
@@ -132,13 +164,103 @@ func TestLoad_MissingRequiredVar_ReturnsError(t *testing.T) {
 			}
 
 			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() with %s unset returned an error; presence is Require's job: %v", name, err)
+			}
+			err = cfg.Require(allNeeds)
 			if err == nil {
-				t.Fatalf("Load() with %s unset = %+v, want an error", name, cfg)
+				t.Fatalf("Require(allNeeds) with %s unset = nil, want an error", name)
 			}
 			if !strings.Contains(err.Error(), name) {
-				t.Fatalf("Load() error %q does not name the missing variable %s", err, name)
+				t.Fatalf("Require error %q does not name the missing variable %s", err, name)
 			}
 		})
+	}
+}
+
+// TestRequire_OnlyChecksWhatTheCommandNeeds is the regression this refactor exists for: `schema
+// apply` talks to Qdrant and nothing else, and used to be refused for a missing EMBEDDER_ENDPOINT
+// it never reads. Adding the vault paths to a single global list would have made it demand a vault
+// too.
+func TestRequire_OnlyChecksWhatTheCommandNeeds(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("QDRANT_ENDPOINT", "qdrant.example:6334")
+	t.Setenv("QDRANT_API_KEY", "env-key")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load(): %v", err)
+	}
+	if err := cfg.Require(NeedQdrant); err != nil {
+		t.Fatalf("Require(NeedQdrant) with both Qdrant settings present: %v", err)
+	}
+	if err := cfg.Require(allNeeds); err == nil {
+		t.Fatal("Require(allNeeds) with only the Qdrant settings present = nil, want an error")
+	}
+}
+
+// TestRequire_ReportsEveryMissingSettingAtOnce keeps the operator from discovering the list one
+// restart at a time.
+func TestRequire_ReportsEveryMissingSettingAtOnce(t *testing.T) {
+	clearEnv(t)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load(): %v", err)
+	}
+	err = cfg.Require(NeedEmbedder | NeedVaultMalkaWay)
+	if err == nil {
+		t.Fatal("Require with nothing set = nil, want an error")
+	}
+	for _, name := range []string{"EMBEDDER_ENDPOINT", "KNOWRAG_VAULT_MALKAWAY_PATH"} {
+		if !strings.Contains(err.Error(), name) {
+			t.Errorf("Require error %q does not name %s", err, name)
+		}
+	}
+	// The needs not asked for must not appear: a message that lists settings the command does not
+	// read is what sent the operator to set EMBEDDER_ENDPOINT for a schema apply.
+	if strings.Contains(err.Error(), "QDRANT_ENDPOINT") {
+		t.Errorf("Require error %q names QDRANT_ENDPOINT, which NeedEmbedder|NeedVaultMalkaWay does not cover", err)
+	}
+}
+
+// TestVaultOf_MapsEachVaultToItsSettings pins the accessor the CLI routes through. An unregistered
+// vault must yield a zero Need, so Require is told there is nothing to check rather than silently
+// requiring the wrong vault's path.
+func TestVaultOf_MapsEachVaultToItsSettings(t *testing.T) {
+	cfg := &Config{
+		VaultMalkaLife: VaultSettings{Path: "/vaults/MalkaLife"},
+		VaultMalkaWay:  VaultSettings{Path: "/vaults/MalkaWay"},
+	}
+
+	life, lifeNeed := cfg.VaultOf(schema.VaultMalkaLife())
+	if life.Path != "/vaults/MalkaLife" || lifeNeed != NeedVaultMalkaLife {
+		t.Errorf("VaultOf(MalkaLife) = %v, %d", life, lifeNeed)
+	}
+	way, wayNeed := cfg.VaultOf(schema.VaultMalkaWay())
+	if way.Path != "/vaults/MalkaWay" || wayNeed != NeedVaultMalkaWay {
+		t.Errorf("VaultOf(MalkaWay) = %v, %d", way, wayNeed)
+	}
+	if unknown, need := cfg.VaultOf(schema.Vault{}); unknown != (VaultSettings{}) || need != 0 {
+		t.Errorf("VaultOf(unregistered) = %v, %d, want the zero settings and a zero Need", unknown, need)
+	}
+}
+
+// TestVaultSettings_SplitLists pins the comma-separated encoding the env vars carry, including the
+// entries that must be dropped: a trailing comma is a typo, and an exclusion of "" would match
+// nothing while looking like it matched something.
+func TestVaultSettings_SplitLists(t *testing.T) {
+	v := VaultSettings{
+		ExcludeFolders:   " PowerAI, resources ,,templates ",
+		ExcludeRootFiles: "",
+	}
+
+	wantFolders := []string{"PowerAI", "resources", "templates"}
+	if got := v.Folders(); !slices.Equal(got, wantFolders) {
+		t.Errorf("Folders() = %q, want %q", got, wantFolders)
+	}
+	if got := v.RootFiles(); len(got) != 0 {
+		t.Errorf("RootFiles() on an empty setting = %q, want nothing", got)
 	}
 }
 

@@ -27,13 +27,14 @@ func main() {
 	root := &cobra.Command{
 		Use:   "knowrag",
 		Short: "Operator CLI for the knowledge layer",
-		Long:  "knowrag ingests Obsidian vaults into Qdrant and evaluates what comes back out.\nOnly schema provisioning is wired up so far; ingestion and evaluation arrive with their stories.",
+		Long:  "knowrag ingests Obsidian vaults into Qdrant and evaluates what comes back out.\nSchema provisioning and ingestion are wired up; evaluation arrives with its story.",
 		Args:  cobra.NoArgs,
 		// Runnable with no subcommand given, so a bare invocation prints usage instead of an
 		// empty Usage block.
 		RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() },
 	}
 	root.AddCommand(newSchemaCmd(cfg))
+	root.AddCommand(newIngestCmd(cfg))
 	// Cobra prints its own message for a bad flag or unknown subcommand; the extra copy Execute
 	// would return here is noise.
 	root.SilenceErrors = true

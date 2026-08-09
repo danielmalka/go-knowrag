@@ -45,6 +45,18 @@ func newSchemaCmd(cfg *config.Config) *cobra.Command {
 			// Flag and argument errors happen before this line and still print usage.
 			cmd.SilenceUsage = true
 
+			// Ask the central requirement check, not just the constructor's own guards. Those
+			// guards fail one field at a time, so an operator setting up a new host learns about
+			// the missing API key only after fixing the endpoint and running again. This reports
+			// the whole list in one pass — which is the reason Require exists.
+			//
+			// It also keeps `schema apply` honest as NeedQdrant grows: today the constructor
+			// happens to check the same two fields, so skipping this changed nothing. A third
+			// field added to NeedQdrant would be enforced for `ingest` and silently optional here.
+			if err := cfg.Require(config.NeedQdrant); err != nil {
+				return err
+			}
+
 			client, err := store.NewQdrantClient(store.Config{
 				Endpoint: cfg.QdrantEndpoint,
 				APIKey:   cfg.QdrantAPIKey,

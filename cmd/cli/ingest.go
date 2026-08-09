@@ -1,0 +1,336 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"strings"
+	"time"
+
+	"github.com/spf13/cobra"
+
+	"github.com/danielmalka/go-knowrag/internal/chunk"
+	"github.com/danielmalka/go-knowrag/internal/config"
+	"github.com/danielmalka/go-knowrag/internal/embed"
+	"github.com/danielmalka/go-knowrag/internal/ingest"
+	"github.com/danielmalka/go-knowrag/internal/schema"
+	"github.com/danielmalka/go-knowrag/internal/store"
+	"github.com/danielmalka/go-knowrag/internal/vault"
+)
+
+// bothVaults is the --vault value that means "every registered vault". It is spelled here rather
+// than taken from internal/schema because it is not a vault: it is this flag's word for all of
+// them, and schema.AllVaults() is what it resolves to.
+const bothVaults = "both"
+
+// defaultTenantID is the tenant this build populates. The CLI is privileged by declaration
+// (ADR-002 §2.4) — it may write any tenant — so the value is a flag with a default rather than a
+// setting an operator has to repeat on every run.
+const defaultTenantID = "interno"
+
+// The clamp bounds default to PRD §2.8's starting range, not to a measured optimum: S03 T10's
+// calibration report has not landed, so there is no measured optimum to default to. They are flags
+// because they feed point_hash — a run at other bounds reindexes what it touches, and that has to
+// be something an operator states, not something they discover.
+const (
+	defaultFloorTokens   = 256
+	defaultCeilingTokens = 1024
+)
+
+// upsertAttempts bounds the retry of a non-confirmed write (ingest.Deps.UpsertAttempts). Three is
+// enough to ride out a dropped connection and few enough that an unreachable Qdrant fails the run
+// instead of hanging it.
+const upsertAttempts = 3
+
+// newIngestCmd builds `ingest`.
+//
+// cfg is read at run time, not at build time, so the command tree assembles and prints its help
+// without a valid configuration — same reason as newSchemaCmd.
+func newIngestCmd(cfg *config.Config) *cobra.Command {
+	opts := ingestOptions{
+		vaultFlag: bothVaults,
+		tenantID:  defaultTenantID,
+		chunkCfg: chunk.Config{
+			FloorTokens:   defaultFloorTokens,
+			CeilingTokens: defaultCeilingTokens,
+		},
+	}
+
+	cmd := &cobra.Command{
+		Use:   "ingest",
+		Short: "Scan the vaults and bring Qdrant in line with them",
+		Long: "ingest scans each selected vault, chunks every note, embeds what changed and writes it,\n" +
+			"pruning the stale tail of a note that got shorter. Re-running it over an unchanged corpus\n" +
+			"writes nothing: a note whose points are all integral is skipped.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			// From here on every error is a runtime failure — bad config, unreachable service,
+			// a note that breaks the contract — and printing the usage block after it buries the
+			// message that matters. Flag errors happen before this line and still print usage.
+			cmd.SilenceUsage = true
+			return runIngest(cmd.Context(), cmd.OutOrStdout(), cfg, opts)
+		},
+	}
+
+	cmd.Flags().StringVar(&opts.vaultFlag, "vault", opts.vaultFlag,
+		fmt.Sprintf("which vault to ingest: %s, or %s for all of them",
+			strings.Join(vaultNames(), "|"), bothVaults))
+	cmd.Flags().BoolVar(&opts.dryRun, "dry-run", false,
+		"scan and chunk, then stop: report the counts without embedding or writing anything")
+	cmd.Flags().StringVar(&opts.tenantID, "tenant", opts.tenantID,
+		"tenant_id every point is written under and filtered by")
+	cmd.Flags().IntVar(&opts.chunkCfg.FloorTokens, "floor-tokens", opts.chunkCfg.FloorTokens,
+		"merge consecutive sibling sections below this many tokens")
+	cmd.Flags().IntVar(&opts.chunkCfg.CeilingTokens, "ceiling-tokens", opts.chunkCfg.CeilingTokens,
+		"split a section above this many tokens")
+
+	return cmd
+}
+
+// ingestOptions is the parsed flag set, in one value so runIngest takes what the command collected
+// and a test wires it once.
+type ingestOptions struct {
+	vaultFlag string
+	dryRun    bool
+	tenantID  string
+	chunkCfg  chunk.Config
+}
+
+// vaultNames lists the registered vault slugs for the flag's help text. It reads schema.AllVaults()
+// rather than spelling them, because a second list of vault names is a second place to update the
+// day a third vault exists (internal/schema owns the set — see enums.go).
+func vaultNames() []string {
+	all := schema.AllVaults()
+	names := make([]string, len(all))
+	for i, v := range all {
+		names[i] = v.String()
+	}
+	return names
+}
+
+// selectVaults resolves the --vault flag.
+func selectVaults(flag string) ([]schema.Vault, error) {
+	if flag == bothVaults {
+		return schema.AllVaults(), nil
+	}
+	v, ok := schema.ParseVault(flag)
+	if !ok {
+		return nil, fmt.Errorf("--vault %q is not a vault; use one of %s, or %s",
+			flag, strings.Join(vaultNames(), ", "), bothVaults)
+	}
+	return []schema.Vault{v}, nil
+}
+
+func runIngest(ctx context.Context, out io.Writer, cfg *config.Config, opts ingestOptions) error {
+	vaults, err := selectVaults(opts.vaultFlag)
+	if err != nil {
+		return err
+	}
+
+	// What the run requires depends on what the run does. A dry run never opens a connection to
+	// Qdrant, so demanding its endpoint and key would refuse a command that has no use for them —
+	// the same defect that used to refuse `schema apply` for a missing EMBEDDER_ENDPOINT. The
+	// embedder is required either way: the clamp counts real BGE-M3 tokens over /tokenize and
+	// refuses to approximate, so even a dry run talks to the service.
+	need := config.NeedEmbedder
+	if !opts.dryRun {
+		need |= config.NeedQdrant | config.NeedCollection
+	}
+	for _, v := range vaults {
+		_, vaultNeed := cfg.VaultOf(v)
+		need |= vaultNeed
+	}
+	if err := cfg.Require(need); err != nil {
+		return err
+	}
+
+	tokens, err := chunk.NewHTTPTokenCounter(cfg.EmbedderEndpoint)
+	if err != nil {
+		return err
+	}
+
+	scans, err := scanVaults(cfg, vaults)
+	if err != nil {
+		return err
+	}
+	// Before anything is embedded or written, in both modes. The point ID is
+	// uuid5(tenant_id + uid + chunk_index) and does not include `vault`, so a uid repeated across
+	// the two vaults collides and the second upsert overwrites the first in silence.
+	//
+	// ponytail: ingest.Orchestrate runs this check again on the write path. The repetition is a map
+	// over ~730 uids and it is what makes the dry run — which never reaches Orchestrate — report
+	// the collision instead of a clean count.
+	if err := checkCrossVault(scans); err != nil {
+		return err
+	}
+
+	if opts.dryRun {
+		return dryRun(ctx, out, scans, opts.chunkCfg, tokens)
+	}
+	return ingestScans(ctx, out, cfg, opts, scans, tokens)
+}
+
+// scanVaults turns each selected vault into a ScanResult, with the exclusions the operator
+// configured. A vault that fails the contract fails the run before any other vault is read: the
+// scan reports every offending note at once, and ingesting half a corpus while the other half is
+// unreadable is not a partial success.
+func scanVaults(cfg *config.Config, vaults []schema.Vault) ([]vault.ScanResult, error) {
+	scans := make([]vault.ScanResult, 0, len(vaults))
+	for _, v := range vaults {
+		settings, _ := cfg.VaultOf(v)
+		scan, err := vault.ScanVault(settings.Path, v, vault.Exclusions{
+			Folders:   settings.Folders(),
+			RootFiles: settings.RootFiles(),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("scanning vault %s at %s: %w", v, settings.Path, err)
+		}
+		scans = append(scans, scan)
+	}
+	return scans, nil
+}
+
+func checkCrossVault(scans []vault.ScanResult) error {
+	for i := range scans {
+		for j := i + 1; j < len(scans); j++ {
+			if err := vault.CheckCrossVaultDuplicateUIDs(scans[i], scans[j]); err != nil {
+				return fmt.Errorf("vaults %s and %s: %w", scans[i].Vault, scans[j].Vault, err)
+			}
+		}
+	}
+	return nil
+}
+
+// dryRun chunks everything and writes nothing, so an operator can see the size of a run — how many
+// notes, how many chunks, how many chunks the model will be asked to embed — before spending the
+// GPU and the network on it.
+//
+// It still counts real tokens, which is what makes the number trustworthy: a dry run against an
+// approximate counter would report a chunk count the real run does not produce.
+func dryRun(
+	ctx context.Context,
+	out io.Writer,
+	scans []vault.ScanResult,
+	cfg chunk.Config,
+	tokens chunk.TokenCounter,
+) error {
+	totalNotes, totalChunks, totalOversize := 0, 0, 0
+	var failures []error
+
+	for _, scan := range scans {
+		notes, chunks, oversize := 0, 0, 0
+		for _, n := range scan.Notes {
+			cs, err := chunk.ChunkNote(ctx, n, cfg, tokens)
+			if err != nil {
+				failures = append(failures, err)
+				continue
+			}
+			notes++
+			chunks += len(cs)
+			for _, c := range cs {
+				if c.Oversize {
+					oversize++
+				}
+			}
+		}
+		_, _ = fmt.Fprintf(out, "%s: %d note(s), %d skipped, %d chunk(s), %d oversize\n",
+			scan.Vault, notes, len(scan.Skipped), chunks, oversize)
+		totalNotes += notes
+		totalChunks += chunks
+		totalOversize += oversize
+	}
+
+	_, _ = fmt.Fprintf(out,
+		"dry run: %d note(s), %d chunk(s) to embed, %d oversize — nothing was embedded or written\n",
+		totalNotes, totalChunks, totalOversize)
+
+	for _, err := range failures {
+		_, _ = fmt.Fprintf(out, "  - %v\n", err)
+	}
+	if len(failures) > 0 {
+		return fmt.Errorf("%d note(s) could not be chunked", len(failures))
+	}
+	return nil
+}
+
+// ingestScans runs the real thing: handshake, then embed and write.
+//
+// The handshake is not a health check placed here for tidiness. Deps.Handshake feeds point_hash and
+// must carry what the backend *confirmed*, never what this build expects — a service quietly
+// serving an unpinned revision would otherwise poison every point_hash in the run, and the poisoned
+// points would look integral forever. So it runs before the first write, and a divergence aborts
+// with nothing written.
+func ingestScans(
+	ctx context.Context,
+	out io.Writer,
+	cfg *config.Config,
+	opts ingestOptions,
+	scans []vault.ScanResult,
+	tokens chunk.TokenCounter,
+) error {
+	client, err := store.NewQdrantClient(store.Config{
+		Endpoint: cfg.QdrantEndpoint,
+		APIKey:   cfg.QdrantAPIKey,
+	})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = client.Close() }()
+
+	points, err := store.NewClient(client, cfg.DefaultCollection)
+	if err != nil {
+		return err
+	}
+
+	transport, err := embed.NewHTTPTransport(cfg.EmbedderEndpoint)
+	if err != nil {
+		return err
+	}
+	embedder, err := embed.NewServiceEmbedder(embedProfile(cfg.EmbedderEndpoint), transport)
+	if err != nil {
+		return err
+	}
+
+	handshake, err := embedder.Handshake(ctx)
+	if err != nil {
+		return fmt.Errorf("embedder handshake: %w", err)
+	}
+
+	report, err := ingest.Orchestrate(ctx, ingest.Deps{
+		TenantID:       opts.tenantID,
+		Store:          points,
+		Embedder:       embedder,
+		Handshake:      handshake,
+		Chunk:          opts.chunkCfg,
+		Tokens:         tokens,
+		UpsertAttempts: upsertAttempts,
+	}, scans...)
+	if err != nil {
+		return err
+	}
+
+	// Printed before the failure check because a run with failures still did whatever it did to the
+	// notes it got through, and the operator needs to see that half.
+	_, _ = fmt.Fprintln(out, report)
+	if report.Failed() {
+		return errors.New("the run did not complete: see the failed note(s) above")
+	}
+	return nil
+}
+
+// embedProfile is how this command talks to the embedding service. The values are the client's,
+// not the model's: BatchSize is how many chunks go in one request, MaxConcurrent how many requests
+// are in flight against a single resident GPU, and Timeout bounds one attempt rather than the run.
+//
+// ponytail: not configurable. Nothing has yet needed a second set of numbers; promote them to
+// settings when a deployment does.
+func embedProfile(endpoint string) embed.Profile {
+	return embed.Profile{
+		Endpoint:      endpoint,
+		Timeout:       2 * time.Minute,
+		BatchSize:     32,
+		MaxConcurrent: 2,
+		MaxRetries:    3,
+	}
+}
