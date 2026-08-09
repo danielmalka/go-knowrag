@@ -12,8 +12,13 @@ Não é "aponte para qualquer pasta e funciona": os enums de frontmatter e o map
 são fechados na especificação, e pasta de primeiro nível fora do mapa é erro explícito, não `area`
 vazia. Um fork adapta esses dois pontos antes de indexar suas próprias notas.
 
-> **Status: especificação completa, implementação não iniciada.** Tudo abaixo descreve o sistema
-> como está especificado — PRD, stories e ADRs —, não código rodando.
+> **Status: pipeline funcionando ponta a ponta.** Ingestão, busca híbrida e o servidor MCP estão
+> implementados e rodando contra um corpus real. O que falta são os modos de ingestão (`S06b`), a CLI
+> de operador (`S09`) e as stories de garantia e deploy (`S10`–`S12`).
+>
+> Medido numa instalação real: 730 notas viram 3.647 chunks indexados; ingestão completa em ~13 min;
+> busca de query em ~70 ms (p99). Um gate de performance **não** passa — reingestão incremental leva
+> ~7 min contra um orçamento de 60 s, com a causa medida e a correção identificada.
 
 > **Motivação: organização própria.** O projeto está totalmente disponível para inspiração e forks, fiquem à vontade para fazer suas cópias e alterar o que for preciso, pois ele está totalmente voltado para minha própria organização pessoal.
 > Disponibilizado para compreensão de uso de RAG e para portifolio próprio.
