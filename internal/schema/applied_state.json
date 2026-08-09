@@ -1,0 +1,19 @@
+{
+  "collections": [
+    {
+      "managed_collection": "base_paga",
+      "embedding_model": "5617a9f61b028005a4858fdac845db406aefb181",
+      "applied_at": "2026-08-09T03:26:21.780129651Z"
+    },
+    {
+      "managed_collection": "clientes",
+      "embedding_model": "5617a9f61b028005a4858fdac845db406aefb181",
+      "applied_at": "2026-08-09T03:26:20.148596537Z"
+    },
+    {
+      "managed_collection": "interno",
+      "embedding_model": "5617a9f61b028005a4858fdac845db406aefb181",
+      "applied_at": "2026-08-09T03:26:18.520854264Z"
+    }
+  ]
+}
