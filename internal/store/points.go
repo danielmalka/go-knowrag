@@ -180,3 +180,57 @@ func scopeConditions(tenantID string, uid uuid.UUID) []*qdrant.Condition {
 		qdrant.NewMatchKeyword("uid", uid.String()),
 	}
 }
+
+// ScrollTenant returns every point of tenantID, grouped by uid.
+//
+// It exists because the integrity check is a read of the whole corpus asked one note at a time: a
+// re-ingestion that changes nothing still paid one round trip per note, and against a Qdrant across
+// a 257 ms link that made re-verifying 730 unchanged notes take 477 s against NFR-5's 60 s budget.
+// The scroll is the same data by the same filter; what changes is that it crosses the network in
+// pages instead of in notes.
+//
+// Grouping happens here rather than at the caller because the caller's question is per uid, and a
+// flat slice would make every caller write the same grouping loop. A uid the tenant has no points
+// for is simply absent from the map, which is the same answer ScrollByUID gives as an empty slice.
+func (c *Client) ScrollTenant(ctx context.Context, tenantID string) (map[uuid.UUID][]ingest.PointRecord, error) {
+	out := map[uuid.UUID][]ingest.PointRecord{}
+	var offset *qdrant.PointId
+
+	for {
+		page, next, err := c.api.ScrollAndOffset(ctx, &qdrant.ScrollPoints{
+			CollectionName: c.collection,
+			Filter: &qdrant.Filter{
+				Must: []*qdrant.Condition{qdrant.NewMatchKeyword("tenant_id", tenantID)},
+			},
+			Limit:       qdrant.PtrOf(uint32(scrollPageSize)),
+			Offset:      offset,
+			WithPayload: qdrant.NewWithPayload(true),
+			WithVectors: qdrant.NewWithVectors(false),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("scrolling tenant %s in %s: %w", tenantID, c.collection, err)
+		}
+		for _, p := range page {
+			rec, err := unmarshalPayload(p.GetPayload())
+			if err != nil {
+				return nil, fmt.Errorf("scrolling tenant %s in %s: point %s: %w",
+					tenantID, c.collection, p.GetId(), err)
+			}
+			// uid comes back through the payload, not through PointRecord: the record type is
+			// deliberately keyed by nothing, because every other read already knows which uid it
+			// asked for. This is the one read that does not, so it recovers the key here rather
+			// than widening the type for one caller.
+			raw, _ := rec.Fields["uid"].(string)
+			id, perr := uuid.Parse(raw)
+			if perr != nil {
+				return nil, fmt.Errorf("scrolling tenant %s in %s: point %s has uid %q: %w",
+					tenantID, c.collection, p.GetId(), raw, perr)
+			}
+			out[id] = append(out[id], rec)
+		}
+		if next == nil || len(page) == 0 {
+			return out, nil
+		}
+		offset = next
+	}
+}
