@@ -18,6 +18,10 @@ import (
 // note, because a batch of 730 notes that stops at the first bad frontmatter is a batch nobody can
 // finish.
 func RunBatch(ctx context.Context, d Deps, notes []vault.Note) (Report, error) {
+	// One snapshot for the whole batch instead of one round trip per note. See withPrefetch: it
+	// changes only how current state is read, and degrades to the per-note path if the store cannot
+	// produce a snapshot.
+	d = withPrefetch(ctx, d)
 	if err := d.Validate(); err != nil {
 		return Report{}, err
 	}
