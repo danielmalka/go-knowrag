@@ -155,9 +155,16 @@ func (e *ServiceEmbedder) embedSubBatch(ctx context.Context, texts []string, dst
 	}
 	// Validated exactly as it arrived. The service already emits sparse pairs sorted by index with
 	// no zero weights and no repeated ids, and that is a contract between the two sides rather than
-	// a convenience: the sparse vector feeds point_hash, so an unstable order would make an
-	// unchanged note look changed on every run. Sorting here would silently absorb the day the
-	// server stops holding up its end — which is the one thing that must not happen quietly.
+	// a convenience.
+	//
+	// This comment used to justify that by saying the sparse vector feeds point_hash, and it does
+	// not: ComputePointHash takes note metadata, chunk text, the pipeline config and the seven
+	// handshake fields, and `embedder_sparse_params` among them is the static {kind, id_space} the
+	// handshake declares — no per-chunk index or weight enters the hash. What an unstable order
+	// actually corrupts is the vector written to Qdrant, so the damage lands on hybrid retrieval,
+	// which returns worse results and says nothing. The reason to validate rather than sort here is
+	// unchanged and is the reason that matters: sorting would silently absorb the day the server
+	// stops holding up its end, and that is the one thing that must not happen quietly.
 	for i, item := range raw {
 		if err := validateEmbedding(item); err != nil {
 			return &ItemError{Index: offset + i, Err: err}
