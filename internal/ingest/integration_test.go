@@ -4,7 +4,6 @@ package ingest_test
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -63,8 +62,8 @@ const (
 // 70 s is a slower or busier machine — 33,7 s was itself measured with other work running, against
 // 27,3 s on an idle one. A no-op at 400 s is D-22 coming back.
 const (
-	measuredFullRun = "7m52s on 2026-08-10, against 12m54s that morning before D-22 was paid"
-	measuredNoop    = "33,7 s on 2026-08-10, against 403 s that morning before D-22 was paid"
+	measuredFullRun = "7m52s over 734 notes on 2026-08-10, against 12m54s that morning before D-22 was paid"
+	measuredNoop    = "33,7 s over 734 notes on 2026-08-10, against 403 s that morning before D-22 was paid"
 )
 
 // minCorpusNotes is the floor that keeps a green run from being a vacuous one. A gate that passed
@@ -74,9 +73,24 @@ const (
 // it.
 const minCorpusNotes = 100
 
-// throwawayTenantPrefix marks the tenants NFR-4 creates and deletes. deleteTenant refuses anything
-// without it, so the only names this file can destroy are the ones it invented.
-const throwawayTenantPrefix = "nfr4-fullrun-"
+// throwawayTenantPrefix marks the tenant NFR-4 creates and deletes. deleteTenant refuses anything
+// without it, so the only name this file can destroy is the one it invented.
+const throwawayTenantPrefix = "nfr4-fullrun"
+
+// throwawayTenant is deliberately a constant and not a unique name per run.
+//
+// The cleanup that removes it is a t.Cleanup, and t.Cleanup does not run when `go test -timeout`
+// fires — the alarm panics from another goroutine and takes the process down — nor when an operator
+// interrupts an eight-minute run with Ctrl-C, because the testing package installs no signal
+// handler. Both are plausible here. With a unique name per run, every one of those interruptions
+// would leave another tenant's worth of points in the collection the owner actually uses, growing
+// without bound and with nothing to sweep them.
+//
+// A fixed name bounds that at one: the test deletes it before it starts as well as after it ends, so
+// the debris of an interrupted run is cleaned by the next one instead of accumulating. The cost is
+// that two of these tests cannot run against the same deployment at the same time, which is true of
+// a single-operator gate anyway.
+const throwawayTenant = throwawayTenantPrefix + "-scratch"
 
 // These mirror cmd/cli/ingest.go verbatim, and have to keep mirroring it. The clamp bounds feed
 // point_hash, so a run at other bounds reindexes everything and measures a different thing entirely;
@@ -96,22 +110,46 @@ func TestIngestRealCorpus_FullRun(t *testing.T) {
 	cfg := realDeployment(t)
 
 	// A full run means every note gets written, and against the tenant the operator populates every
-	// note is already integral — timing that would be a no-op wearing NFR-4's name. So the run
-	// targets a tenant that has never existed. tenant_id is part of the point ID (schema.PointID),
-	// so nothing written here can collide with the real points, and the cleanup below removes the
-	// whole tenant in one filtered delete.
-	tenant := fmt.Sprintf("%s%d", throwawayTenantPrefix, time.Now().UnixNano())
+	// note is already integral — timing that would be a no-op wearing NFR-4's name. So the run targets
+	// a throwaway tenant instead. tenant_id is part of the point ID (schema.PointID), so nothing
+	// written here can collide with the real points.
+	//
+	// It is emptied before as well as after. Starting empty is what makes every note a write, and the
+	// debris of a previous run that a timeout or a Ctrl-C prevented from cleaning up is exactly what
+	// would leave some of them integral — see throwawayTenant for why that debris is expected rather
+	// than hypothetical.
+	tenant := throwawayTenant
+	deleteTenant(t, cfg, tenant)
 	t.Cleanup(func() { deleteTenant(t, cfg, tenant) })
 
 	report, elapsed := ingestOnce(t, cfg, tenant)
 	assertRealCorpus(t, report)
 
-	// Every note reaches StatePruned on a tenant that started empty: nothing can be integral, the
-	// write is confirmed, and the prune runs unconditionally after it. Any other distribution means
-	// the run did less work than NFR-4 is about, and its duration says nothing.
-	if pruned, total := report.Count(ingest.StatePruned), len(report.Results); pruned != total {
-		t.Fatalf("a first run over an empty tenant wrote and pruned only %d of %d note(s), so its "+
-			"duration is not a full ingestion:\n%s", pruned, total, report)
+	// On a tenant that started empty, a note with chunks cannot be integral, so it is written and then
+	// pruned. A note that chunks to *nothing* — valid frontmatter over an empty or whitespace-only
+	// body — expects no points at all, and the integrity check is then satisfied by vacuity (no
+	// record is missing from an empty set, and the counts match at zero), so it skips even here.
+	//
+	// That is correct behaviour and not a failed write, and the assertion has to tell the two apart.
+	// The corpus has no such note today, which is exactly why this matters: written as a flat
+	// `pruned == total`, the first stub note somebody starts and does not finish turns NFR-4 red with
+	// a message about the write path.
+	written, emptyBody := 0, 0
+	for _, r := range report.Results {
+		switch {
+		case r.Chunks == 0 && r.State == ingest.StateSkipped:
+			emptyBody++
+		case r.Chunks > 0 && r.State == ingest.StatePruned:
+			written++
+		default:
+			t.Fatalf("%s produced %d chunk(s) and ended in state %s, which a first run over an empty "+
+				"tenant cannot produce:\n%s", r.Path, r.Chunks, r.State, report)
+		}
+	}
+	if written < minCorpusNotes {
+		t.Fatalf("only %d note(s) were actually written (%d had empty bodies), below the %d this gate "+
+			"treats as a real corpus — its duration is not a full ingestion:\n%s",
+			written, emptyBody, minCorpusNotes, report)
 	}
 
 	// The report is this process's account of what it did; the count is the server's. They disagree
@@ -193,6 +231,18 @@ func ingestOnce(t *testing.T, cfg *config.Config, tenant string) (ingest.Report,
 			t.Fatalf("scanning vault %s at %s: %v", v, settings.Path, err)
 		}
 		scans = append(scans, scan)
+	}
+
+	// runIngest refuses to write when a uid repeats across the two vaults, because the point ID does
+	// not include the vault and the second upsert would overwrite the first in silence. Mirroring the
+	// timing without mirroring that check would let this gate report a clean pass over a corpus the
+	// real command declines to ingest at all.
+	for i := range scans {
+		for j := i + 1; j < len(scans); j++ {
+			if err := vault.CheckCrossVaultDuplicateUIDs(scans[i], scans[j]); err != nil {
+				t.Fatalf("vaults %s and %s: %v", scans[i].Vault, scans[j].Vault, err)
+			}
+		}
 	}
 
 	tokenizer, err := chunk.NewHTTPTokenCounter(cfg.EmbedderEndpoint)
