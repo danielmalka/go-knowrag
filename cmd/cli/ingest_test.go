@@ -158,7 +158,10 @@ func TestRunIngest_DryRun_ReportsCountsAndNeedsNoQdrant(t *testing.T) {
 	}
 
 	got := out.String()
-	for _, want := range []string{"2 note(s)", "2 chunk(s) to embed", "nothing was embedded or written"} {
+	// "tokenizer:" is the D-25 instrument's line. It is asserted here and not only in the counter's
+	// own unit test because the counter can keep counting perfectly while nobody prints the number,
+	// and a measurement nobody reads is the same as no measurement.
+	for _, want := range []string{"2 note(s)", "2 chunk(s) to embed", "nothing was embedded or written", "tokenizer:"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("dry-run output %q does not contain %q", got, want)
 		}

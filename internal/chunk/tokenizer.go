@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -168,4 +169,65 @@ func (c *HTTPTokenCounter) countOnce(ctx context.Context, text string) (int, err
 			c.endpoint, len(decoded.Counts)), false
 	}
 	return decoded.Counts[0], nil, false
+}
+
+// CountingTokenCounter wraps a TokenCounter and records how many times it was asked, how much text
+// it measured, and how long it spent answering. D-25 (docs/debitos-tecnicos.md) found that a
+// `--dry-run` spends 388 of 403 seconds in chunking without knowing why — this is the instrument
+// that answers "why" before anyone reaches for a fix like memoizing the clamp.
+//
+// The counters are atomic rather than plain fields even though ingest.RunBatch processes notes one
+// at a time today: proving that stays true at every call site is more work than a type that does not
+// need it to.
+type CountingTokenCounter struct {
+	next  TokenCounter
+	calls atomic.Int64
+	bytes atomic.Int64
+	nanos atomic.Int64
+}
+
+// NewCountingTokenCounter wraps tc. It does not replace tc's decisions — a call still goes to tc and
+// returns exactly what tc returned — it only counts.
+func NewCountingTokenCounter(tc TokenCounter) *CountingTokenCounter {
+	return &CountingTokenCounter{next: tc}
+}
+
+func (c *CountingTokenCounter) CountTokens(ctx context.Context, text string) (int, error) {
+	start := time.Now()
+	n, err := c.next.CountTokens(ctx, text)
+	c.calls.Add(1)
+	c.bytes.Add(int64(len(text)))
+	c.nanos.Add(int64(time.Since(start)))
+	return n, err
+}
+
+// TokenCounterStats is a read of CountingTokenCounter's counters at one point in time, taken once
+// the run that accumulated them is done.
+type TokenCounterStats struct {
+	Calls int64
+	Bytes int64
+
+	// Spent is wall time inside CountTokens, which for HTTPTokenCounter includes the retry backoff
+	// above (500 ms per retriable failure, up to three attempts) and not only the service's own
+	// answer. A run that survives an embedder restart mid-scan — observed for real, ~75 consecutive
+	// notes — reports a Spent inflated by seconds of sleeping, and nothing in the number says so.
+	// Read it as "time the clamp waited on the tokenizer", not "time the tokenizer worked": the
+	// difference matters because D-25 exists to stop this project treating one measured part as if
+	// it explained the whole, which is the error D-22 recorded twice.
+	Spent time.Duration
+}
+
+// Snapshot reads the counters. Safe to call while CountTokens is still being called elsewhere — the
+// three loads are independent and a run summary printed after the last call sees the final values.
+func (c *CountingTokenCounter) Snapshot() TokenCounterStats {
+	return TokenCounterStats{
+		Calls: c.calls.Load(),
+		Bytes: c.bytes.Load(),
+		Spent: time.Duration(c.nanos.Load()),
+	}
+}
+
+func (s TokenCounterStats) String() string {
+	return fmt.Sprintf("tokenizer: %d call(s), %d byte(s) measured, %s waiting on the tokenizer (retries included)",
+		s.Calls, s.Bytes, s.Spent)
 }

@@ -63,6 +63,31 @@ func TestFakeTokenCounter_ImplementsTokenCounter(t *testing.T) {
 	var _ TokenCounter = FakeTokenCounter{}
 }
 
+// TestCountingTokenCounter_Counts pins what D-25 needs measured: a call that stops incrementing
+// calls, bytes or elapsed time would report a number an operator could not trust to decide whether
+// chunking needs memoizing.
+func TestCountingTokenCounter_Counts(t *testing.T) {
+	counted := NewCountingTokenCounter(FakeTokenCounter{})
+
+	if _, err := counted.CountTokens(context.Background(), "one two three"); err != nil {
+		t.Fatalf("CountTokens: %v", err)
+	}
+	if _, err := counted.CountTokens(context.Background(), "four five"); err != nil {
+		t.Fatalf("CountTokens: %v", err)
+	}
+
+	got := counted.Snapshot()
+	if got.Calls != 2 {
+		t.Errorf("Calls = %d, want 2", got.Calls)
+	}
+	if want := int64(len("one two three") + len("four five")); got.Bytes != want {
+		t.Errorf("Bytes = %d, want %d", got.Bytes, want)
+	}
+	if got.Spent <= 0 {
+		t.Errorf("Spent = %v, want > 0", got.Spent)
+	}
+}
+
 // failingCounter is the tokenizer being unreachable. Every pass that counts tokens must surface
 // this rather than proceeding with a guess.
 type failingCounter struct{}
