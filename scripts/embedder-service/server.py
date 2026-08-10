@@ -17,8 +17,10 @@ Resident by design, not by preference: loading the model measured **314.5 s**. A
 on demand would make the first query of the day take five minutes and turn the measured 71 ms p99
 into fiction. This process loads once at startup and stays up. It is never invoked per request.
 
-Inference is serialized behind a lock. One CUDA model is not safe to call concurrently, and the
-consumers do not need it: query embedding is one at a time by nature, and ingestion sends batches.
+Inference is serialized. One CUDA model is not safe to call concurrently, and the consumers do not
+need it: query embedding is one at a time by nature, and ingestion sends batches. Serialized is not
+the same as first-come-first-served, though -- see `gpu()` for why an interactive query is admitted
+ahead of queued ingestion batches, and for what that costs ingestion.
 
 Endpoints, all JSON:
 
@@ -39,6 +41,7 @@ should not have to ask again to learn the size of what it embedded.
 """
 
 import argparse
+import contextlib
 import json
 import os
 import threading
@@ -53,7 +56,105 @@ MODEL_ID = "BAAI/bge-m3"
 REVISION = "5617a9f61b028005a4858fdac845db406aefb181"
 
 _model = None
-_lock = threading.Lock()
+
+# The GPU, as a resource with two classes of waiter. `_gpu_busy` says a call is executing;
+# `_queries_waiting` counts the interactive requests that arrived and have not been admitted yet.
+_gpu = threading.Condition()
+_gpu_busy = False
+_queries_waiting = 0
+
+
+@contextlib.contextmanager
+def gpu(priority: bool):
+    """Hold the model for one call. `priority` requests are admitted ahead of queued batches.
+
+    A plain lock was the whole of D-27. It has no notion of who is waiting, so an interactive query
+    issued during an ingestion queued behind every batch already in flight *and* every batch merely
+    waiting. The wait grew with the ingestion profile's MaxConcurrent, a variable nothing was
+    watching, while the timeout guarding it stayed a constant measured once. Here a batch yields to
+    any query that is already waiting.
+
+    The bound that buys, stated exactly, because it is the property the next edit has to preserve:
+    a query waits for the call in flight when it registers, plus at most one batch that won the
+    "the GPU just freed" race in the window before the increment below landed. It can never be more
+    than that one, and the reason is the lock: the increment and every batch's admission check
+    happen under the same `_gpu`, so a batch either sees `_queries_waiting` and blocks, or it got in
+    before the query existed. A registered query cannot be overtaken. Losing the race costs one
+    batch once, not one per batch in the queue -- which is what keeps this O(1) in queue depth and
+    independent of MaxConcurrent, the whole point of the change. Stress-tested at 1200 trials with
+    up to 16 batches released simultaneously against a registering query: zero violations, and the
+    table below never hit the window.
+
+    Measured on the live service, 2026-08-10, one batch = 32 chunks of real Portuguese prose from
+    this repo's markdown, 485-901 tokens each (median 651, 21330 tokens per request), which is the
+    band cmd/cli/ingest.go's chunker produces; query = 16 tokens. Medians, n=5 (n=10 for the query
+    alone), before and after on the same payload with a service restart between:
+
+        query alone, idle          0,05 s     0,04 s
+        one 32-chunk batch alone   1,28 s     1,19 s
+        query behind 1 batch       1,23 s     1,18 s
+        query behind 2 batches     2,39 s     1,22 s
+        query behind 4 batches     4,42 s     1,24 s
+
+    A latency here is meaningless without that payload line: the same scenario measured with
+    32 short strings puts a batch at ~0,3 s and every row shrinks with it. What does not depend on
+    the payload is the shape -- before, the wait is depth x batch; after, it is one batch.
+
+    That one batch is the floor, and it is why the rows after do not drop below the batch-alone
+    row: an encode running on the GPU cannot be preempted, and pretending otherwise would mean a
+    second model instance, which ADR-001's memory budget does not have.
+
+    Under sustained query load this starves ingestion, and saying otherwise would be a lie: the rule
+    is strict priority with no aging. What bounds it in practice is duty cycle, not fairness -- a
+    query holds the GPU for ~45 ms against a batch's ~1,2 s. Ingestion throughput at BatchSize 32,
+    MaxConcurrent 2 measured 28,4-30,3 chunks/s before and 28,4-29,3 after, so the cost of the
+    scheme itself is at most ~2% and sits inside the run-to-run band; one query per second beside a
+    running ingestion cost 3% in a separate pass. Ingestion only stops progressing if queries arrive
+    faster than one every ~45 ms, sustained, from a path where a human waits for each answer -- and
+    a machine that busy is undersized for the query load by itself. The fix if it ever happens is
+    not an aging counter: that would be one more measured constant guarding a variable nobody
+    watches, which is the failure this function exists to remove.
+    """
+    global _gpu_busy, _queries_waiting
+    with _gpu:
+        if priority:
+            _queries_waiting += 1
+        try:
+            # The second half of the condition is the entire mechanism: a batch declines to take a
+            # free GPU while a query is queued. Without it `notify_all` is a race the batch usually
+            # wins, because it has been waiting longer and the OS scheduler does not know what
+            # these are.
+            while _gpu_busy or (not priority and _queries_waiting):
+                _gpu.wait()
+            _gpu_busy = True
+        finally:
+            # An admission that raises has to give the count back, and this half is symmetric with
+            # the release below for one reason: a leaked `_queries_waiting` is not a slow service,
+            # it is a wedged one. Every batch-class request would then wait on a counter that no
+            # code path can ever clear again, forever, with the process still answering /health.
+            #
+            # No reachable raise exists today -- Condition.wait() raises RuntimeError only if the
+            # lock is not held, which the `with` guarantees, and signal-driven exceptions land in
+            # the main thread, never in a ThreadingHTTPServer worker (verified: SIGINT delivered
+            # while a worker sat in wait() raised KeyboardInterrupt in the main thread and the
+            # worker returned normally). The guard is here because that argument is about today's
+            # code: a timeout on the wait, a move to asyncio, or request cancellation each turn it
+            # false, and none of them would look like they were touching this invariant.
+            #
+            # `_gpu_busy` doubles as the flag for whether the admission succeeded, so the notify
+            # only fires on the path that needs it: if it is set, either we hold the GPU (normal
+            # exit, nothing to wake) or someone else does and their release will notify. If it is
+            # clear, nobody is going to, and any batch deferring to this query would park forever.
+            if priority:
+                _queries_waiting -= 1
+                if not _gpu_busy:
+                    _gpu.notify_all()
+    try:
+        yield
+    finally:
+        with _gpu:
+            _gpu_busy = False
+            _gpu.notify_all()
 
 
 def load_model(device: str, use_fp16: bool) -> None:
@@ -170,41 +271,66 @@ class Handler(BaseHTTPRequestHandler):
 
         try:
             if self.path == "/tokenize":
-                with _lock:
+                # Batch class deliberately, even though ingestion calls this thousands of times per
+                # run: those thousands are exactly why it is not interactive. Its only caller is the
+                # chunker in cmd/cli/ingest.go -- the query path never tokenizes -- so promoting it
+                # would let ingestion overtake ingestion, and would put every clamp check ahead of
+                # the batches the same run is waiting on. It costs a query nothing to be behind one:
+                # the critical section is a CPU tokenize of a single chunk, milliseconds.
+                with gpu(priority=False):
                     enc = _model.tokenizer(inputs, add_special_tokens=True)["input_ids"]
                 self._send(200, {"counts": [len(x) for x in enc]})
                 return
 
             if self.path == "/embed":
-                with _lock:
+                # The class comes from the request's own `kind`, which the Go client has always sent
+                # (internal/embed/http.go) and this server used to ignore. An explicit field rather
+                # than a size heuristic: one-chunk batches are legal at the tail of an ingestion run,
+                # so "small means interactive" would misclassify silently, and the caller is the only
+                # party that knows whether someone is waiting for the answer. Anything that is not
+                # exactly "query" -- passage, absent, misspelled -- is a batch, because the safe
+                # default is to not jump the queue.
+                priority = req.get("kind") == "query"
+
+                # Tokenize and encode under one acquisition, where they used to take the lock twice.
+                # Two acquisitions leave a gap between them, and a query that lost the GPU in that
+                # gap would go back to the end of the queue and wait for a *second* batch, which
+                # breaks the bound this whole design exists to provide. The cost is that a batch now
+                # holds the GPU across its own tokenize, measured at 10,7 ms for 32 chunks against
+                # a ~1,1 s encode.
+                window = _model.model.model.config.max_position_embeddings
+                with gpu(priority=priority):
                     enc = _model.tokenizer(inputs, add_special_tokens=True)["input_ids"]
 
-                # Refuse rather than truncate. FlagEmbedding silently clips anything past the
-                # window, so without this the endpoint answers 200 with a 1024-float vector that
-                # represents a fraction of the text -- and the `tokens` count reported alongside it
-                # is the *untruncated* one, so nothing in a successful response says the vector is
-                # wrong. Measured: a 27000-word input came back 200, tokens=27002, and its sparse
-                # half collapsed to a single token, which is what a mangled encode looks like.
-                #
-                # `internal/chunk` already refuses a chunk over the same limit before it ever calls
-                # here, so this is not reachable through the sanctioned path. It exists because
-                # `/tokenize` already has a second Go client and this is a standalone HTTP service:
-                # the next caller may not come through the chunker, and a wrong answer that looks
-                # right is worse than a refusal.
-                window = _model.model.model.config.max_position_embeddings
-                for i, ids in enumerate(enc):
-                    if len(ids) > window:
-                        self._send(400, {
-                            "error": "input exceeds the model window; it would be truncated "
-                                     "silently and the vector would not represent the text",
-                            "index": i, "tokens": len(ids), "max_tokens": window,
-                        })
-                        return
-
-                with _lock:
-                    out = _model.encode(
+                    # Refuse rather than truncate. FlagEmbedding silently clips anything past the
+                    # window, so without this the endpoint answers 200 with a 1024-float vector that
+                    # represents a fraction of the text -- and the `tokens` count reported alongside
+                    # it is the *untruncated* one, so nothing in a successful response says the
+                    # vector is wrong. Measured: a 27000-word input came back 200, tokens=27002, and
+                    # its sparse half collapsed to a single token, which is what a mangled encode
+                    # looks like.
+                    #
+                    # `internal/chunk` already refuses a chunk over the same limit before it ever
+                    # calls here, so this is not reachable through the sanctioned path. It exists
+                    # because `/tokenize` already has a second Go client and this is a standalone
+                    # HTTP service: the next caller may not come through the chunker, and a wrong
+                    # answer that looks right is worse than a refusal.
+                    #
+                    # The refusal itself is sent after the release below: writing a response is not
+                    # GPU work, and a client that reads slowly must not hold the model while it does.
+                    oversized = next((i for i, ids in enumerate(enc) if len(ids) > window), None)
+                    out = None if oversized is not None else _model.encode(
                         inputs, return_dense=True, return_sparse=True, return_colbert_vecs=False
                     )
+
+                if oversized is not None:
+                    self._send(400, {
+                        "error": "input exceeds the model window; it would be truncated "
+                                 "silently and the vector would not represent the text",
+                        "index": oversized, "tokens": len(enc[oversized]), "max_tokens": window,
+                    })
+                    return
+
                 self._send(
                     200,
                     {

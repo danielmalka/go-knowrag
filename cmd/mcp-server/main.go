@@ -94,24 +94,46 @@ func run() error {
 // from the error.
 //
 // The per-attempt number is not derived from a healthy idle service, and that is the point. Idle,
-// a query embed measures 50–92 ms (ADR-001 §6.2's p99 of 71 ms, re-measured 2026-08-10), so almost
-// any timeout would do. But scripts/embedder-service/server.py serialises every request behind one
-// threading.Lock, and the ingestion profile below in this same binary's sibling command runs
-// BatchSize 32 with MaxConcurrent 2 — so a query issued during an ingestion does not share the GPU,
-// it *queues* behind up to two 32-chunk batches. Measured on the live service: a 32-chunk batch
-// takes 1,13–1,24 s, a query behind one batch returns in ~1,1 s, and a query behind two returns in
-// ~2,3 s. Four seconds leaves ~1,7× headroom over that worst case; two seconds did not, and would
-// have reported KNOWLEDGE BASE UNAVAILABLE for a service that was up, healthy and busy.
+// a query embed measures ~50 ms (ADR-001 §6.2 measured a p99 of 71 ms on its own run; the number
+// here is the median of the 2026-08-10 run tabulated below, and the two are different occasions,
+// not one range). Almost any timeout would clear that. What this one has to survive is a query
+// issued while an ingestion is running, because the embedding service holds one resident model and
+// serialises inference: the query waits out whatever is executing on the GPU when it arrives.
+//
+// That wait used to grow with the ingestion profile's MaxConcurrent — the service admitted requests
+// first-come-first-served, so a query queued behind every waiting batch as well as the running one.
+// It no longer does: scripts/embedder-service/server.py reads the `kind` this client already sends
+// and admits a query ahead of queued batches (D-27, paid 2026-08-10), which bounds the wait at the
+// batch in flight — plus, if the query loses a microseconds-wide race to register, one more, once.
+// Never one per queued batch, which is the difference that matters here: the bound is a constant,
+// not a multiple of MaxConcurrent. The argument for why it cannot be worse lives in that file's
+// gpu(), where the lock that makes it true is.
+//
+// Measured on the live service, 2026-08-10, one batch = 32 chunks of real Portuguese prose from
+// this repo's markdown, 485–901 tokens each (median 651, 21330 tokens per request), which is the
+// band cmd/cli/ingest.go's chunker produces; query = 16 tokens. Medians, n=5 (n=10 for the query
+// alone), before and after on the same payload with a service restart between:
+//
+//	query alone, idle          0,05 s     0,04 s
+//	one 32-chunk batch alone   1,28 s     1,19 s
+//	query behind 1 batch       1,23 s     1,18 s
+//	query behind 2 batches     2,39 s     1,22 s
+//	query behind 4 batches     4,42 s     1,24 s
+//
+// The payload line is not decoration: the same scenario measured with 32 short strings puts a batch
+// at ~0,3 s and every row shrinks with it, so a number quoted without it cannot be compared to
+// anything. What does not depend on the payload is the shape — before, the wait is depth × batch;
+// after, it is one batch.
+//
+// Four seconds is ~3,2× that bound and stays. Re-measuring it against the new floor would trade
+// real headroom for nothing: the failure it prevents is reporting KNOWLEDGE BASE UNAVAILABLE for a
+// service that is up, healthy and busy, and that error is expensive in a way 3 s of a timeout that
+// almost never fires is not.
 //
 // MaxRetries is 2 rather than 3 for the same reason, and it is the trade that lets the budget fit:
-// against a serialised queue a longer single attempt beats more short ones, because every retry
-// rejoins the same queue. Two attempts of 4 s ride out a longer stall than three of 2 s and cost
-// 1,5 s less wall clock.
-//
-// ponytail: calibrated around a server that cannot prioritise a query over a batch. The real fix is
-// in server.py's single lock, not in these numbers — see the debt candidate raised 2026-08-10. If
-// the ingestion profile's MaxConcurrent ever rises, re-measure: the queue in front of a query grows
-// with it and this margin does not.
+// a longer single attempt beats more short ones, because a retry rejoins the same serialised
+// service. Two attempts of 4 s ride out a longer stall than three of 2 s and cost 1,5 s less wall
+// clock.
 func embedProfile(endpoint string) embed.Profile {
 	return embed.Profile{
 		Endpoint:      endpoint,

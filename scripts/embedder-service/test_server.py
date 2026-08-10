@@ -23,6 +23,13 @@ suite runnable without a GPU and without the 2.3 GB of weights. Importing `serve
 virtualenv that has torch and FlagEmbedding, because those imports are at module scope; see the
 `test-embedder` target in the Makefile for how that is kept out of CI's way.
 
+PriorityTest pays a different debt, D-27: the service used to serialize every request first-come
+-first-served, so an interactive query queued behind every ingestion batch that happened to be
+waiting. Those tests assert an ordering, and an ordering test that depends on timing is a test that
+lies on a loaded machine -- so the stub blocks inside `encode` on an event the test controls, and
+the test only ever advances on a predicate about real state (a request was admitted; N requests are
+parked). No test there sleeps to make an order happen.
+
 The handler tests drive a real ThreadingHTTPServer on an ephemeral port rather than calling
 `do_POST` directly. BaseHTTPRequestHandler parses the request and writes the response inside
 `__init__`, so calling the methods directly means building a fake socket, a fake request line and
@@ -33,7 +40,9 @@ makes the assertions be about status codes and JSON bodies, which is what the Go
 
 import json
 import threading
+import time
 import unittest
+from unittest import mock
 from http.client import HTTPConnection
 from http.server import ThreadingHTTPServer
 from types import SimpleNamespace
@@ -258,6 +267,177 @@ class ValidationTest(ServiceTestCase):
         server._model = None
         status, body = self.request("GET", "/health")
         self.assertEqual((status, body), (200, {"status": "ok", "loaded": False}))
+
+
+class GatedModel(StubModel):
+    """A stub that holds the GPU until the test lets go, and records who got it, in order.
+
+    `admitted` is appended in `tokenizer`, not in `encode`, because the handlers call the tokenizer
+    as the first statement inside their critical section -- `/tokenize` has nothing else, and
+    `/embed` tokenizes and encodes under one acquisition. So one entry per request, written at the
+    instant that request was admitted, which is exactly the order under test.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.admitted = []  # list.append is atomic under the GIL, and every caller holds the GPU
+        self.gate = threading.Event()
+
+    def tokenizer(self, inputs, add_special_tokens=True):
+        self.admitted.append(inputs[0])
+        return super().tokenizer(inputs, add_special_tokens)
+
+    def encode(self, inputs, **kwargs):
+        # Blocks the one call that is executing, which is how a test creates the "in flight" state
+        # the whole design is about. The timeout is a backstop so a broken server fails the suite
+        # instead of hanging it.
+        if not self.gate.wait(timeout=10):
+            raise AssertionError("the test never opened the gate")
+        return super().encode(inputs, **kwargs)
+
+
+class PriorityTest(ServiceTestCase):
+    """D-27: a query is admitted ahead of queued batches, and waits only for the one in flight.
+
+    Every request in these tests carries a single one-word input, batches included. That is
+    deliberate: if the class came from a size heuristic instead of the `kind` field, none of these
+    orderings would happen, and an ingestion's last sub-batch really can be one chunk.
+    """
+
+    def setUp(self):
+        self.model = GatedModel()
+        server._model = self.model
+        self.threads = []
+        self.failures = []
+
+    def tearDown(self):
+        self.model.gate.set()
+        for t in self.threads:
+            t.join(timeout=10)
+            self.assertFalse(t.is_alive(), "a request never finished")
+        self.assertEqual(self.failures, [])
+
+    def restart(self):
+        """Fresh model and fresh threads between subTests: each one asserts a whole ordering."""
+        self.tearDown()
+        self.setUp()
+
+    def send(self, path, payload):
+        """Fire a request in the background; its failure, if any, surfaces in tearDown."""
+        def run():
+            try:
+                self.request("POST", path, json.dumps(payload))
+            except Exception as e:  # noqa: BLE001 - reported, never swallowed
+                self.failures.append(e)
+
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        self.threads.append(t)
+
+    def until(self, pred, what, timeout=5):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if pred():
+                return
+            time.sleep(0.001)
+        self.fail(f"timed out waiting for {what}; admitted={self.model.admitted}")
+
+    def hold_the_gpu(self, label="A"):
+        """Get one batch executing and blocked, which is the state a query has to wait out."""
+        self.send("/embed", {"inputs": [label], "kind": "passage"})
+        self.until(lambda: self.model.admitted == [label], f"{label} to reach the GPU")
+
+    def until_parked(self, n):
+        """Wait until n requests are queued inside server.gpu().
+
+        threading.Condition parks its waiters in `_waiters`, and reading that length is what makes
+        these tests deterministic: the alternative is sleeping and hoping the queue formed, which
+        is the flakiness this file's docstring refuses. Private, and stable in CPython since the
+        module was written.
+        """
+        self.until(lambda: len(server._gpu._waiters) == n, f"{n} request(s) queued")
+
+    def test_query_overtakes_queued_batches_however_many_there_are(self):
+        # The D-27 acceptance criterion. 1, 2 and 4 are the queue depths the debt entry measured:
+        # under the old lock the query came out last, and its wait grew with the depth. The
+        # assertion is that the query is second no matter the depth -- the wait stops depending on
+        # the ingestion profile's MaxConcurrent, which is the variable nobody watches.
+        for queued in (1, 2, 4):
+            with self.subTest(queued=queued):
+                self.restart()
+                self.hold_the_gpu()
+                for i in range(queued):
+                    self.send("/embed", {"inputs": [f"B{i}"], "kind": "passage"})
+                self.until_parked(queued)
+
+                self.send("/embed", {"inputs": ["Q"], "kind": "query"})
+                self.until_parked(queued + 1)
+
+                self.model.gate.set()
+                self.until(lambda: len(self.model.admitted) == queued + 2, "every request to finish")
+                self.assertEqual(self.model.admitted[:2], ["A", "Q"])
+                self.assertEqual(sorted(self.model.admitted[2:]), [f"B{i}" for i in range(queued)])
+
+    def test_only_one_request_holds_the_model_at_a_time(self):
+        # Priority must not be bought by letting two calls into the model: one CUDA model is not
+        # safe to call concurrently, and a query that overtakes a batch by running *beside* it
+        # would corrupt both. The query is parked, not admitted, while the batch is in flight.
+        self.hold_the_gpu()
+        self.send("/embed", {"inputs": ["Q"], "kind": "query"})
+        self.until_parked(1)
+        self.assertEqual(self.model.admitted, ["A"])
+
+        self.model.gate.set()
+        self.until(lambda: len(self.model.admitted) == 2, "the query to be admitted")
+        self.assertEqual(self.model.admitted, ["A", "Q"])
+
+    def test_tokenize_waits_behind_a_query(self):
+        # /tokenize is ingestion's, not the query path's: the chunker calls it thousands of times
+        # per run and nothing on the search path calls it at all. So it is in the batch class, and
+        # a query queued after it still goes first.
+        self.hold_the_gpu()
+        self.send("/tokenize", {"inputs": ["T"]})
+        self.until_parked(1)
+        self.send("/embed", {"inputs": ["Q"], "kind": "query"})
+        self.until_parked(2)
+
+        self.model.gate.set()
+        self.until(lambda: len(self.model.admitted) == 3, "every request to finish")
+        self.assertEqual(self.model.admitted, ["A", "Q", "T"])
+
+    def test_a_failed_admission_does_not_wedge_the_service(self):
+        # No raise reaches gpu()'s wait today, which is why the guard needs a test rather than an
+        # argument: `_queries_waiting` has no other code path that can clear it, so leaking one
+        # parks every batch-class request forever while /health goes on answering ok. The raise is
+        # injected because the real ones are hypothetical -- a wait timeout, asyncio, cancellation.
+        self.hold_the_gpu()
+        with mock.patch.object(server._gpu, "wait", side_effect=RuntimeError("interrupted")):
+            with self.assertRaises(RuntimeError):
+                with server.gpu(priority=True):
+                    self.fail("the body must not run when the admission failed")
+        self.assertEqual(server._queries_waiting, 0)
+
+        self.model.gate.set()
+        status, _ = self.request("POST", "/embed", json.dumps({"inputs": ["B"], "kind": "passage"}))
+        self.assertEqual(status, 200)
+
+    def test_only_an_exact_kind_query_is_interactive(self):
+        # The class is read off `kind`, so what does *not* count matters as much as what does: a
+        # caller that omits the field, sends a passage, or misspells the value must not be able to
+        # push ingestion aside. Asserted on the waiting-query count rather than on an order,
+        # because two requests of the same class have no defined order between them -- an
+        # ordering assertion here would pass or fail on the scheduler.
+        self.hold_the_gpu()
+        for payload in ({"inputs": ["x"]},
+                        {"inputs": ["x"], "kind": "passage"},
+                        {"inputs": ["x"], "kind": "Query"}):
+            self.send("/embed", payload)
+        self.until_parked(3)
+        self.assertEqual(server._queries_waiting, 0)
+
+        self.send("/embed", {"inputs": ["Q"], "kind": "query"})
+        self.until_parked(4)
+        self.assertEqual(server._queries_waiting, 1)
 
 
 if __name__ == "__main__":
