@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -9,7 +10,10 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
+	"github.com/danielmalka/go-knowrag/internal/embed"
 	"github.com/danielmalka/go-knowrag/internal/retrieval"
 	"github.com/danielmalka/go-knowrag/internal/schema"
 )
@@ -21,6 +25,32 @@ const (
 	defaultTopK = 5
 	maxTopK     = 20
 )
+
+// searchDeadline bounds one search, and it is what makes the classification below able to fire at
+// all on a live-but-hung Qdrant.
+//
+// Nothing else on the Qdrant path carries a deadline: main.go builds the root context from
+// signal.NotifyContext, which has none, and it reaches the gRPC call unmodified. Without this, a
+// Qdrant that accepts the connection and then never answers produces no error, no log record and no
+// MCP response — a harder silence than the raw transport error this whole change exists to replace,
+// and the opposite of what ADR-007 §4 says happens ("um Qdrant vivo mas lento entra como
+// indisponível, e de propósito").
+//
+// The number is deliberately not the NFR. NFR-1 (PRD.md, NFR table) gates search at p95 ≤ 3 s and
+// p99 ≤ 5 s end-to-end; this is the point past which the answer is worthless to the agent that
+// asked, so it sits at twice the p99 ceiling — a search between 5 s and 10 s is reported as a slow
+// search that still answered, and only past 10 s is it reported as an outage.
+//
+// It has one constraint, and moving it means rechecking that constraint: it must stay above the
+// embedder's own worst case (embedProfile in main.go: 2 attempts of 4 s plus 0,25 s of backoff =
+// 8,25 s). A deadline that can fire mid-retry silently shortens MaxRetries, so a blip the retry
+// would have absorbed is reported as an outage instead, and the error that comes back says only
+// "deadline exceeded" rather than carrying the last transport failure an operator needs to read.
+// Naming the right component is no longer at stake there — embed.outerCtxErr makes a deadline-killed
+// embedding call an ErrBackend, so it identifies itself either way — but the retry policy is.
+//
+// A var rather than a const only so a test can shrink it; nothing at run time writes it.
+var searchDeadline = 10 * time.Second
 
 // SearchKnowledgeInput is the tool's entire input surface.
 //
@@ -121,6 +151,13 @@ func searchKnowledgeHandler(cfg Config, searcher Searcher) mcp.ToolHandlerFor[Se
 			// (S09 / ADR-002 §2.4); an MCP client is not a privileged caller.
 		}
 
+		// The deadline is attached here and nowhere else. How long a caller waits for a search is a
+		// product decision about this tool, and internal/store — where it would otherwise be
+		// tempting to put it — is also the ingestion path, whose budget is half an hour (NFR-4)
+		// rather than seconds.
+		ctx, cancel := context.WithTimeout(ctx, searchDeadline)
+		defer cancel()
+
 		results, err := searcher.Search(ctx, q)
 		if err != nil {
 			return nil, nil, logAndWrap(cfg, start, 0, fmt.Errorf("search failed: %w", err))
@@ -179,14 +216,100 @@ func clampTopK(k int) int {
 // it in an error string; this is here because an error message is the classic place a credential
 // escapes to, and the check costs one comparison per failed call.
 func logAndWrap(cfg Config, start time.Time, resultCount int, err error) error {
-	slog.Error("search_knowledge call failed",
+	msg := scrubCredential(cfg, err.Error())
+	out := msg
+
+	attrs := []any{
 		"tenant", cfg.TenantID,
 		"collection", cfg.Collection,
 		"latency_ms", time.Since(start).Milliseconds(),
 		"result_count", resultCount,
-		"error", scrubCredential(cfg, err.Error()))
+		"error", msg,
+	}
+	// An availability failure is the one class that gets rewritten, because the consumer is a
+	// language model and the raw text is a transport error. The rewrite is built on top of the
+	// already-scrubbed message rather than on err.Error(), so scrubbing covers this path by
+	// construction instead of by a second call someone has to remember to make.
+	if u := classifyUnavailable(cfg, err); u != nil {
+		attrs = append(attrs, "unavailable", u.component)
+		out = fmt.Sprintf(unavailableMessage, u.what, u.check, msg)
+	}
+	slog.Error("search_knowledge call failed", attrs...)
 
-	return fmt.Errorf("search_knowledge: %s", scrubCredential(cfg, err.Error()))
+	return fmt.Errorf("search_knowledge: %s", out)
+}
+
+// unavailableCodes are the gRPC status codes that mean the knowledge layer never answered, as
+// opposed to answering and saying no.
+//
+// codes.Unavailable is the transport itself — the VPS down, the Qdrant service not running, or
+// Tailscale not up — so the call never reached a server. codes.DeadlineExceeded is the same outcome
+// wearing a different code: a call that does not come back inside its deadline consulted no index,
+// and the caller ends up knowing exactly as little as if the connection had been refused.
+//
+// codes.Canceled is deliberately absent. It means this side stopped the call — the MCP client
+// disconnected, or its context was cancelled — so nothing about the knowledge base is down, and
+// there is generally nobody left to read the explanation anyway. That reading depends on
+// searchDeadline existing: a client giving up on a query that hangs forever would also arrive here
+// as Canceled, and in that case the knowledge base *is* down. searchDeadline fires at 10 s, long
+// before any client's own patience runs out, so a hang reaches this switch as DeadlineExceeded and
+// Canceled keeps meaning only what it says. Every other code is a server that
+// did answer: NotFound for a collection that does not exist, InvalidArgument for a malformed
+// filter, Unauthenticated for a wrong key. Those keep their own message, and that half matters as
+// much as this one — announcing an outage when the real cause is a bug teaches the caller to excuse
+// bugs as outages, which is D-21's silent failure pointed the other way.
+var unavailableCodes = []codes.Code{codes.Unavailable, codes.DeadlineExceeded}
+
+// unavailableMessage is what the caller reads. The caller is a language model, so it says what
+// happened, what it does not mean, and what to do about it: a bare `rpc error: code = Unavailable`
+// reads to a model as a malfunctioning tool, and a malfunctioning tool gets dropped and the question
+// answered from memory with the user never hearing that the knowledge layer was gone — which is the
+// silence D-21 is about. Short on purpose: a message the model skims past has failed at its one job.
+const unavailableMessage = `KNOWLEDGE BASE UNAVAILABLE — this is not an empty result.
+
+The %s could not be reached, so no search ran at all. Nothing was looked up, and the absence
+of results here is not evidence that the knowledge base holds nothing on the topic.
+
+Tell the user the knowledge base is unreachable before you answer. Answering from your own
+knowledge without saying so presents an unchecked answer as a checked one.
+
+Operator: check %s.
+Underlying error: %s`
+
+// unavailability is a knowledge layer that did not answer, resolved to the component an operator
+// has to go and look at.
+type unavailability struct {
+	component string // one greppable word for the log record
+	what      string // what the model is told is unreachable, named with its endpoint
+	check     string // where an operator looks first
+}
+
+// classifyUnavailable separates "the knowledge layer is down" from every other failure, for the two
+// ways it becomes unavailable: the Qdrant on the VPS, and the embedding service on this host.
+//
+// It returns nil for everything else, and that is the half worth guarding: a bad filter or a missing
+// collection reported as an outage would be worse than no classification at all.
+func classifyUnavailable(cfg Config, err error) *unavailability {
+	switch {
+	// embed.ErrBackend already means precisely this and nothing else — the package defines it as
+	// "no answer came out of the service at all", explicitly distinct from an answer that failed
+	// validation — so there is nothing to re-derive from the transport error underneath it.
+	case errors.Is(err, embed.ErrBackend):
+		return &unavailability{
+			component: "embedder",
+			what:      "local embedding service at " + cfg.EmbedderEndpoint,
+			check:     "systemctl --user status knowrag-embedder on the host running mcp-server",
+		}
+	// status.Code walks the chain with errors.As, which it has to: the status arrives wrapped by the
+	// Qdrant client, then by internal/store, then by internal/retrieval.
+	case slices.Contains(unavailableCodes, status.Code(err)):
+		return &unavailability{
+			component: "qdrant",
+			what:      "Qdrant vector database at " + cfg.QdrantEndpoint,
+			check:     "the VPS, the Qdrant service on it, and the Tailscale link to that endpoint",
+		}
+	}
+	return nil
 }
 
 func scrubCredential(cfg Config, msg string) string {

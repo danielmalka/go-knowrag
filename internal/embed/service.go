@@ -94,7 +94,7 @@ func (e *ServiceEmbedder) embed(ctx context.Context, texts []string, kind Kind) 
 		return nil, nil
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, outerCtxErr(e.profile.Endpoint, err)
 	}
 
 	// Cancelled as soon as one sub-batch fails: the call is already doomed, and letting the other
@@ -192,7 +192,7 @@ func (e *ServiceEmbedder) callWithRetry(ctx context.Context, texts []string, kin
 
 	for attempt := 1; attempt <= e.profile.MaxRetries; attempt++ {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, outerCtxErr(e.profile.Endpoint, err)
 		}
 
 		attemptCtx, cancel := context.WithTimeout(ctx, e.profile.Timeout)
@@ -207,17 +207,41 @@ func (e *ServiceEmbedder) callWithRetry(ctx context.Context, texts []string, kin
 		// The caller (or an already-failed sibling sub-batch) cancelled: stop, and report that
 		// rather than a retry-exhausted error, which would name the wrong cause.
 		if cErr := ctx.Err(); cErr != nil {
-			return nil, cErr
+			return nil, outerCtxErr(e.profile.Endpoint, cErr)
 		}
 		if attempt < e.profile.MaxRetries {
 			select {
 			case <-time.After(delay):
 				delay *= 2
 			case <-ctx.Done():
-				return nil, ctx.Err()
+				return nil, outerCtxErr(e.profile.Endpoint, ctx.Err())
 			}
 		}
 	}
 	return nil, fmt.Errorf("%w: %s: %d attempt(s) failed, last error: %w",
 		ErrBackend, e.profile.Endpoint, e.profile.MaxRetries, lastErr)
+}
+
+// outerCtxErr renders the caller's own context error on its way out of this package. It is applied
+// at every point where the outer context is checked, which is the only reason it is a function
+// rather than four copies of an if.
+//
+// A deadline that kills an embedding call is ErrBackend by this package's own definition — "no
+// answer came out of the service at all" — and the wrapping happens here rather than in whichever
+// consumer wants to report it. A consumer only sees a bare context.DeadlineExceeded and would have
+// to *infer* which component died from the shape of an error that names none; this package knows,
+// because it is the one that made the call. Getting that inference wrong sends an operator to the
+// VPS when the local embedding service is what stopped, which is worse than no message at all.
+//
+// Cancellation is deliberately not wrapped. It means the caller stopped the call — a client that
+// disconnected, or a sibling sub-batch that already failed and cancelled its runCtx — not a service
+// that failed to answer, and widening this to cover both would report every disconnect as an outage.
+//
+// The context error stays in the chain either way, so errors.Is(err, context.DeadlineExceeded)
+// keeps working for anything that checks it.
+func outerCtxErr(endpoint string, err error) error {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("%w: %s: %w", ErrBackend, endpoint, err)
+	}
+	return err
 }

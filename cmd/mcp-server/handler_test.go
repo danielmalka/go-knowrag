@@ -5,12 +5,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
+	"github.com/danielmalka/go-knowrag/internal/embed"
 	"github.com/danielmalka/go-knowrag/internal/retrieval"
 )
 
@@ -419,6 +424,312 @@ func TestSearchKnowledge_TopK_DefaultsAndClamps(t *testing.T) {
 		if got := fake.lastQuery().TopK; got != tc.want {
 			t.Errorf("%s: TopK = %d, want %d", name, got, tc.want)
 		}
+	}
+}
+
+// captureLogs redirects the default logger into a buffer for the duration of one test. The tests
+// below all assert on the structured record as well as on the text the caller receives, because the
+// operator half of D-21 is the log line: it has to say which component was down.
+func captureLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+
+	var buf bytes.Buffer
+	restore := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(restore) })
+	return &buf
+}
+
+// unavailableHeader is the first line of the unavailability message, and the marker every test below
+// uses to say "the classifier fired" or "the classifier did not fire".
+const unavailableHeader = "KNOWLEDGE BASE UNAVAILABLE"
+
+// qdrantErr builds the error a searcher really returns when Qdrant answers with a status: the gRPC
+// status wrapped by the Qdrant client, then by internal/store, then by internal/retrieval. The
+// nesting is the assertion — a classifier that inspected only the outermost error would miss every
+// real outage, and a test that handed it a bare status.Error would never notice.
+func qdrantErr(code codes.Code, msg string) error {
+	return fmt.Errorf("retrieval: executing the query on interno: %w",
+		fmt.Errorf("querying interno: %w",
+			fmt.Errorf("Query() failed: interno: %w", status.Error(code, msg))))
+}
+
+// embedderDownErr mirrors ServiceEmbedder.callWithRetry giving up: ErrBackend wrapping the last
+// transport failure, wrapped again by retrieval.Search. There is no gRPC status anywhere in it,
+// which is why the embedder needs its own branch rather than a second status code.
+func embedderDownErr() error {
+	endpoint := testConfig().EmbedderEndpoint
+	return fmt.Errorf("retrieval: embedding the query: %w",
+		fmt.Errorf("%w: %s: 3 attempt(s) failed, last error: embed: POST %s/embed: dial tcp: connect: connection refused",
+			embed.ErrBackend, endpoint, endpoint))
+}
+
+// TestSearchKnowledge_KnowledgeLayerDown_SaysUnavailableNotEmpty is D-21: both ways the knowledge
+// layer goes away have to produce a message a model cannot mistake for "nothing was found".
+func TestSearchKnowledge_KnowledgeLayerDown_SaysUnavailableNotEmpty(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err       error
+		component string
+		endpoint  string
+	}{
+		"qdrant unreachable": {
+			qdrantErr(codes.Unavailable, "connection error: desc = transport: dial tcp 100.64.0.2:6334: connect: no route to host"),
+			"qdrant", testConfig().QdrantEndpoint,
+		},
+		"qdrant did not answer in time": {
+			qdrantErr(codes.DeadlineExceeded, "context deadline exceeded"),
+			"qdrant", testConfig().QdrantEndpoint,
+		},
+		"embedder service stopped": {
+			embedderDownErr(),
+			"embedder", testConfig().EmbedderEndpoint,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			logged := captureLogs(t)
+			cs := connect(t, testConfig(), &fakeSearcher{errs: []error{tc.err}})
+
+			res := callRaw(t, cs, `{"query":"anything"}`)
+			if !res.IsError {
+				t.Fatalf("an unreachable knowledge layer produced a success result: %s", resultText(t, res))
+			}
+			msg := resultText(t, res)
+
+			// Each string is one of the four things the message has to say: it is unavailable, it is
+			// not an empty result, emptiness here proves nothing, and the caller must say so out loud.
+			// Plus the endpoint, so an operator reading the client's transcript knows which host.
+			for _, want := range []string{
+				unavailableHeader,
+				"not an empty result",
+				"is not evidence",
+				"Tell the user",
+				tc.endpoint,
+			} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("the unavailability message omits %q:\n%s", want, msg)
+				}
+			}
+			// The empty-result text must not appear anywhere in it: the two outcomes are exactly the
+			// ones a model must never conflate, so they may not share a sentence.
+			if strings.Contains(msg, noResults) {
+				t.Errorf("the unavailability message contains the empty-result text:\n%s", msg)
+			}
+
+			if want := `"unavailable":"` + tc.component + `"`; !strings.Contains(logged.String(), want) {
+				t.Errorf("the log record does not name the component that was down (want %s):\n%s",
+					want, logged.String())
+			}
+		})
+	}
+}
+
+// TestSearchKnowledge_HungBackend_TimesOutInsteadOfHanging is the live-but-slow case ADR-007 §4
+// promises is covered. It is the only test here that proves searchDeadline exists: everything else
+// is handed an error that was already built, and a hand-built DeadlineExceeded proves only that the
+// classifier reads codes. This one gives the handler a searcher that answers never.
+//
+// searchDeadline is shrunk rather than waited out, so the test costs 200 ms instead of ten seconds.
+// Deleting the deadline makes this fail in hangCap rather than hang: see fakeSearcher.
+func TestSearchKnowledge_HungBackend_TimesOutInsteadOfHanging(t *testing.T) {
+	restore := searchDeadline
+	searchDeadline = 200 * time.Millisecond
+	t.Cleanup(func() { searchDeadline = restore })
+
+	logged := captureLogs(t)
+	cs := connect(t, testConfig(), &fakeSearcher{hangs: true})
+
+	res := callRaw(t, cs, `{"query":"anything"}`)
+	if !res.IsError {
+		t.Fatalf("a search that never completed produced a success result: %s", resultText(t, res))
+	}
+	msg := resultText(t, res)
+	if !strings.Contains(msg, unavailableHeader) {
+		t.Errorf("a backend that never answered was not reported as unavailable:\n%s", msg)
+	}
+	if !strings.Contains(logged.String(), `"unavailable":"qdrant"`) {
+		t.Errorf("the log record does not name Qdrant as the component that was down:\n%s", logged.String())
+	}
+}
+
+// hangingEmbedder is a real *retrieval.Searcher wired to a real *embed.ServiceEmbedder whose
+// transport accepts the request and never answers — the local embedding service stopped, or wedged.
+//
+// The point of assembling the real thing is that no error in this test is written by hand. The one
+// that reaches the handler is whatever ServiceEmbedder and retrieval.Search actually produce when
+// the outer deadline expires mid-retry, which is the path the hand-built embedderDownErr() helper
+// cannot reach: that helper only builds the retry-exhausted ErrBackend, and would keep passing
+// while the deadline path returned a bare context error naming no component at all.
+func hangingEmbedder(t *testing.T) Searcher {
+	t.Helper()
+
+	profile := embedProfile(testConfig().EmbedderEndpoint)
+	embedder, err := embed.NewServiceEmbedder(profile, hangingTransport{})
+	if err != nil {
+		t.Fatalf("embed.NewServiceEmbedder: %v", err)
+	}
+	// The executor is never reached: the query dies at the embedding step, which is the scenario.
+	return retrieval.NewSearcher(embedder, deadExecutor{}, retrieval.DefaultConfig())
+}
+
+type hangingTransport struct{}
+
+func (hangingTransport) Embed(ctx context.Context, _ []string, _ embed.Kind) ([]embed.Embedding, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (hangingTransport) Info(context.Context) (embed.BackendHandshakeInfo, error) {
+	return embed.BackendHandshakeInfo{}, errors.New("hangingTransport: no handshake")
+}
+
+type deadExecutor struct{}
+
+func (deadExecutor) ExecuteQuery(context.Context, retrieval.SearchRequest) ([]retrieval.ScoredPoint, error) {
+	return nil, errors.New("the executor should never have been reached")
+}
+
+// TestSearchKnowledge_EmbedderHangs_NamesTheEmbedderNotQdrant is the interaction between the search
+// deadline and the embedder's own retry loop. When the deadline fires while ServiceEmbedder is still
+// retrying, the error that comes back is not the retry-exhausted ErrBackend — it comes from one of
+// the outer-context checks — and it must still say the embedder died. An operator sent to the VPS
+// because the local embedding service stopped is worse off than with the raw error.
+func TestSearchKnowledge_EmbedderHangs_NamesTheEmbedderNotQdrant(t *testing.T) {
+	// Shorter than the embedder's own per-attempt timeout, so the deadline lands mid-retry rather
+	// than after the retries are exhausted. In production the ordering is the other way round by
+	// construction (TestSearchDeadline_ExceedsTheEmbedderBudget); this forces the harder path.
+	restore := searchDeadline
+	searchDeadline = 100 * time.Millisecond
+	t.Cleanup(func() { searchDeadline = restore })
+
+	logged := captureLogs(t)
+	cs := connect(t, testConfig(), hangingEmbedder(t))
+
+	res := callRaw(t, cs, `{"query":"anything"}`)
+	if !res.IsError {
+		t.Fatalf("an embedder that never answered produced a success result: %s", resultText(t, res))
+	}
+	msg := resultText(t, res)
+
+	if !strings.Contains(msg, unavailableHeader) {
+		t.Errorf("an embedder that never answered was not reported as unavailable:\n%s", msg)
+	}
+	if !strings.Contains(msg, testConfig().EmbedderEndpoint) {
+		t.Errorf("the message does not name the embedding service that died:\n%s", msg)
+	}
+	// The other half, and the one an operator pays for: this must not send anyone to the VPS.
+	if strings.Contains(msg, testConfig().QdrantEndpoint) {
+		t.Errorf("a dead local embedder was reported as a Qdrant outage:\n%s", msg)
+	}
+	if !strings.Contains(logged.String(), `"unavailable":"embedder"`) {
+		t.Errorf("the log record does not name the embedder as the component that was down:\n%s",
+			logged.String())
+	}
+}
+
+// TestSearchDeadline_ExceedsTheEmbedderBudget pins the ordering the two timeouts have to keep. A
+// search deadline that could fire while ServiceEmbedder was still retrying would silently shorten
+// MaxRetries — a transient blip the retry absorbs would surface as an outage — and the error would
+// carry only "deadline exceeded" instead of the transport failure underneath it. A real constraint
+// between two numbers in two files, not a tautology about arithmetic.
+func TestSearchDeadline_ExceedsTheEmbedderBudget(t *testing.T) {
+	p := embedProfile("http://embedder.internal:8080")
+
+	// Every attempt runs its full timeout, and backoff doubles from 250 ms between them.
+	budget := time.Duration(p.MaxRetries) * p.Timeout
+	delay := 250 * time.Millisecond
+	for range p.MaxRetries - 1 {
+		budget += delay
+		delay *= 2
+	}
+
+	if budget >= searchDeadline {
+		t.Errorf("the embedder can spend up to %v before giving up, but the search deadline is %v: "+
+			"the deadline would cut the retry loop short and MaxRetries would be a lie",
+			budget, searchDeadline)
+	}
+}
+
+// TestSearchKnowledge_NonAvailabilityFailure_KeepsItsOwnMessage is the other half, and the one that
+// decides whether the classifier is worth having: a server that answered, however badly, must not be
+// reported as an outage. Getting this wrong would teach the caller to excuse real bugs.
+func TestSearchKnowledge_NonAvailabilityFailure_KeepsItsOwnMessage(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err  error
+		want string
+	}{
+		"collection does not exist": {qdrantErr(codes.NotFound, "Collection `interno` doesn't exist"), "doesn't exist"},
+		"malformed request":         {qdrantErr(codes.InvalidArgument, "Bad request: index for field area not found"), "index for field area not found"},
+		"wrong credential":          {qdrantErr(codes.Unauthenticated, "Must provide an API key"), "Must provide an API key"},
+		// Cancelled is this side hanging up, not the far side going away. Reporting it as an outage
+		// would blame the infrastructure for the client's own disconnect.
+		"caller cancelled": {qdrantErr(codes.Canceled, "context canceled"), "context canceled"},
+		// No status at all: the text says "connection refused", which is exactly the trap a classifier
+		// that matched on message text instead of on the status would fall into.
+		"error carries no status": {errors.New("qdrant: connection refused"), "connection refused"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			logged := captureLogs(t)
+			cs := connect(t, testConfig(), &fakeSearcher{errs: []error{tc.err}})
+
+			res := callRaw(t, cs, `{"query":"anything"}`)
+			if !res.IsError {
+				t.Fatalf("the failure produced a success result: %s", resultText(t, res))
+			}
+			msg := resultText(t, res)
+
+			if strings.Contains(msg, unavailableHeader) {
+				t.Errorf("a failure that is not an outage was reported as one:\n%s", msg)
+			}
+			if !strings.Contains(msg, tc.want) {
+				t.Errorf("the error result no longer says what failed (want %q):\n%s", tc.want, msg)
+			}
+			if strings.Contains(logged.String(), `"unavailable"`) {
+				t.Errorf("the log record marks a non-outage as an outage:\n%s", logged.String())
+			}
+		})
+	}
+}
+
+// TestSearchKnowledge_BadFilter_IsNotDressedUpAsAnOutage covers the failure that never reaches the
+// searcher at all: validateFilters rejects it before any backend is touched, so there is nothing
+// unavailable about it, and its own message is the useful one (it lists the valid values).
+func TestSearchKnowledge_BadFilter_IsNotDressedUpAsAnOutage(t *testing.T) {
+	fake := &fakeSearcher{results: sampleResults()}
+	cs := connect(t, testConfig(), fake)
+
+	res := callRaw(t, cs, `{"query":"x","area":"not-an-area"}`)
+	if !res.IsError {
+		t.Fatalf("an unknown area was accepted: %s", resultText(t, res))
+	}
+	msg := resultText(t, res)
+	if strings.Contains(msg, unavailableHeader) {
+		t.Errorf("a rejected filter was reported as an unavailable knowledge base:\n%s", msg)
+	}
+	if !strings.Contains(msg, "unknown area") {
+		t.Errorf("the rejection no longer explains itself:\n%s", msg)
+	}
+}
+
+// TestSearchKnowledge_UnavailableMessageNeverCarriesTheCredential pins the scrubbing on the new
+// path. The rewritten message quotes the underlying error, so it is a fresh way for the key to get
+// out; this is the same assertion as the plain-error test, aimed at the branch that did not exist.
+func TestSearchKnowledge_UnavailableMessageNeverCarriesTheCredential(t *testing.T) {
+	cfg := testConfig()
+	logged := captureLogs(t)
+	cs := connect(t, cfg, &fakeSearcher{
+		errs: []error{qdrantErr(codes.Unavailable, "connection error while authenticating with api key "+cfg.QdrantAPIKey)},
+	})
+
+	res := callRaw(t, cs, `{"query":"anything"}`)
+	msg := resultText(t, res)
+	if !strings.Contains(msg, unavailableHeader) {
+		t.Fatalf("the classifier did not fire, so this test proves nothing about its scrubbing:\n%s", msg)
+	}
+	if strings.Contains(msg, cfg.QdrantAPIKey) {
+		t.Errorf("the unavailability message leaks the credential:\n%s", msg)
+	}
+	if strings.Contains(logged.String(), cfg.QdrantAPIKey) {
+		t.Errorf("the log leaks the credential:\n%s", logged.String())
 	}
 }
 
