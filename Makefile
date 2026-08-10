@@ -1,4 +1,9 @@
-.PHONY: test lint build test-integration cover
+.PHONY: test lint build test-integration test-embedder cover
+
+# Interpreter of the virtualenv that has FlagEmbedding installed — the same variable
+# knowrag-embedder.env already defines for the systemd unit, so an installed machine exports it
+# once and both agree.
+KNOWRAG_PYTHON ?= python3
 
 test:
 	go test ./...
@@ -27,6 +32,18 @@ cover:
 # ingestion of its own, stacked on top of however long NFR-4 took to overrun.
 test-integration:
 	go test -tags integration -timeout 60m ./...
+
+# D-24's test_server.py. Like test-integration above it needs equipment the CI runner does not
+# have — `server.py` imports torch and FlagEmbedding at module scope, so importing it at all needs
+# the embedder virtualenv — and for the same reason it is a separate target that `test` does not
+# call, rather than something that turns CI red on a plain ubuntu runner. No test here loads the
+# model or touches the GPU; the venv is needed only to satisfy those two module-scope imports.
+# Trigger: the private runner, and any change to `to_sparse` or to the response format.
+#
+# `cd` because the test imports `server` as a sibling module, and unittest only puts the directory
+# it is invoked from on sys.path.
+test-embedder:
+	cd scripts/embedder-service && $(KNOWRAG_PYTHON) -m unittest -v test_server
 
 lint:
 	golangci-lint run ./...

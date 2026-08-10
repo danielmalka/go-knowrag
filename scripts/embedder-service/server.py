@@ -83,6 +83,21 @@ def handshake() -> dict:
     }
 
 
+def check_probe(probe: dict) -> None:
+    """Assert the two handshake fields that are claims about behaviour rather than about config.
+
+    A model that silently stopped normalizing would still report normalized:true from a constant,
+    and the client would trust it -- so the constant is checked against a real vector once, here,
+    where failing is loud and cheap. Split out of `main()` so this logic -- one of the two D-24
+    mitigations that justified shipping without tests -- can be exercised without a GPU.
+    """
+    norm = float((probe["dense_vecs"][0] ** 2).sum() ** 0.5)
+    if abs(norm - 1.0) > 1e-3:
+        raise SystemExit(f"dense vectors are not normalized (norm={norm:.6f}); handshake would lie")
+    if not probe["lexical_weights"][0]:
+        raise SystemExit("sparse weights came back empty; this build cannot serve hybrid search")
+
+
 def to_sparse(weights: dict) -> dict:
     """Convert FlagEmbedding's {token_id: weight} into the contract's indices/values pair.
 
@@ -216,17 +231,9 @@ def main() -> None:
     print(f"loading {MODEL_ID}@{REVISION[:8]} on {args.device} (measured ~315s)...", flush=True)
     load_model(args.device, use_fp16=not args.fp32)
 
-    # Assert the two handshake fields that are claims about behaviour rather than about config.
-    # A model that silently stopped normalizing would still report normalized:true from a constant,
-    # and the client would trust it -- so the constant is checked against a real vector once, here,
-    # where failing is loud and cheap.
     probe = _model.encode(["handshake probe"], return_dense=True, return_sparse=True,
                           return_colbert_vecs=False)
-    norm = float((probe["dense_vecs"][0] ** 2).sum() ** 0.5)
-    if abs(norm - 1.0) > 1e-3:
-        raise SystemExit(f"dense vectors are not normalized (norm={norm:.6f}); handshake would lie")
-    if not probe["lexical_weights"][0]:
-        raise SystemExit("sparse weights came back empty; this build cannot serve hybrid search")
+    check_probe(probe)
 
     hs = handshake()
     print(json.dumps(hs), flush=True)

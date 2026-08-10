@@ -1,6 +1,9 @@
 docs
 bin/
 cover.out
+
+# `make test-embedder` importa server.py, e o CPython escreve o bytecode ao lado do fonte
+__pycache__/
 internal/schema/applied_state.json.tmp-*
 
 # secrets — nunca commitar num repo publico
