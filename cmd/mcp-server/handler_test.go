@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"google.golang.org/grpc/codes"
@@ -519,6 +520,132 @@ func TestSearchKnowledge_KnowledgeLayerDown_SaysUnavailableNotEmpty(t *testing.T
 					want, logged.String())
 			}
 		})
+	}
+}
+
+// TestSearchKnowledge_HungBackend_TimesOutInsteadOfHanging is the live-but-slow case ADR-007 §4
+// promises is covered. It is the only test here that proves searchDeadline exists: everything else
+// is handed an error that was already built, and a hand-built DeadlineExceeded proves only that the
+// classifier reads codes. This one gives the handler a searcher that answers never.
+//
+// searchDeadline is shrunk rather than waited out, so the test costs 200 ms instead of ten seconds.
+// Deleting the deadline makes this fail in hangCap rather than hang: see fakeSearcher.
+func TestSearchKnowledge_HungBackend_TimesOutInsteadOfHanging(t *testing.T) {
+	restore := searchDeadline
+	searchDeadline = 200 * time.Millisecond
+	t.Cleanup(func() { searchDeadline = restore })
+
+	logged := captureLogs(t)
+	cs := connect(t, testConfig(), &fakeSearcher{hangs: true})
+
+	res := callRaw(t, cs, `{"query":"anything"}`)
+	if !res.IsError {
+		t.Fatalf("a search that never completed produced a success result: %s", resultText(t, res))
+	}
+	msg := resultText(t, res)
+	if !strings.Contains(msg, unavailableHeader) {
+		t.Errorf("a backend that never answered was not reported as unavailable:\n%s", msg)
+	}
+	if !strings.Contains(logged.String(), `"unavailable":"qdrant"`) {
+		t.Errorf("the log record does not name Qdrant as the component that was down:\n%s", logged.String())
+	}
+}
+
+// hangingEmbedder is a real *retrieval.Searcher wired to a real *embed.ServiceEmbedder whose
+// transport accepts the request and never answers — the local embedding service stopped, or wedged.
+//
+// The point of assembling the real thing is that no error in this test is written by hand. The one
+// that reaches the handler is whatever ServiceEmbedder and retrieval.Search actually produce when
+// the outer deadline expires mid-retry, which is the path the hand-built embedderDownErr() helper
+// cannot reach: that helper only builds the retry-exhausted ErrBackend, and would keep passing
+// while the deadline path returned a bare context error naming no component at all.
+func hangingEmbedder(t *testing.T) Searcher {
+	t.Helper()
+
+	profile := embedProfile(testConfig().EmbedderEndpoint)
+	embedder, err := embed.NewServiceEmbedder(profile, hangingTransport{})
+	if err != nil {
+		t.Fatalf("embed.NewServiceEmbedder: %v", err)
+	}
+	// The executor is never reached: the query dies at the embedding step, which is the scenario.
+	return retrieval.NewSearcher(embedder, deadExecutor{}, retrieval.DefaultConfig())
+}
+
+type hangingTransport struct{}
+
+func (hangingTransport) Embed(ctx context.Context, _ []string, _ embed.Kind) ([]embed.Embedding, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (hangingTransport) Info(context.Context) (embed.BackendHandshakeInfo, error) {
+	return embed.BackendHandshakeInfo{}, errors.New("hangingTransport: no handshake")
+}
+
+type deadExecutor struct{}
+
+func (deadExecutor) ExecuteQuery(context.Context, retrieval.SearchRequest) ([]retrieval.ScoredPoint, error) {
+	return nil, errors.New("the executor should never have been reached")
+}
+
+// TestSearchKnowledge_EmbedderHangs_NamesTheEmbedderNotQdrant is the interaction between the search
+// deadline and the embedder's own retry loop. When the deadline fires while ServiceEmbedder is still
+// retrying, the error that comes back is not the retry-exhausted ErrBackend — it comes from one of
+// the outer-context checks — and it must still say the embedder died. An operator sent to the VPS
+// because the local embedding service stopped is worse off than with the raw error.
+func TestSearchKnowledge_EmbedderHangs_NamesTheEmbedderNotQdrant(t *testing.T) {
+	// Shorter than the embedder's own per-attempt timeout, so the deadline lands mid-retry rather
+	// than after the retries are exhausted. In production the ordering is the other way round by
+	// construction (TestSearchDeadline_ExceedsTheEmbedderBudget); this forces the harder path.
+	restore := searchDeadline
+	searchDeadline = 100 * time.Millisecond
+	t.Cleanup(func() { searchDeadline = restore })
+
+	logged := captureLogs(t)
+	cs := connect(t, testConfig(), hangingEmbedder(t))
+
+	res := callRaw(t, cs, `{"query":"anything"}`)
+	if !res.IsError {
+		t.Fatalf("an embedder that never answered produced a success result: %s", resultText(t, res))
+	}
+	msg := resultText(t, res)
+
+	if !strings.Contains(msg, unavailableHeader) {
+		t.Errorf("an embedder that never answered was not reported as unavailable:\n%s", msg)
+	}
+	if !strings.Contains(msg, testConfig().EmbedderEndpoint) {
+		t.Errorf("the message does not name the embedding service that died:\n%s", msg)
+	}
+	// The other half, and the one an operator pays for: this must not send anyone to the VPS.
+	if strings.Contains(msg, testConfig().QdrantEndpoint) {
+		t.Errorf("a dead local embedder was reported as a Qdrant outage:\n%s", msg)
+	}
+	if !strings.Contains(logged.String(), `"unavailable":"embedder"`) {
+		t.Errorf("the log record does not name the embedder as the component that was down:\n%s",
+			logged.String())
+	}
+}
+
+// TestSearchDeadline_ExceedsTheEmbedderBudget pins the ordering the two timeouts have to keep. A
+// search deadline that could fire while ServiceEmbedder was still retrying would silently shorten
+// MaxRetries — a transient blip the retry absorbs would surface as an outage — and the error would
+// carry only "deadline exceeded" instead of the transport failure underneath it. A real constraint
+// between two numbers in two files, not a tautology about arithmetic.
+func TestSearchDeadline_ExceedsTheEmbedderBudget(t *testing.T) {
+	p := embedProfile("http://embedder.internal:8080")
+
+	// Every attempt runs its full timeout, and backoff doubles from 250 ms between them.
+	budget := time.Duration(p.MaxRetries) * p.Timeout
+	delay := 250 * time.Millisecond
+	for range p.MaxRetries - 1 {
+		budget += delay
+		delay *= 2
+	}
+
+	if budget >= searchDeadline {
+		t.Errorf("the embedder can spend up to %v before giving up, but the search deadline is %v: "+
+			"the deadline would cut the retry loop short and MaxRetries would be a lie",
+			budget, searchDeadline)
 	}
 }
 

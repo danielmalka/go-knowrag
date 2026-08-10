@@ -26,6 +26,32 @@ const (
 	maxTopK     = 20
 )
 
+// searchDeadline bounds one search, and it is what makes the classification below able to fire at
+// all on a live-but-hung Qdrant.
+//
+// Nothing else on the Qdrant path carries a deadline: main.go builds the root context from
+// signal.NotifyContext, which has none, and it reaches the gRPC call unmodified. Without this, a
+// Qdrant that accepts the connection and then never answers produces no error, no log record and no
+// MCP response — a harder silence than the raw transport error this whole change exists to replace,
+// and the opposite of what ADR-007 §4 says happens ("um Qdrant vivo mas lento entra como
+// indisponível, e de propósito").
+//
+// The number is deliberately not the NFR. NFR-1 (PRD.md, NFR table) gates search at p95 ≤ 3 s and
+// p99 ≤ 5 s end-to-end; this is the point past which the answer is worthless to the agent that
+// asked, so it sits at twice the p99 ceiling — a search between 5 s and 10 s is reported as a slow
+// search that still answered, and only past 10 s is it reported as an outage.
+//
+// It has one constraint, and moving it means rechecking that constraint: it must stay above the
+// embedder's own worst case (embedProfile in main.go: 2 attempts of 4 s plus 0,25 s of backoff =
+// 8,25 s). A deadline that can fire mid-retry silently shortens MaxRetries, so a blip the retry
+// would have absorbed is reported as an outage instead, and the error that comes back says only
+// "deadline exceeded" rather than carrying the last transport failure an operator needs to read.
+// Naming the right component is no longer at stake there — embed.outerCtxErr makes a deadline-killed
+// embedding call an ErrBackend, so it identifies itself either way — but the retry policy is.
+//
+// A var rather than a const only so a test can shrink it; nothing at run time writes it.
+var searchDeadline = 10 * time.Second
+
 // SearchKnowledgeInput is the tool's entire input surface.
 //
 // What is absent is the design: there is no tenant_id and no collection field, so those are not
@@ -125,6 +151,13 @@ func searchKnowledgeHandler(cfg Config, searcher Searcher) mcp.ToolHandlerFor[Se
 			// (S09 / ADR-002 §2.4); an MCP client is not a privileged caller.
 		}
 
+		// The deadline is attached here and nowhere else. How long a caller waits for a search is a
+		// product decision about this tool, and internal/store — where it would otherwise be
+		// tempting to put it — is also the ingestion path, whose budget is half an hour (NFR-4)
+		// rather than seconds.
+		ctx, cancel := context.WithTimeout(ctx, searchDeadline)
+		defer cancel()
+
 		results, err := searcher.Search(ctx, q)
 		if err != nil {
 			return nil, nil, logAndWrap(cfg, start, 0, fmt.Errorf("search failed: %w", err))
@@ -216,7 +249,11 @@ func logAndWrap(cfg Config, start time.Time, resultCount int, err error) error {
 //
 // codes.Canceled is deliberately absent. It means this side stopped the call — the MCP client
 // disconnected, or its context was cancelled — so nothing about the knowledge base is down, and
-// there is generally nobody left to read the explanation anyway. Every other code is a server that
+// there is generally nobody left to read the explanation anyway. That reading depends on
+// searchDeadline existing: a client giving up on a query that hangs forever would also arrive here
+// as Canceled, and in that case the knowledge base *is* down. searchDeadline fires at 10 s, long
+// before any client's own patience runs out, so a hang reaches this switch as DeadlineExceeded and
+// Canceled keeps meaning only what it says. Every other code is a server that
 // did answer: NotFound for a collection that does not exist, InvalidArgument for a malformed
 // filter, Unauthenticated for a wrong key. Those keep their own message, and that half matters as
 // much as this one — announcing an outage when the real cause is a bug teaches the caller to excuse

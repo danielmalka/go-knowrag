@@ -87,13 +87,37 @@ func run() error {
 // so the batching knobs the ingestion path needs are irrelevant here; the timeout is short because
 // a search that takes a minute has already failed as far as the agent asking is concerned.
 //
-// ponytail: not configurable. Promote to settings when a deployment needs different numbers.
+// Timeout is per attempt, so the whole embedding leg is bounded by 2×4 s plus 0,25 s of backoff =
+// 8,25 s. That total is the number that matters, and it has to stay below searchDeadline: a search
+// deadline that could fire while this leg was still retrying would silently shorten MaxRetries,
+// turning a blip the retry absorbs into a reported outage and dropping the last transport failure
+// from the error.
+//
+// The per-attempt number is not derived from a healthy idle service, and that is the point. Idle,
+// a query embed measures 50–92 ms (ADR-001 §6.2's p99 of 71 ms, re-measured 2026-08-10), so almost
+// any timeout would do. But scripts/embedder-service/server.py serialises every request behind one
+// threading.Lock, and the ingestion profile below in this same binary's sibling command runs
+// BatchSize 32 with MaxConcurrent 2 — so a query issued during an ingestion does not share the GPU,
+// it *queues* behind up to two 32-chunk batches. Measured on the live service: a 32-chunk batch
+// takes 1,13–1,24 s, a query behind one batch returns in ~1,1 s, and a query behind two returns in
+// ~2,3 s. Four seconds leaves ~1,7× headroom over that worst case; two seconds did not, and would
+// have reported KNOWLEDGE BASE UNAVAILABLE for a service that was up, healthy and busy.
+//
+// MaxRetries is 2 rather than 3 for the same reason, and it is the trade that lets the budget fit:
+// against a serialised queue a longer single attempt beats more short ones, because every retry
+// rejoins the same queue. Two attempts of 4 s ride out a longer stall than three of 2 s and cost
+// 1,5 s less wall clock.
+//
+// ponytail: calibrated around a server that cannot prioritise a query over a batch. The real fix is
+// in server.py's single lock, not in these numbers — see the debt candidate raised 2026-08-10. If
+// the ingestion profile's MaxConcurrent ever rises, re-measure: the queue in front of a query grows
+// with it and this margin does not.
 func embedProfile(endpoint string) embed.Profile {
 	return embed.Profile{
 		Endpoint:      endpoint,
-		Timeout:       15 * time.Second,
+		Timeout:       4 * time.Second,
 		BatchSize:     1,
 		MaxConcurrent: 1,
-		MaxRetries:    3,
+		MaxRetries:    2,
 	}
 }

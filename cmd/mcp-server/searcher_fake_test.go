@@ -2,10 +2,19 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync"
+	"time"
+
+	"google.golang.org/grpc/status"
 
 	"github.com/danielmalka/go-knowrag/internal/retrieval"
 )
+
+// hangCap is how long the hanging fake waits for a cancellation that should have come. It only
+// matters when the code under test is broken; a working deadline fires long before it.
+const hangCap = 2 * time.Second
 
 // fakeSearcher is the deterministic Searcher the handler tests drive.
 //
@@ -19,15 +28,39 @@ type fakeSearcher struct {
 	results []retrieval.Result
 	// errs is consumed one per call; a nil entry (or running past the end) means success.
 	errs []error
+
+	// hangs makes every call block until the caller's context runs out, which is a Qdrant that
+	// accepts the connection and then never answers. Nothing but a real deadline unblocks it.
+	hangs bool
 }
 
-func (f *fakeSearcher) Search(_ context.Context, q retrieval.Query) ([]retrieval.Result, error) {
+func (f *fakeSearcher) Search(ctx context.Context, q retrieval.Query) ([]retrieval.Result, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
-
 	n := len(f.queries)
 	f.queries = append(f.queries, q)
+	hangs := f.hangs
+	f.mu.Unlock()
 
+	if hangs {
+		select {
+		case <-ctx.Done():
+			// status.FromContextError is the conversion the gRPC client makes internally, and the
+			// wrap is internal/store's. Verified against a real dial to a listener that accepts and
+			// never speaks: the expired context comes back as `rpc error: code = DeadlineExceeded
+			// desc = context deadline exceeded while waiting for connections to become ready`, and
+			// notably *not* as anything errors.Is(ctx.DeadlineExceeded) would match.
+			return nil, fmt.Errorf("querying %s: %w", q.Collection, status.FromContextError(ctx.Err()).Err())
+		case <-time.After(hangCap):
+			// Nothing cancelled the call. Returning instead of blocking forever is what lets a
+			// missing deadline show up as a failed assertion rather than as a wedged package: the
+			// MCP session's Close waits for the in-flight handler, so a fake that truly never
+			// returns hangs the test's own cleanup and takes the whole `go test` timeout with it.
+			return nil, errors.New("the searcher was never cancelled: nothing bounds how long a search may take")
+		}
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if n < len(f.errs) && f.errs[n] != nil {
 		return nil, f.errs[n]
 	}

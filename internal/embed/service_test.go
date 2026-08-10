@@ -328,8 +328,45 @@ func TestServiceEmbedder_EmbedDocuments_CallerCancellationIsNotRetried(t *testin
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("error %v is not a cancellation error", err)
 	}
+	// The other half of outerCtxErr, and the half that is easy to lose: a deadline on the caller's
+	// context means the service never answered and is reported as ErrBackend, but a cancellation
+	// means the caller stopped asking. Wrapping both would report every client disconnect as an
+	// outage of the embedding service.
+	if errors.Is(err, ErrBackend) {
+		t.Errorf("a cancelled call was reported as a backend failure: %v", err)
+	}
 	if calls.Load() > 1 {
 		t.Errorf("a cancelled call was retried %d times; the caller asked it to stop", calls.Load())
+	}
+}
+
+// TestServiceEmbedder_OuterDeadlineMidRetry_IsBackendFailure is the case the MCP server's search
+// deadline created: the outer context dies while callWithRetry is between attempts, so the return
+// comes from one of the ctx.Err() checks rather than from the retry-exhausted path at the bottom.
+// Before outerCtxErr those returns handed back a bare context error that named no component at all.
+func TestServiceEmbedder_OuterDeadlineMidRetry_IsBackendFailure(t *testing.T) {
+	e := newTestEmbedder(t, &stubTransport{
+		embed: func(ctx context.Context, _ []string) ([]Embedding, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	})
+
+	// Shorter than the per-attempt Timeout, so it is the caller's deadline that ends the call and
+	// not the attempt's own — that is the whole distinction being tested.
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	_, err := e.EmbedQuery(ctx, "anything")
+	if !errors.Is(err, ErrBackend) {
+		t.Errorf("an embedding call killed by the caller's deadline does not match ErrBackend, so a "+
+			"consumer cannot tell which component died: %v", err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("the context error was dropped from the chain: %v", err)
+	}
+	if !strings.Contains(err.Error(), testProfile().Endpoint) {
+		t.Errorf("the error does not name the endpoint that failed to answer: %v", err)
 	}
 }
 
