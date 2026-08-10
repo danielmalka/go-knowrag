@@ -176,6 +176,24 @@ de assumidas.
 Primeira execução baixa ~2,3 GB de pesos. Com cache, sobe em segundos. `--fp32` troca precisão por
 VRAM; o default é fp16, que ocupa ~1,2 GB.
 
+O serviço é residente e nada o traz de volta sozinho depois de um reboot ou de um `kill`. Para deixar
+isso com o init em vez de com você, há um unit de usuário do systemd em
+`scripts/embedder-service/`:
+
+```bash
+mkdir -p ~/.config/knowrag ~/.config/systemd/user
+cp scripts/embedder-service/knowrag-embedder.env.example ~/.config/knowrag/embedder.env
+$EDITOR ~/.config/knowrag/embedder.env          # os caminhos desta máquina moram aqui, não no unit
+cp scripts/embedder-service/knowrag-embedder.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now knowrag-embedder
+loginctl enable-linger "$USER"                  # sem isto ele morre junto com a sessão
+```
+
+`journalctl --user -u knowrag-embedder -f` mostra o startup, inclusive a recusa de subir quando o
+modelo falha na verificação. Depois de instalar, vale confirmar que o restart funciona em vez de
+confiar no arquivo: `kill -9` no PID do serviço e checar que `/health` volta a responder sozinho.
+
 ### 3. Provisionar o schema e ingerir
 
 ```bash

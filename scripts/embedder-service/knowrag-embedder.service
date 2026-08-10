@@ -1,0 +1,44 @@
+[Unit]
+# Keeps the embedding runtime up. Everything downstream depends on it: `knowrag ingest` calls
+# /tokenize at every chunk boundary and /embed per batch, and the MCP server embeds every query.
+# Before this unit existed the process was started by hand and did not survive a reboot.
+#
+# This is a stopgap, not the runbook S12 will write. It restarts the process and nothing else: it
+# does not wait for the GPU, does not fall back to CPU, and does not tell anyone it is unhealthy.
+#
+# StartLimit* live here and not under [Service]. systemd ignores them there — silently, with only a
+# line in `systemd-analyze verify` to say so — which is how the first version of this file ended up
+# running with the 10 s default while its comment claimed 300.
+Description=go-knowrag embedding service (BGE-M3)
+After=network.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+
+# Every install-specific path is read from here, so this file carries none. See
+# knowrag-embedder.env.example for the keys. Without the `-`, a missing file is a start failure
+# rather than a service that comes up pointing at nothing.
+EnvironmentFile=%h/.config/knowrag/embedder.env
+
+# systemd expands variables in arguments but not in the executable itself, so the command runs
+# through `sh -c`. The quoting is what makes a path with a space work, and `exec` is what keeps
+# systemd supervising python rather than the shell that spawned it.
+ExecStart=/bin/sh -c 'exec "$KNOWRAG_PYTHON" "$KNOWRAG_REPO/scripts/embedder-service/server.py" --host "$KNOWRAG_EMBEDDER_HOST" --port "$KNOWRAG_EMBEDDER_PORT"'
+
+# There is deliberately no WorkingDirectory: server.py opens no file and builds no relative path, and
+# the model comes from the Hugging Face cache under the user's home. An earlier version of this unit
+# pinned a working directory and claimed the model cache depended on it. It does not.
+
+# Loading the weights takes ~11 s, so restarting is not free and a crash loop would thrash the GPU.
+Restart=always
+RestartSec=5
+
+# The server refuses to start when the model stops normalising its vectors or returns an empty sparse
+# half, so a failed start is a real signal and belongs in the journal.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
