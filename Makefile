@@ -16,10 +16,12 @@ cover:
 # target exists to run them somewhere. Trigger: the private runner, before every release, per the
 # runbook (PRD-stories-fundacao.md §3 S01). Gate: blocking — a red run blocks the release.
 #
-# It exits 0 with zero tests today, which is correct: no story has written one yet. S05 lands the
-# first (Qdrant schema against a live instance), S06a the full-corpus ingestion run.
+# The timeout has to sit above NFR-4's own gate, and `go test`'s default 10 min does not: a full
+# ingestion is a 30-minute contract that measured 12min54s, so the default kills the run at 10 min
+# and reports a panic instead of a verdict. 45 min leaves the gate room to fail as an assertion —
+# "took 31m, want ≤30m" — which is the only form of that failure anyone can act on.
 test-integration:
-	go test -tags integration ./...
+	go test -tags integration -timeout 45m ./...
 
 lint:
 	golangci-lint run ./...
