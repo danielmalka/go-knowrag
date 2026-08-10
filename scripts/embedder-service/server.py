@@ -104,6 +104,20 @@ def to_sparse(weights: dict) -> dict:
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
+    # TCP_NODELAY on every accepted connection. Without it this service answers a /tokenize in ~45 ms
+    # on a reused connection and ~1,5 ms on a fresh one — the inversion that D-25 measured, and the
+    # reason 94% of an ingestion run was spent waiting here. StreamRequestHandler leaves wfile
+    # unbuffered, so a response leaves as two writes: end_headers() batches the status line and the
+    # headers into one, then _send() writes the body. Nagle holds that second write until the first
+    # is acknowledged, and Linux delays that ACK by 40 ms.
+    #
+    # Why a fresh connection escaped it is NOT established here, and the obvious guess is wrong: the
+    # unbuffered wfile has no application buffer, so the flush on close is a no-op and cannot explain
+    # it. The likely cause is that Linux starts a connection in quickack mode and only falls back to
+    # delayed ACK after an interactive exchange — plausible, and not verified with a packet trace.
+    # The fix does not depend on that question being settled.
+    disable_nagle_algorithm = True
+
     def log_message(self, fmt, *args):  # noqa: A002 - stdlib signature
         pass  # the default logs every request to stderr; the caller already has its own logs
 

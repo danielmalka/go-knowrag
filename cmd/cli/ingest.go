@@ -149,6 +149,9 @@ func runIngest(ctx context.Context, out io.Writer, cfg *config.Config, opts inge
 	if err != nil {
 		return err
 	}
+	// D-25 (docs/debitos-tecnicos.md): before anyone optimizes chunking, count what it costs.
+	// Wrapping here means both dry-run and the real write path report through the same instrument.
+	counted := chunk.NewCountingTokenCounter(tokens)
 
 	scans, err := scanVaults(cfg, vaults)
 	if err != nil {
@@ -166,9 +169,9 @@ func runIngest(ctx context.Context, out io.Writer, cfg *config.Config, opts inge
 	}
 
 	if opts.dryRun {
-		return dryRun(ctx, out, scans, opts.chunkCfg, tokens)
+		return dryRun(ctx, out, scans, opts.chunkCfg, counted)
 	}
-	return ingestScans(ctx, out, cfg, opts, scans, tokens)
+	return ingestScans(ctx, out, cfg, opts, scans, counted)
 }
 
 // scanVaults turns each selected vault into a ScanResult, with the exclusions the operator
@@ -213,7 +216,7 @@ func dryRun(
 	out io.Writer,
 	scans []vault.ScanResult,
 	cfg chunk.Config,
-	tokens chunk.TokenCounter,
+	tokens *chunk.CountingTokenCounter,
 ) error {
 	totalNotes, totalChunks, totalOversize := 0, 0, 0
 	var failures []error
@@ -244,6 +247,7 @@ func dryRun(
 	_, _ = fmt.Fprintf(out,
 		"dry run: %d note(s), %d chunk(s) to embed, %d oversize — nothing was embedded or written\n",
 		totalNotes, totalChunks, totalOversize)
+	_, _ = fmt.Fprintln(out, tokens.Snapshot())
 
 	for _, err := range failures {
 		_, _ = fmt.Fprintf(out, "  - %v\n", err)
@@ -267,7 +271,7 @@ func ingestScans(
 	cfg *config.Config,
 	opts ingestOptions,
 	scans []vault.ScanResult,
-	tokens chunk.TokenCounter,
+	tokens *chunk.CountingTokenCounter,
 ) error {
 	client, err := store.NewQdrantClient(store.Config{
 		Endpoint: cfg.QdrantEndpoint,
@@ -313,6 +317,7 @@ func ingestScans(
 	// Printed before the failure check because a run with failures still did whatever it did to the
 	// notes it got through, and the operator needs to see that half.
 	_, _ = fmt.Fprintln(out, report)
+	_, _ = fmt.Fprintln(out, tokens.Snapshot())
 	if report.Failed() {
 		return errors.New("the run did not complete: see the failed note(s) above")
 	}
