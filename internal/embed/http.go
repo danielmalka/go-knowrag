@@ -27,9 +27,13 @@ type HTTPTransport struct {
 }
 
 // Kind is the /embed request's `kind` field. BGE-M3 uses no instruction prefix, so the server
-// currently produces the same vector either way; the field is sent because it is part of the
-// documented request, and because the day a runtime does distinguish them, a query embedded as a
-// passage is a recall bug with no error attached.
+// produces the same vector either way, and the day a runtime does distinguish them, a query
+// embedded as a passage is a recall bug with no error attached.
+//
+// It is not decoration in the meantime: the embedding service schedules on it. One resident model
+// serialises inference, and `kind: "query"` is what admits an interactive request ahead of the
+// ingestion batches queued in front of it (D-27). Sending KindPassage for a query would not corrupt
+// the vector — it would put a human behind a 32-chunk batch for every batch already waiting.
 type Kind string
 
 const (
