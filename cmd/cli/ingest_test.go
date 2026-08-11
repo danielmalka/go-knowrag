@@ -148,6 +148,51 @@ func TestRunIngest_MalformedArea_RefusedBeforeAnythingIsScanned(t *testing.T) {
 	}
 }
 
+// TestRunIngest_TwoVaults_EachScannedWithItsOwnSettings closes a gap that only existed after D-26.
+//
+// While the roster was a compile-time enum, settings came from cfg.VaultOf(v) — a switch with one
+// case per vault, where using the wrong vault's settings meant writing the wrong case and reading
+// it back wrong. The map-and-loop version cannot be written wrong that visibly: `cfg.Vaults[name]`
+// and `cfg.Vaults[names[0]]` differ by three characters and the compiler is happy with either.
+//
+// It was invisible to the fast gate too. Every other test in this file runs one vault, so a
+// scanVaults that ignored `name` entirely and always read the first roster entry passed the whole
+// package. Two vaults with different areas is the smallest input where that shows: `um` accepts
+// only `alfa` and `dois` only `beta`, so any mix-up makes one of the notes an unknown area and the
+// run fails instead of quietly reporting a count.
+func TestRunIngest_TwoVaults_EachScannedWithItsOwnSettings(t *testing.T) {
+	cfg := &config.Config{
+		EmbedderEndpoint: tokenizeStub(t),
+		Vaults: map[string]config.VaultSettings{
+			"um": {Path: writeVault(t, map[string]string{
+				"alfa/uma.md": note("0198a7f2-4b31-7c42-9e15-3d8a92c47b04", "Uma"),
+			}), Areas: "alfa"},
+			"dois": {Path: writeVault(t, map[string]string{
+				"beta/outra.md": note("0198a7f2-4b31-7c42-9e15-3d8a92c47b05", "Outra"),
+			}), Areas: "beta"},
+		},
+	}
+
+	var out bytes.Buffer
+	err := runIngest(context.Background(), &out, cfg, ingestOptions{
+		vaultFlag: bothVaults,
+		dryRun:    true,
+		tenantID:  defaultTenantID,
+		chunkCfg:  chunk.Config{FloorTokens: defaultFloorTokens, CeilingTokens: defaultCeilingTokens},
+	})
+	if err != nil {
+		t.Fatalf("runIngest over two vaults: %v — a vault scanned with another's settings makes its "+
+			"own area unknown, which is what this failure looks like", err)
+	}
+
+	got := out.String()
+	for _, want := range []string{"um: 1 note(s)", "dois: 1 note(s)", "2 note(s), 2 chunk(s) to embed"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("dry-run output %q does not contain %q", got, want)
+		}
+	}
+}
+
 // TestIngestCmd_RegistersItsFlags proves the flags were actually registered rather than only
 // documented: cobra generates the help text from the registered set, so a flag missing from it is
 // a flag the operator cannot pass.

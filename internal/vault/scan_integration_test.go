@@ -39,6 +39,30 @@ func TestScanVault_RealVaults_Integration(t *testing.T) {
 		t.Skip("KNOWRAG_VAULTS names no vault")
 	}
 
+	// The format check is here because config.Load no longer does it: it moved to RequireVaults so
+	// that one mistyped area could not fail `knowrag --help`, and this file reads the roster without
+	// going through the CLI at all. Until that move, this test inherited the guarantee for free.
+	//
+	// Fatal and not Skip, unlike every other guard in this function. Those guard the *environment* —
+	// no configuration, no roster, a vault this host does not have — and skipping is the honest
+	// answer to each. A name that is not a slug is not a missing environment, it is a broken
+	// configuration, and a skip here would be the same defect this file was just repaired for: an
+	// integration test that reports nothing and reads exactly like one that passed.
+	//
+	// Only the shape is checked, not presence. The per-vault skips below already cover a vault this
+	// host has not finished setting up, and turning those into failures would break the very thing
+	// the build tag exists to allow.
+	for _, name := range names {
+		if err := config.ValidateSlug("vault name", name); err != nil {
+			t.Fatal(err)
+		}
+		for _, area := range cfg.Vaults[name].AreaNames() {
+			if err := config.ValidateSlug("area", area); err != nil {
+				t.Fatalf("vault %q: %v", name, err)
+			}
+		}
+	}
+
 	scanned := make([]ScanResult, 0, len(names))
 
 	for _, name := range names {
