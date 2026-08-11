@@ -12,7 +12,7 @@ import (
 )
 
 // The instance's own environment variables. They are deliberately *not* the ones internal/config
-// reads (QDRANT_API_KEY and friends): ADR-002 §2.2 fixes collection and tenant per instance, and
+// reads (QDRANT_ENDPOINT, KNOWRAG_ADMIN_QDRANT_API_KEY and friends): ADR-002 §2.2 fixes collection and tenant per instance, and
 // the PRD scope line fixes the Qdrant credential this process uses as the read-scoped runtime key.
 // A shared variable name would mean one exported secret serves both the administrative CLI and the
 // long-lived MCP process, which is the separation this list exists to make impossible to fumble.

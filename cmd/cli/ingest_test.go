@@ -354,7 +354,7 @@ func TestRunIngest_MissingSettings_NamesOnlyWhatTheRunNeeds(t *testing.T) {
 		"a real run needs Qdrant": {
 			dryRun:     false,
 			vaultFlag:  "trabalho",
-			wantNamed:  []string{"QDRANT_ENDPOINT", "QDRANT_API_KEY", "DEFAULT_COLLECTION"},
+			wantNamed:  []string{"QDRANT_ENDPOINT", "KNOWRAG_ADMIN_QDRANT_API_KEY", "DEFAULT_COLLECTION"},
 			wantAbsent: []string{"KNOWRAG_VAULT_PESSOAL_PATH"},
 		},
 		// A dry run reads the index now, so it needs the same settings the write path does. What it

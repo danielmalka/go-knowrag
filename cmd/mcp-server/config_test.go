@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+
+	"github.com/danielmalka/go-knowrag/internal/config"
 )
 
 // setInstanceEnv sets this build's instance variables and lets t.Setenv unset them afterwards.
@@ -56,8 +58,8 @@ func TestLoadConfig_MissingTenantID_ReturnsClearError(t *testing.T) {
 func TestLoadConfig_QdrantAPIKeyEnvVar_IsDistinctFromAdminKey(t *testing.T) {
 	setInstanceEnv(t)
 	t.Setenv(envQdrantAPIKey, "")
+	t.Setenv(config.AdminQdrantAPIKeyEnv, "admin-key")
 	t.Setenv("QDRANT_API_KEY", "admin-key")
-	t.Setenv("QDRANT_ADMIN_API_KEY", "admin-key")
 
 	cfg, err := LoadConfig()
 	if err == nil {

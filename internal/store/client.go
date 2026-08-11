@@ -75,7 +75,13 @@ func NewQdrantClient(cfg Config) (*qdrant.Client, error) {
 		return nil, err
 	}
 	if cfg.APIKey == "" {
-		return nil, fmt.Errorf("store: no Qdrant API key — set QDRANT_API_KEY")
+		// No variable is named here, and that is the correction rather than an omission: two
+		// entrypoints build this Config from two different credentials — cmd/cli from the
+		// administrative key, cmd/mcp-server from its scoped runtime one — so any single variable
+		// this message named would be the wrong one for one of them. Each entrypoint's own
+		// requirement check names its own variable before it ever reaches this constructor
+		// (config.Require for the CLI, LoadConfig for the server).
+		return nil, fmt.Errorf("store: the Qdrant API key in this Config is empty")
 	}
 
 	return qdrant.NewClient(&qdrant.Config{

@@ -282,7 +282,7 @@ do embedder, que ele nunca usa.
 | Variável | Para quê |
 |---|---|
 | `QDRANT_ENDPOINT` | `host:6334` — gRPC, o único protocolo que o código fala |
-| `QDRANT_API_KEY` | chave do Qdrant |
+| `KNOWRAG_ADMIN_QDRANT_API_KEY` | chave **administrativa** do Qdrant — a CLI aceita qualquer `--tenant` e qualquer `--collection`, então a credencial dela é a do operador. O servidor MCP lê `MCP_QDRANT_API_KEY` e nenhuma das duas cai para a outra |
 | `EMBEDDER_ENDPOINT` | URL do serviço de embedding, ex.: `http://127.0.0.1:7999` |
 | `DEFAULT_COLLECTION` | collection alvo |
 | `LOG_LEVEL` | opcional, default `info` |
@@ -338,6 +338,32 @@ o corpus real ainda não aconteceu.
 a busca filtra por um tenant que não tem ponto nenhum: zero resultados, sem erro, sem aviso. Do lado
 da ingestão o valor tem default (`interno`) e do lado do MCP é obrigatório — então é a variável do
 servidor que precisa ser escrita à mão para casar com um `--tenant` que talvez ninguém tenha digitado.
+
+### Flags de `knowrag search`
+
+```bash
+knowrag search "como rotacionar certificados" --tenant interno
+knowrag search "certificados" --tenant interno --area infra --json
+```
+
+| Flag | Default | Para quê |
+|---|---|---|
+| `--tenant` | **obrigatória** | o `tenant_id` de toda a busca; não existe valor que signifique "todos" |
+| `--collection` | `DEFAULT_COLLECTION` | a collection consultada |
+| `--area` | vazio | restringe a uma área; vazio busca todas |
+| `--top-k` | `5` | quantos chunks voltam |
+| `--include-archived` | desligado | inclui notas com `status: archived` |
+| `--include-private` | desligado | inclui notas com `visibility: private` |
+| `--json` | desligado | escreve o envelope JSON no stdout e mais nada |
+
+**`--include-private` é o caminho privilegiado, e é o único que existe.** A tool MCP não tem campo
+equivalente e estruturalmente não consegue pedir conteúdo privado — é por isso que ele mora aqui e
+por isso que a CLI usa credencial administrativa própria. A paridade entre esta busca e a do
+servidor MCP é definida com esta flag e `--include-archived` desligadas, e é verificada em cada
+`go test` por `cmd/mcp-server/search_parity_test.go`, sem rede e sem Qdrant.
+
+Exit codes: `0` ok, `2` erro de uso (o comando precisa mudar), `1` falha de backend (vale tentar de
+novo), `3` outra ingestão segurando o lock, `130` interrompido.
 
 ### Servidor MCP (`knowrag-mcp`)
 
