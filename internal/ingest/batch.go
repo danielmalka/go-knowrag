@@ -36,14 +36,16 @@ func RunBatch(ctx context.Context, d Deps, notes []vault.Note) (Report, error) {
 	return report, nil
 }
 
-// Orchestrate is the entry point that owns the two-vault sequence: scan results in, one report out.
+// Orchestrate is the entry point that owns the whole-roster sequence: scan results in, one report
+// out. It takes however many vaults the roster names — two was never a property of this function,
+// only of the enum that used to supply the list (D-26).
 //
 // The cross-vault duplicate check has to live here and nowhere else. vault.ScanVault sees one vault
 // per call and detects duplicates only inside it (S02 T6), while the point ID does not include
-// `vault` — so a uid repeated across MalkaLife and MalkaWay collides in Qdrant exactly like a uid
-// repeated inside one of them. This is the only place that holds both scan results at once, so this
-// is where the check runs: before the notes are flattened, and before any note from either vault
-// reaches RunBatch.
+// `vault` — so a uid repeated across two vaults collides in Qdrant exactly like a uid repeated
+// inside one of them. This is the only place that holds both scan results at once, so this is where
+// the check runs: before the notes are flattened, and before any note from either vault reaches
+// RunBatch.
 func Orchestrate(ctx context.Context, d Deps, scans ...vault.ScanResult) (Report, error) {
 	for i := range scans {
 		for j := i + 1; j < len(scans); j++ {

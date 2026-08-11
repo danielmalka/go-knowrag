@@ -26,7 +26,7 @@ import (
 // function's business. Over-inclusion here silently changes every point_hash in the index.
 func NoteMetadataFields(n Note) map[string]string {
 	return map[string]string{
-		"vault":      n.Vault.String(),
+		"vault":      n.Vault,
 		"path":       n.Path,
 		"type":       n.Type.String(),
 		"status":     n.Status.String(),
@@ -35,7 +35,7 @@ func NoteMetadataFields(n Note) map[string]string {
 		"title":      n.Title,
 		"lang":       n.Lang,
 		"created":    n.Created.UTC().Format(time.RFC3339),
-		"area":       n.Area.String(),
+		"area":       n.Area,
 		"sub":        n.Sub,
 	}
 }

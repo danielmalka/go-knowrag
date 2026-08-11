@@ -16,7 +16,7 @@ func scoredPoint(id string, score float32) ScoredPoint {
 			fieldChunkIndex: 2,
 			fieldText:       "cron jobs are configured in the workflow settings",
 			fieldHeadings:   []string{"Infra", "n8n", "Crons"},
-			fieldPath:       "projetos-pessoais/hermes-cron/cleanup.md",
+			fieldPath:       "delta/job-runner/cleanup.md",
 		},
 	}
 }
@@ -46,7 +46,7 @@ func TestFormatResults(t *testing.T) {
 	if first.Breadcrumb != "Infra > n8n > Crons" {
 		t.Errorf("Breadcrumb = %q, want the joined heading path", first.Breadcrumb)
 	}
-	if first.Path != "projetos-pessoais/hermes-cron/cleanup.md" {
+	if first.Path != "delta/job-runner/cleanup.md" {
 		t.Errorf("Path = %q", first.Path)
 	}
 	if first.Score != 0.9 {

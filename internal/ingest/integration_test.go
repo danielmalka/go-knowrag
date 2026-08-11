@@ -4,6 +4,7 @@ package ingest_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -15,7 +16,6 @@ import (
 	"github.com/danielmalka/go-knowrag/internal/config"
 	"github.com/danielmalka/go-knowrag/internal/embed"
 	"github.com/danielmalka/go-knowrag/internal/ingest"
-	"github.com/danielmalka/go-knowrag/internal/schema"
 	"github.com/danielmalka/go-knowrag/internal/store"
 	"github.com/danielmalka/go-knowrag/internal/vault"
 )
@@ -220,15 +220,16 @@ func ingestOnce(t *testing.T, cfg *config.Config, tenant string) (ingest.Report,
 	t.Helper()
 	start := time.Now()
 
-	scans := make([]vault.ScanResult, 0, len(schema.AllVaults()))
-	for _, v := range schema.AllVaults() {
-		settings, _ := cfg.VaultOf(v)
-		scan, err := vault.ScanVault(settings.Path, v, vault.Exclusions{
+	names := cfg.VaultNames()
+	scans := make([]vault.ScanResult, 0, len(names))
+	for _, name := range names {
+		settings := cfg.Vaults[name]
+		scan, err := vault.ScanVault(settings.Path, name, settings.AreaNames(), vault.Exclusions{
 			Folders:   settings.Folders(),
 			RootFiles: settings.RootFiles(),
 		})
 		if err != nil {
-			t.Fatalf("scanning vault %s at %s: %v", v, settings.Path, err)
+			t.Fatalf("scanning vault %s at %s: %v", name, settings.Path, err)
 		}
 		scans = append(scans, scan)
 	}
@@ -312,11 +313,7 @@ func realDeployment(t *testing.T) *config.Config {
 	// Exactly the needs `cli ingest` declares on its write path, computed the same way. A hand-written
 	// list here would drift from the command whose timing this file claims to be measuring.
 	need := config.NeedQdrant | config.NeedCollection | config.NeedEmbedder
-	for _, v := range schema.AllVaults() {
-		_, vaultNeed := cfg.VaultOf(v)
-		need |= vaultNeed
-	}
-	if err := cfg.Require(need); err != nil {
+	if err := errors.Join(cfg.Require(need), cfg.RequireVaults(cfg.VaultNames()...)); err != nil {
 		t.Skipf("NFR-4 and NFR-5 measure the real deployment against the real vaults: %v", err)
 	}
 	return cfg

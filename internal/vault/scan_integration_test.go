@@ -8,35 +8,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/danielmalka/go-knowrag/internal/schema"
+	"github.com/danielmalka/go-knowrag/internal/config"
 )
 
-// Real-vault exclusion configuration, PRD-contrato §2.4b as of 2026-08-08. It lives here rather
-// than in the production package on purpose: the lists are per-vault operator config (S01's
-// loader), and a copy compiled into internal/vault would make re-including PowerAI a code change.
-var realVaults = []struct {
-	vault      schema.Vault
-	env        string
-	exclusions Exclusions
-}{
-	{
-		vault: schema.VaultMalkaLife(),
-		env:   "KNOWRAG_VAULT_MALKALIFE_PATH",
-		exclusions: Exclusions{
-			Folders:   []string{"PowerAI", "resources", "templates"},
-			RootFiles: []string{"AGENTS.md", "CLAUDE.md", "CLEITON.md", "GEMINI.md"},
-		},
-	},
-	{
-		vault: schema.VaultMalkaWay(),
-		env:   "KNOWRAG_VAULT_MALKAWAY_PATH",
-		exclusions: Exclusions{
-			RootFiles: []string{"CLAUDE.md", "de-para-projetos.md"},
-		},
-	},
-}
-
 // TestScanVault_RealVaults_Integration runs the scanner against the actual corpus.
+//
+// The roster comes from config.Load(), never from a table in this file. An earlier version carried
+// one — names, area lists, exclusion lists, and a per-vault environment variable spelled out — and
+// it was the same defect D-26 was paid to remove, just relocated into a test. The failure mode is
+// what makes it worth a comment: a hard-coded `KNOWRAG_VAULT_<NAME>_PATH` whose <NAME> no longer
+// matches the operator's roster does not fail, it **skips**, and a skipped integration test reads
+// exactly like a passing one in the run output.
 //
 // Behind the `integration` build tag *and* skipped when a vault path is unset or absent: the tag
 // keeps it out of `make test`, the skip keeps `make test-integration` usable on a host that has
@@ -48,17 +30,51 @@ var realVaults = []struct {
 // to sync the vault into the WSL filesystem before ingesting. Logged, not gated — NFR-4 owns the
 // budget.
 func TestScanVault_RealVaults_Integration(t *testing.T) {
-	results := make(map[schema.Vault]ScanResult, len(realVaults))
+	cfg, err := config.Load()
+	if err != nil {
+		t.Skipf("no usable configuration: %v", err)
+	}
+	names := cfg.VaultNames()
+	if len(names) == 0 {
+		t.Skip("KNOWRAG_VAULTS names no vault")
+	}
 
-	for _, rv := range realVaults {
-		t.Run(rv.vault.String(), func(t *testing.T) {
-			root := os.Getenv(rv.env)
+	// The format check is here because config.Load no longer does it: it moved to RequireVaults so
+	// that one mistyped area could not fail `knowrag --help`, and this file reads the roster without
+	// going through the CLI at all. Until that move, this test inherited the guarantee for free.
+	//
+	// Fatal and not Skip, unlike every other guard in this function. Those guard the *environment* —
+	// no configuration, no roster, a vault this host does not have — and skipping is the honest
+	// answer to each. A name that is not a slug is not a missing environment, it is a broken
+	// configuration, and a skip here would be the same defect this file was just repaired for: an
+	// integration test that reports nothing and reads exactly like one that passed.
+	//
+	// Only the shape is checked, not presence. The per-vault skips below already cover a vault this
+	// host has not finished setting up, and turning those into failures would break the very thing
+	// the build tag exists to allow.
+	for _, name := range names {
+		if err := config.ValidateSlug("vault name", name); err != nil {
+			t.Fatal(err)
+		}
+		for _, area := range cfg.Vaults[name].AreaNames() {
+			if err := config.ValidateSlug("area", area); err != nil {
+				t.Fatalf("vault %q: %v", name, err)
+			}
+		}
+	}
+
+	scanned := make([]ScanResult, 0, len(names))
+
+	for _, name := range names {
+		settings := cfg.Vaults[name]
+		t.Run(name, func(t *testing.T) {
+			root := settings.Path
 			if root == "" {
-				t.Skipf("%s is not set", rv.env)
+				t.Skipf("vault %s has no configured path", name)
 			}
 			// #nosec G703 -- root is the operator-configured vault path this test exists to read
 			if _, err := os.Stat(root); err != nil {
-				t.Skipf("%s=%s is not readable: %v", rv.env, root, err)
+				t.Skipf("vault %s at %s is not readable: %v", name, root, err)
 			}
 
 			// gitUpdatedMap on its own first, so its cost is attributable. ScanVault below runs it
@@ -72,7 +88,10 @@ func TestScanVault_RealVaults_Integration(t *testing.T) {
 			t.Logf("gitUpdatedMap: %d paths in %.3fs", len(gitUpdated), gitElapsed.Seconds())
 
 			scanStart := time.Now()
-			result, err := ScanVault(root, rv.vault, rv.exclusions)
+			result, err := ScanVault(root, name, settings.AreaNames(), Exclusions{
+				Folders:   settings.Folders(),
+				RootFiles: settings.RootFiles(),
+			})
 			scanElapsed := time.Since(scanStart)
 			t.Logf("ScanVault (walk + read + parse + derive + git): %.3fs", scanElapsed.Seconds())
 			t.Logf("read phase alone (scan minus git): %.3fs",
@@ -104,26 +123,33 @@ func TestScanVault_RealVaults_Integration(t *testing.T) {
 					t.Errorf("%s: Updated is the zero time", n.Path)
 				}
 			}
-			results[rv.vault] = result
+			scanned = append(scanned, result)
 		})
 	}
 
-	life, haveLife := results[schema.VaultMalkaLife()]
-	way, haveWay := results[schema.VaultMalkaWay()]
-	if !haveLife || !haveWay {
-		t.Skip("cross-vault uid check needs both vaults to have scanned cleanly")
+	// Every pair, not one named pair: the point ID is uuid5(tenant_id + uid + chunk_index) and does
+	// not include `vault`, so a uid repeated across *any* two of them silently overwrites. With the
+	// roster now open-ended, checking only the first two would leave a third vault unguarded.
+	if len(scanned) < 2 {
+		t.Skip("cross-vault uid check needs at least two vaults to have scanned cleanly")
 	}
-	if err := CheckCrossVaultDuplicateUIDs(life, way); err != nil {
-		t.Errorf("cross-vault duplicate uid: %v", err)
+	total := 0
+	for i := range scanned {
+		total += len(scanned[i].Notes)
+		for j := i + 1; j < len(scanned); j++ {
+			if err := CheckCrossVaultDuplicateUIDs(scanned[i], scanned[j]); err != nil {
+				t.Errorf("cross-vault duplicate uid: %v", err)
+			}
+		}
 	}
-	t.Logf("total indexable notes across both vaults: %d", len(life.Notes)+len(way.Notes))
+	t.Logf("total indexable notes across %d vault(s): %d", len(scanned), total)
 }
 
 func logAreaHistogram(t *testing.T, result ScanResult) {
 	t.Helper()
 	counts := map[string]int{}
 	for _, n := range result.Notes {
-		counts[n.Area.String()]++
+		counts[n.Area]++
 	}
 	for area, n := range counts {
 		t.Logf("  area %-20s %4d", area, n)

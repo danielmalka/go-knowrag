@@ -21,7 +21,7 @@ func TestQuery_Validate(t *testing.T) {
 		{"valid", func(*Query) {}, DefaultPrefetchMultiplier, nil},
 		{"valid with offset", func(q *Query) { q.Offset = 10 }, DefaultPrefetchMultiplier, nil},
 		{"valid with every optional filter", func(q *Query) {
-			q.Area, q.Type, q.Vault, q.Tags = "infra", "concept", "malkaway", []string{"golang"}
+			q.Area, q.Type, q.Vault, q.Tags = "infra", "concept", "trabalho", []string{"golang"}
 			q.IncludeArchived, q.IncludePrivate = true, true
 		}, DefaultPrefetchMultiplier, nil},
 

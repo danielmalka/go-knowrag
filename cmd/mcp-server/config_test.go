@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
@@ -15,6 +16,7 @@ func setInstanceEnv(t *testing.T) {
 	t.Setenv(envQdrantEndpoint, "qdrant.internal:6334")
 	t.Setenv(envQdrantAPIKey, "runtime-read-key")
 	t.Setenv(envEmbedderEndpoint, "http://embedder.internal:8080")
+	t.Setenv(envAreas, "infra,research")
 }
 
 // TestLoadConfig_FixedCollectionAndTenant is S08 T1: the scope this instance serves comes from the
@@ -68,7 +70,7 @@ func TestLoadConfig_QdrantAPIKeyEnvVar_IsDistinctFromAdminKey(t *testing.T) {
 }
 
 func TestLoadConfig_MissingEverything_NamesEveryVariable(t *testing.T) {
-	for _, env := range []string{envCollection, envTenantID, envQdrantEndpoint, envQdrantAPIKey, envEmbedderEndpoint} {
+	for _, env := range []string{envCollection, envTenantID, envQdrantEndpoint, envQdrantAPIKey, envEmbedderEndpoint, envAreas} {
 		t.Setenv(env, "")
 	}
 
@@ -76,10 +78,85 @@ func TestLoadConfig_MissingEverything_NamesEveryVariable(t *testing.T) {
 	if err == nil {
 		t.Fatal("LoadConfig() = nil error with nothing set, want an error")
 	}
-	for _, env := range []string{envCollection, envTenantID, envQdrantEndpoint, envQdrantAPIKey, envEmbedderEndpoint} {
+	for _, env := range []string{envCollection, envTenantID, envQdrantEndpoint, envQdrantAPIKey, envEmbedderEndpoint, envAreas} {
 		if !strings.Contains(err.Error(), env) {
 			t.Errorf("error %q does not name %s — an operator would fix one variable per restart", err, env)
 		}
+	}
+}
+
+// TestLoadConfig_MissingAreas_NamedAlongsideOtherMissing pins the report shape the requirement asks
+// for explicitly: MCP_AREAS is one more entry in the same missing-variable report, not a separate
+// error a second restart is needed to discover.
+func TestLoadConfig_MissingAreas_NamedAlongsideOtherMissing(t *testing.T) {
+	setInstanceEnv(t)
+	t.Setenv(envAreas, "")
+	t.Setenv(envTenantID, "")
+
+	_, err := LoadConfig()
+	if err == nil {
+		t.Fatal("LoadConfig() = nil error with MCP_AREAS unset, want an error")
+	}
+	for _, env := range []string{envAreas, envTenantID} {
+		if !strings.Contains(err.Error(), env) {
+			t.Errorf("error %q does not name %s", err, env)
+		}
+	}
+}
+
+// TestLoadConfig_AreasBlankAfterTrim_TreatedAsMissing covers the edge the requirement calls out by
+// name: a list that is only commas and spaces has no areas in it, and must fail the same way an
+// unset variable does rather than starting a server that advertises nothing.
+func TestLoadConfig_AreasBlankAfterTrim_TreatedAsMissing(t *testing.T) {
+	setInstanceEnv(t)
+	t.Setenv(envAreas, " , , ")
+
+	_, err := LoadConfig()
+	if err == nil {
+		t.Fatal("LoadConfig() with a blank-after-trim MCP_AREAS = nil error, want one")
+	}
+	if !strings.Contains(err.Error(), envAreas) {
+		t.Errorf("error %q does not name %s", err, envAreas)
+	}
+}
+
+// TestLoadConfig_AreaNotASlug_NamesTheOffendingValue is the validation half: MCP_AREAS goes through
+// the same rule KNOWRAG_VAULT_*_AREAS does (config.ValidateSlug), so the server and the ingestor can
+// never disagree about what an area name is.
+func TestLoadConfig_AreaNotASlug_NamesTheOffendingValue(t *testing.T) {
+	for name, areas := range map[string]string{
+		"uppercase": "Research",
+		"space":     "00 inbox",
+		"accent":    "não-aplica",
+	} {
+		t.Run(name, func(t *testing.T) {
+			setInstanceEnv(t)
+			t.Setenv(envAreas, "research,"+areas)
+
+			_, err := LoadConfig()
+			if err == nil {
+				t.Fatalf("LoadConfig() with area %q = nil error, want one", areas)
+			}
+			if !strings.Contains(err.Error(), fmt.Sprintf("%q", areas)) {
+				t.Errorf("error %q does not name the offending value %q", err, areas)
+			}
+		})
+	}
+}
+
+// TestLoadConfig_Areas_SortedAndDeduplicated pins the property canonicalAreas relies on: it just
+// returns cfg.Areas, so the sorting and deduplication have to have already happened here.
+func TestLoadConfig_Areas_SortedAndDeduplicated(t *testing.T) {
+	setInstanceEnv(t)
+	t.Setenv(envAreas, "research, infra, research")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig(): %v", err)
+	}
+	want := []string{"infra", "research"}
+	if len(cfg.Areas) != len(want) || cfg.Areas[0] != want[0] || cfg.Areas[1] != want[1] {
+		t.Errorf("Areas = %v, want %v", cfg.Areas, want)
 	}
 }
 

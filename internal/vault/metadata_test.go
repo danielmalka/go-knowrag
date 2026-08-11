@@ -11,12 +11,12 @@ import (
 
 func baselineNote(t *testing.T) Note {
 	t.Helper()
-	area, sub, err := deriveArea(schema.VaultMalkaLife(), "research/golang/concurrency.md")
+	area, sub, err := deriveArea(lifeAreas(), "research/golang/concurrency.md")
 	if err != nil {
 		t.Fatalf("deriveArea: %v", err)
 	}
 	return Note{
-		Vault:      schema.VaultMalkaLife(),
+		Vault:      lifeVault(),
 		Path:       "research/golang/concurrency.md",
 		UID:        uuid.MustParse("0198a7f2-4b31-7c42-9e15-3d8a92c47b6a"),
 		Type:       schema.NoteTypeConcept(),
@@ -42,7 +42,7 @@ func TestNoteMetadataFields_ChangesPerField(t *testing.T) {
 		field  string
 		mutate func(*Note)
 	}{
-		{"vault", func(n *Note) { n.Vault = schema.VaultMalkaWay() }},
+		{"vault", func(n *Note) { n.Vault = wayVault() }},
 		{"path", func(n *Note) { n.Path = "research/golang/other.md" }},
 		{"type", func(n *Note) { n.Type = schema.NoteTypeReference() }},
 		{"status", func(n *Note) { n.Status = schema.StatusArchived() }},
@@ -52,7 +52,7 @@ func TestNoteMetadataFields_ChangesPerField(t *testing.T) {
 		{"lang", func(n *Note) { n.Lang = "pt" }},
 		{"created", func(n *Note) { n.Created = n.Created.AddDate(0, 0, 1) }},
 		{"area", func(n *Note) {
-			area, _, err := deriveArea(schema.VaultMalkaLife(), "mocs/central.md")
+			area, _, err := deriveArea(lifeAreas(), "mocs/central.md")
 			if err != nil {
 				t.Fatalf("deriveArea: %v", err)
 			}
@@ -89,7 +89,7 @@ func TestNoteMetadataFields_SerializationIsStableAcrossTheEnumTyping(t *testing.
 	want := "area=research\x00created=2026-08-07T00:00:00Z\x00lang=en\x00" +
 		"path=research/golang/concurrency.md\x00status=draft\x00sub=golang\x00" +
 		"tags=architecture\x1fgolang\x00title=Go concurrency\x00type=concept\x00" +
-		"vault=malkalife\x00visibility=internal"
+		"vault=pessoal\x00visibility=internal"
 
 	if got := serialized(baselineNote(t)); got != want {
 		t.Errorf("serialization moved:\n before = %q\n after  = %q", want, got)

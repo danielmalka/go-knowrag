@@ -85,33 +85,25 @@ func newServer(cfg Config, searcher Searcher) *mcp.Server {
 	s := mcp.NewServer(&mcp.Implementation{Name: "knowrag", Version: serverVersion}, nil)
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        toolName,
-		Description: toolDescription(),
+		Description: toolDescription(cfg),
 	}, searchKnowledgeHandler(cfg, searcher))
 	return s
 }
 
-// toolDescription is built at run time rather than written as a literal so the canonical enum
-// values it advertises come from internal/schema's accessors — the single registry — instead of a
-// hand-copied list that goes stale the day an area is added.
-func toolDescription() string {
+// toolDescription is built at run time rather than written as a literal so the areas it advertises
+// come from this instance's own configuration (D-26) instead of a list that goes stale the day an
+// installation's areas change without a rebuild.
+func toolDescription(cfg Config) string {
 	// No owner name here. This string is public code and it is also shipped to whatever agent
 	// connects, so it describes the tool rather than whose notes it happens to hold.
 	return "Search the indexed knowledge base and return the matching chunks as untrusted " +
-		"retrieved content. Valid `area` values: " + strings.Join(canonicalAreas(), ", ") +
+		"retrieved content. Valid `area` values: " + strings.Join(canonicalAreas(cfg), ", ") +
 		". Valid `type` values: " + strings.Join(canonicalNoteTypes(), ", ") + "."
 }
 
-func canonicalAreas() []string {
-	var out []string
-	for _, v := range schema.AllVaults() {
-		for _, a := range schema.AreasFor(v) {
-			if !slices.Contains(out, a.String()) {
-				out = append(out, a.String())
-			}
-		}
-	}
-	slices.Sort(out)
-	return out
+// canonicalAreas is this instance's own area list, already sorted and deduplicated by LoadConfig.
+func canonicalAreas(cfg Config) []string {
+	return cfg.Areas
 }
 
 func canonicalNoteTypes() []string {
@@ -132,7 +124,7 @@ func searchKnowledgeHandler(cfg Config, searcher Searcher) mcp.ToolHandlerFor[Se
 	return func(ctx context.Context, _ *mcp.CallToolRequest, in SearchKnowledgeInput) (*mcp.CallToolResult, any, error) {
 		start := time.Now()
 
-		if err := validateFilters(in); err != nil {
+		if err := validateFilters(cfg, in); err != nil {
 			return nil, nil, logAndWrap(cfg, start, 0, err)
 		}
 
@@ -183,9 +175,9 @@ func searchKnowledgeHandler(cfg Config, searcher Searcher) mcp.ToolHandlerFor[Se
 // Passing an unregistered value through would not be a security hole — the filter would simply
 // match nothing — but "no results" is the worst possible answer to give an agent, because it reads
 // as "the knowledge base has nothing about this" rather than "you misspelled a filter".
-func validateFilters(in SearchKnowledgeInput) error {
-	if in.Area != "" && !slices.Contains(canonicalAreas(), in.Area) {
-		return fmt.Errorf("unknown area %q: valid values are %s", in.Area, strings.Join(canonicalAreas(), ", "))
+func validateFilters(cfg Config, in SearchKnowledgeInput) error {
+	if in.Area != "" && !slices.Contains(canonicalAreas(cfg), in.Area) {
+		return fmt.Errorf("unknown area %q: valid values are %s", in.Area, strings.Join(canonicalAreas(cfg), ", "))
 	}
 	if in.Type != "" {
 		if _, ok := schema.ParseNoteType(in.Type); !ok {

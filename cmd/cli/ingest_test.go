@@ -10,46 +10,187 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/danielmalka/go-knowrag/internal/chunk"
 	"github.com/danielmalka/go-knowrag/internal/config"
-	"github.com/danielmalka/go-knowrag/internal/schema"
 )
 
+// rosterCfg builds a config with two rostered vaults, neither pointed at a real directory: tests
+// that need a scannable vault overwrite Path (and usually Areas) on the one they use.
+func rosterCfg() *config.Config {
+	return &config.Config{
+		Vaults: map[string]config.VaultSettings{
+			"pessoal":  {Path: "/vaults/pessoal", Areas: "00-inbox"},
+			"trabalho": {Path: "/vaults/trabalho", Areas: "00-inbox"},
+		},
+	}
+}
+
 func TestSelectVaults(t *testing.T) {
-	t.Run("both selects every registered vault", func(t *testing.T) {
-		got, err := selectVaults(bothVaults)
+	cfg := rosterCfg()
+
+	t.Run("both resolves the whole roster", func(t *testing.T) {
+		got, err := selectVaults(cfg, bothVaults)
 		if err != nil {
 			t.Fatalf("selectVaults(%q): %v", bothVaults, err)
 		}
-		if len(got) != len(schema.AllVaults()) {
-			t.Errorf("selectVaults(%q) = %v, want all %d vaults", bothVaults, got, len(schema.AllVaults()))
+		if want := cfg.VaultNames(); !slices.Equal(got, want) {
+			t.Errorf("selectVaults(%q) = %v, want %v", bothVaults, got, want)
 		}
 	})
 
-	for _, v := range schema.AllVaults() {
-		t.Run(v.String(), func(t *testing.T) {
-			got, err := selectVaults(v.String())
+	for name := range cfg.Vaults {
+		t.Run(name, func(t *testing.T) {
+			got, err := selectVaults(cfg, name)
 			if err != nil {
-				t.Fatalf("selectVaults(%q): %v", v, err)
+				t.Fatalf("selectVaults(%q): %v", name, err)
 			}
-			if len(got) != 1 || got[0] != v {
-				t.Errorf("selectVaults(%q) = %v, want exactly %v", v, got, v)
+			if len(got) != 1 || got[0] != name {
+				t.Errorf("selectVaults(%q) = %v, want exactly [%s]", name, got, name)
 			}
 		})
 	}
 
-	t.Run("an unknown name is refused by name", func(t *testing.T) {
-		got, err := selectVaults("malkawhat")
+	t.Run("a name outside the roster is refused and the valid names are listed", func(t *testing.T) {
+		got, err := selectVaults(cfg, "malkawhat")
 		if err == nil {
 			t.Fatalf("selectVaults on an unregistered vault = %v, want an error", got)
 		}
 		if !strings.Contains(err.Error(), "malkawhat") {
 			t.Errorf("error %q does not name the offending value", err)
 		}
+		for _, want := range []string{"pessoal", "trabalho", bothVaults} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not list %q", err, want)
+			}
+		}
 	})
+
+	t.Run("an empty roster is refused rather than resolving to zero vaults", func(t *testing.T) {
+		got, err := selectVaults(&config.Config{}, "anything")
+		if err == nil {
+			t.Fatalf("selectVaults against an empty roster = %v, want an error", got)
+		}
+	})
+}
+
+// TestSelectVaults_VaultNamedBoth_RefusesEveryRun covers the collision D-26 created: `both` passes
+// the slug rule, so an operator may put it in KNOWRAG_VAULTS, and then --vault has two meanings.
+//
+// The failure this prevents is not an error message — it is the absence of one. Resolving the
+// sentinel first ingests every vault while the operator asked for the one named `both`; that run
+// exits 0 and reports a clean count of the wrong corpus. So the check refuses regardless of what
+// --vault was given, including the vault's own name: while the roster carries it, no value of the
+// flag has an unambiguous meaning.
+func TestSelectVaults_VaultNamedBoth_RefusesEveryRun(t *testing.T) {
+	cfg := &config.Config{Vaults: map[string]config.VaultSettings{
+		bothVaults: {Path: "/vaults/both", Areas: "infra"},
+		"trabalho": {Path: "/vaults/trabalho", Areas: "infra"},
+	}}
+
+	for _, flag := range []string{bothVaults, "trabalho", "unknown"} {
+		t.Run(flag, func(t *testing.T) {
+			got, err := selectVaults(cfg, flag)
+			if err == nil {
+				t.Fatalf("selectVaults(%q) with a vault named %q = %v, want an error",
+					flag, bothVaults, got)
+			}
+			// The collision error, not merely *an* error: with the check removed, `unknown` still
+			// fails — for the ordinary reason — and its message happens to contain the word `both`
+			// while listing the valid names. Asserting on the phrase only the collision path writes
+			// is what makes this subtest discriminate instead of decorate.
+			if !strings.Contains(err.Error(), "rename that vault") {
+				t.Errorf("error %q is not the collision error; the run failed for some other reason", err)
+			}
+		})
+	}
+}
+
+// TestRunIngest_MalformedArea_RefusedBeforeAnythingIsScanned is where the slug rule has to hold now
+// that it no longer runs in config.Load: RequireVaults is the last thing between a malformed name
+// and point_hash, and runIngest is what has to call it.
+//
+// The area here has a space, deliberately, and not an uppercase letter. Case is the one malformation
+// vault.deriveArea would catch on its own, by lowercasing the folder before comparing — so a test
+// written with `Research` would pass even if this check were deleted, and prove nothing. `my area`
+// matches a folder of that exact name and is written verbatim into the payload and the hash.
+//
+// Refused *before* scanning matters too: a run that scanned first would report note counts, then
+// fail, and the counts would read like progress.
+func TestRunIngest_MalformedArea_RefusedBeforeAnythingIsScanned(t *testing.T) {
+	cfg := &config.Config{
+		EmbedderEndpoint: tokenizeStub(t),
+		Vaults: map[string]config.VaultSettings{
+			"trabalho": {Path: writeVault(t, map[string]string{
+				"my area/uma.md": note("0198a7f2-4b31-7c42-9e15-3d8a92c47b03", "Uma"),
+			}), Areas: "my area"},
+		},
+	}
+
+	var out bytes.Buffer
+	err := runIngest(context.Background(), &out, cfg, ingestOptions{
+		vaultFlag: "trabalho",
+		dryRun:    true,
+		tenantID:  defaultTenantID,
+		chunkCfg:  chunk.Config{FloorTokens: defaultFloorTokens, CeilingTokens: defaultCeilingTokens},
+	})
+	if err == nil {
+		t.Fatalf("runIngest with area %q = nil, want an error; output was %q", "my area", out.String())
+	}
+	if !strings.Contains(err.Error(), "my area") {
+		t.Errorf("error %q does not name the offending area", err)
+	}
+	if out.Len() != 0 {
+		t.Errorf("runIngest wrote %q before refusing; nothing should be reported for a run that never starts", out.String())
+	}
+}
+
+// TestRunIngest_TwoVaults_EachScannedWithItsOwnSettings closes a gap that only existed after D-26.
+//
+// While the roster was a compile-time enum, settings came from cfg.VaultOf(v) — a switch with one
+// case per vault, where using the wrong vault's settings meant writing the wrong case and reading
+// it back wrong. The map-and-loop version cannot be written wrong that visibly: `cfg.Vaults[name]`
+// and `cfg.Vaults[names[0]]` differ by three characters and the compiler is happy with either.
+//
+// It was invisible to the fast gate too. Every other test in this file runs one vault, so a
+// scanVaults that ignored `name` entirely and always read the first roster entry passed the whole
+// package. Two vaults with different areas is the smallest input where that shows: `um` accepts
+// only `alfa` and `dois` only `beta`, so any mix-up makes one of the notes an unknown area and the
+// run fails instead of quietly reporting a count.
+func TestRunIngest_TwoVaults_EachScannedWithItsOwnSettings(t *testing.T) {
+	cfg := &config.Config{
+		EmbedderEndpoint: tokenizeStub(t),
+		Vaults: map[string]config.VaultSettings{
+			"um": {Path: writeVault(t, map[string]string{
+				"alfa/uma.md": note("0198a7f2-4b31-7c42-9e15-3d8a92c47b04", "Uma"),
+			}), Areas: "alfa"},
+			"dois": {Path: writeVault(t, map[string]string{
+				"beta/outra.md": note("0198a7f2-4b31-7c42-9e15-3d8a92c47b05", "Outra"),
+			}), Areas: "beta"},
+		},
+	}
+
+	var out bytes.Buffer
+	err := runIngest(context.Background(), &out, cfg, ingestOptions{
+		vaultFlag: bothVaults,
+		dryRun:    true,
+		tenantID:  defaultTenantID,
+		chunkCfg:  chunk.Config{FloorTokens: defaultFloorTokens, CeilingTokens: defaultCeilingTokens},
+	})
+	if err != nil {
+		t.Fatalf("runIngest over two vaults: %v — a vault scanned with another's settings makes its "+
+			"own area unknown, which is what this failure looks like", err)
+	}
+
+	got := out.String()
+	for _, want := range []string{"um: 1 note(s)", "dois: 1 note(s)", "2 note(s), 2 chunk(s) to embed"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("dry-run output %q does not contain %q", got, want)
+		}
+	}
 }
 
 // TestIngestCmd_RegistersItsFlags proves the flags were actually registered rather than only
@@ -63,12 +204,12 @@ func TestIngestCmd_RegistersItsFlags(t *testing.T) {
 			t.Errorf("ingest does not register --%s", name)
 		}
 	}
-	// The --vault help must name the real vaults, which is what keeps it correct the day a third
-	// one is registered in internal/schema.
+	// The --vault help is built before cfg is read (see newIngestCmd), so it cannot name the
+	// configured vaults — only point at where they come from.
 	usage := cmd.Flags().Lookup("vault").Usage
-	for _, v := range schema.AllVaults() {
-		if !strings.Contains(usage, v.String()) {
-			t.Errorf("--vault usage %q does not mention the registered vault %s", usage, v)
+	for _, want := range []string{"KNOWRAG_VAULTS", bothVaults} {
+		if !strings.Contains(usage, want) {
+			t.Errorf("--vault usage %q does not mention %q", usage, want)
 		}
 	}
 }
@@ -95,8 +236,8 @@ func tokenizeStub(t *testing.T) string {
 	return srv.URL
 }
 
-// writeVault builds a minimal MalkaWay vault: notes under an area folder, plus one root file that
-// only the exclusion list makes acceptable.
+// writeVault builds a minimal vault: notes under an area folder, plus one root file that only the
+// exclusion list makes acceptable.
 func writeVault(t *testing.T, notes map[string]string) string {
 	t.Helper()
 	root := t.TempDir()
@@ -140,15 +281,18 @@ func TestRunIngest_DryRun_ReportsCountsAndNeedsNoQdrant(t *testing.T) {
 	})
 	cfg := &config.Config{
 		EmbedderEndpoint: tokenizeStub(t),
-		VaultMalkaWay: config.VaultSettings{
-			Path:             root,
-			ExcludeRootFiles: "CLAUDE.md",
+		Vaults: map[string]config.VaultSettings{
+			"trabalho": {
+				Path:             root,
+				Areas:            "00-inbox",
+				ExcludeRootFiles: "CLAUDE.md",
+			},
 		},
 	}
 
 	var out bytes.Buffer
 	err := runIngest(context.Background(), &out, cfg, ingestOptions{
-		vaultFlag: schema.VaultMalkaWay().String(),
+		vaultFlag: "trabalho",
 		dryRun:    true,
 		tenantID:  defaultTenantID,
 		chunkCfg:  chunk.Config{FloorTokens: defaultFloorTokens, CeilingTokens: defaultCeilingTokens},
@@ -169,9 +313,13 @@ func TestRunIngest_DryRun_ReportsCountsAndNeedsNoQdrant(t *testing.T) {
 }
 
 // TestRunIngest_MissingSettings_NamesOnlyWhatTheRunNeeds pins the per-command requirement in the
-// direction that matters: a real run asks for Qdrant, a dry run does not, and neither asks for the
+// direction that matters: a real run asks for Qdrant, a dry run does not, and neither asks about a
 // vault it was not pointed at.
 func TestRunIngest_MissingSettings_NamesOnlyWhatTheRunNeeds(t *testing.T) {
+	baseVaults := map[string]config.VaultSettings{
+		"trabalho": {},
+		"pessoal":  {},
+	}
 	tests := map[string]struct {
 		dryRun     bool
 		wantNamed  []string
@@ -180,26 +328,27 @@ func TestRunIngest_MissingSettings_NamesOnlyWhatTheRunNeeds(t *testing.T) {
 	}{
 		"a real run needs Qdrant": {
 			dryRun:     false,
-			vaultFlag:  schema.VaultMalkaWay().String(),
+			vaultFlag:  "trabalho",
 			wantNamed:  []string{"QDRANT_ENDPOINT", "QDRANT_API_KEY", "DEFAULT_COLLECTION"},
-			wantAbsent: []string{"KNOWRAG_VAULT_MALKALIFE_PATH"},
+			wantAbsent: []string{"KNOWRAG_VAULT_PESSOAL_PATH"},
 		},
 		"a dry run does not": {
 			dryRun:     true,
-			vaultFlag:  schema.VaultMalkaWay().String(),
-			wantNamed:  []string{"EMBEDDER_ENDPOINT", "KNOWRAG_VAULT_MALKAWAY_PATH"},
-			wantAbsent: []string{"QDRANT_ENDPOINT", "KNOWRAG_VAULT_MALKALIFE_PATH"},
+			vaultFlag:  "trabalho",
+			wantNamed:  []string{"EMBEDDER_ENDPOINT", "KNOWRAG_VAULT_TRABALHO_PATH"},
+			wantAbsent: []string{"QDRANT_ENDPOINT", "KNOWRAG_VAULT_PESSOAL_PATH"},
 		},
 	}
 
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			err := runIngest(context.Background(), io.Discard, &config.Config{}, ingestOptions{
+			cfg := &config.Config{Vaults: baseVaults}
+			err := runIngest(context.Background(), io.Discard, cfg, ingestOptions{
 				vaultFlag: tc.vaultFlag,
 				dryRun:    tc.dryRun,
 			})
 			if err == nil {
-				t.Fatal("runIngest with an empty config returned no error")
+				t.Fatal("runIngest with an otherwise-empty config returned no error")
 			}
 			for _, want := range tc.wantNamed {
 				if !strings.Contains(err.Error(), want) {
@@ -215,16 +364,36 @@ func TestRunIngest_MissingSettings_NamesOnlyWhatTheRunNeeds(t *testing.T) {
 	}
 }
 
+// TestRunIngest_EmptyRoster_FailsAsConfigurationNotAnEmptyRun pins the failure mode an operator
+// needs: a `both` run against a roster nobody configured must refuse to start, not report a clean
+// zero-note run that looks like success.
+func TestRunIngest_EmptyRoster_FailsAsConfigurationNotAnEmptyRun(t *testing.T) {
+	cfg := &config.Config{EmbedderEndpoint: tokenizeStub(t)}
+
+	err := runIngest(context.Background(), io.Discard, cfg, ingestOptions{
+		vaultFlag: bothVaults,
+		dryRun:    true,
+	})
+	if err == nil {
+		t.Fatal("runIngest against an empty roster returned no error")
+	}
+	if !strings.Contains(err.Error(), "no vaults are configured") {
+		t.Errorf("error %q does not say the roster is empty", err)
+	}
+}
+
 // TestRunIngest_UnreadableVault_FailsBeforeTouchingAnything keeps a misconfigured path from
 // reporting an empty but successful run.
 func TestRunIngest_UnreadableVault_FailsBeforeTouchingAnything(t *testing.T) {
 	cfg := &config.Config{
 		EmbedderEndpoint: tokenizeStub(t),
-		VaultMalkaWay:    config.VaultSettings{Path: filepath.Join(t.TempDir(), "absent")},
+		Vaults: map[string]config.VaultSettings{
+			"trabalho": {Path: filepath.Join(t.TempDir(), "absent"), Areas: "00-inbox"},
+		},
 	}
 
 	err := runIngest(context.Background(), io.Discard, cfg, ingestOptions{
-		vaultFlag: schema.VaultMalkaWay().String(),
+		vaultFlag: "trabalho",
 		dryRun:    true,
 		chunkCfg:  chunk.Config{FloorTokens: defaultFloorTokens, CeilingTokens: defaultCeilingTokens},
 	})

@@ -31,7 +31,7 @@ import (
 // concatenation (`"dra" + "ft"`). Matches are aggregated **per package**, not per file, so
 // splitting an enum across two files in the same package does not dilute it under the threshold.
 //
-// Threshold: a package "declares" one of the six canonical sets if its declared literals match at
+// Threshold: a package "declares" one of the three canonical sets if its declared literals match at
 // least half that set's members (2*matches >= len(set)). Half is deliberate slack, not a tight
 // bound: it catches a package that redeclares most-but-not-all of an enum without firing on one
 // that happens to use one or two of the same words for unrelated reasons.
@@ -45,10 +45,13 @@ import (
 //   - A set deliberately spread below the half threshold, or across two packages.
 //   - Declaration sites that are not Go source at all (YAML, JSON, SQL fixtures).
 //
-// The Vault set has only 2 members, so 2*matches >= 2 means a single matching literal flags a
-// package. That is deliberate rather than a rounding accident: "malkalife"/"malkaway" are
-// distinctive enough that one accidental match in unrelated code is not a realistic risk, so the
-// stricter threshold buys real detection instead of false positives.
+// The worst case moved with D-26: the Vault set (2 members) is gone, and it was the only set where
+// 2*matches >= len(set) let a single matching literal flag a package. Visibility is now the smallest
+// survivor at 3 members, so 2*matches >= 3 needs matches >= 2 — a package must repeat at least two of
+// "private"/"internal"/"shareable" (or two of Status's four values) as its own literals before this
+// fires. That is a stricter bar than the one Vault used to clear, not a looser one: catching a
+// two-word coincidence in unrelated code is still implausible, so the half-of-set rule keeps its
+// job — real detection — without the single-literal trigger that only the smallest set ever needed.
 //
 // Scope: every .go file in the module except internal/schema itself (already excluded by
 // directory) and anything under vendor/ or a dot-directory. Other packages' _test.go files ARE
@@ -126,17 +129,18 @@ type enumSet struct {
 	values []string
 }
 
-// enumSets builds the six canonical sets to check against from internal/schema's own registered
+// enumSets builds the three canonical sets to check against from internal/schema's own registered
 // maps (the same maps Valid()/Parse* read), not from a retyped literal list — retyping the values
 // here would make this test a second declaration site, exactly what T7/T8 exist to prevent.
+//
+// `Vault` and `Area` used to be here too. D-26 moved them out of internal/schema entirely — a vault
+// roster is installation configuration now (internal/config), not a compile-time enum — so there is
+// no vault/area set left for this scan to protect.
 func enumSets() []enumSet {
 	return []enumSet{
 		{"NoteType", keysOf(noteTypeSet)},
 		{"Status", keysOf(statusSet)},
 		{"Visibility", keysOf(visibilitySet)},
-		{"Vault", keysOf(vaultSet)},
-		{"Area(MalkaLife)", keysOf(areaSetByVault[vaultMalkaLife])},
-		{"Area(MalkaWay)", keysOf(areaSetByVault[vaultMalkaWay])},
 	}
 }
 

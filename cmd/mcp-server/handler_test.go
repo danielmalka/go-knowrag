@@ -734,18 +734,40 @@ func TestSearchKnowledge_UnavailableMessageNeverCarriesTheCredential(t *testing.
 }
 
 // TestSearchKnowledge_ToolDescriptionListsCanonicalEnums keeps the published description sourced
-// from internal/schema's registry rather than a hand-copied list.
+// from this instance's own areas (D-26) and from internal/schema's note-type registry — never from
+// a hand-copied list.
 func TestSearchKnowledge_ToolDescriptionListsCanonicalEnums(t *testing.T) {
-	cs := connect(t, testConfig(), &fakeSearcher{})
+	cfg := testConfig()
+	cs := connect(t, cfg, &fakeSearcher{})
 
 	list, err := cs.ListTools(context.Background(), nil)
 	if err != nil {
 		t.Fatalf("ListTools: %v", err)
 	}
 	desc := list.Tools[0].Description
-	for _, want := range append(canonicalAreas(), canonicalNoteTypes()...) {
+	for _, want := range append(canonicalAreas(cfg), canonicalNoteTypes()...) {
 		if !strings.Contains(desc, want) {
 			t.Errorf("the tool description omits the canonical value %q: %s", want, desc)
+		}
+	}
+}
+
+// TestToolDescription_ListsOnlyThisInstancesAreas is the direction that matters for D-26: the
+// description must not fall back to the compile-time enum's full area set when this instance's own
+// roster is a strict subset of it — the whole point of installation-configured areas is that an
+// instance can advertise fewer than every area that has ever existed.
+func TestToolDescription_ListsOnlyThisInstancesAreas(t *testing.T) {
+	cfg := testConfig()
+	cfg.Areas = []string{"only-this-one"}
+
+	desc := toolDescription(cfg)
+	if !strings.Contains(desc, "only-this-one") {
+		t.Errorf("the description does not mention the configured area: %s", desc)
+	}
+	for _, notConfigured := range []string{"infra", "research", "mocs", "personal"} {
+		if strings.Contains(desc, notConfigured) {
+			t.Errorf("the description mentions %q, which is not in this instance's MCP_AREAS: %s",
+				notConfigured, desc)
 		}
 	}
 }

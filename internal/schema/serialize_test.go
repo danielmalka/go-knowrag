@@ -9,7 +9,7 @@ func TestSerializeFields_KnownVectors(t *testing.T) {
 		want   string
 	}{
 		{"empty", map[string]string{}, ""},
-		{"single", map[string]string{"vault": "malkalife"}, "vault=malkalife"},
+		{"single", map[string]string{"vault": "pessoal"}, "vault=pessoal"},
 		{
 			"keys sorted lexicographically, not by insertion",
 			map[string]string{"type": "concept", "area": "research", "sub": "golang"},

@@ -128,7 +128,7 @@ func integrationNote(t *testing.T, path string, visibility schema.Visibility, ma
 	t.Helper()
 	created := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 	return vault.Note{
-		Vault:      schema.VaultMalkaLife(),
+		Vault:      "pessoal",
 		Path:       path,
 		UID:        uuid.NewSHA1(uuid.MustParse(schema.NamespaceKnowrag), []byte("s08-integration:"+path)),
 		Type:       schema.NoteTypeConcept(),
@@ -139,7 +139,7 @@ func integrationNote(t *testing.T, path string, visibility schema.Visibility, ma
 		Updated:    created.Add(48 * time.Hour),
 		Title:      "Uma nota",
 		Lang:       "pt",
-		Area:       schema.AreaResearch(),
+		Area:       "research",
 		Sub:        "curadoria",
 		Body:       fmt.Sprintf("## Section\n\n%s body about MARKER content\n", marker),
 	}

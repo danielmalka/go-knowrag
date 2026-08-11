@@ -185,7 +185,7 @@ func integrationNote(t *testing.T, path string, n int) vault.Note {
 	}
 	created := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 	return vault.Note{
-		Vault:      schema.VaultMalkaLife(),
+		Vault:      "pessoal",
 		Path:       path,
 		UID:        uuid.NewSHA1(uuid.MustParse(schema.NamespaceKnowrag), []byte("integration:"+path)),
 		Type:       schema.NoteTypeConcept(),
@@ -195,7 +195,7 @@ func integrationNote(t *testing.T, path string, n int) vault.Note {
 		Created:    created,
 		Title:      "Uma nota",
 		Lang:       "pt",
-		Area:       schema.AreaResearch(),
+		Area:       "research",
 		Sub:        "curadoria",
 		Updated:    created.Add(48 * time.Hour),
 		Body:       b.String(),

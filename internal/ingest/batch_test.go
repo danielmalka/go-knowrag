@@ -5,7 +5,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/danielmalka/go-knowrag/internal/schema"
 	"github.com/danielmalka/go-knowrag/internal/vault"
 )
 
@@ -40,26 +39,26 @@ func TestRunBatch_DuplicateUID_FailsBatchNamingBothPaths(t *testing.T) {
 }
 
 // TestOrchestrate_CrossVaultDuplicateUID_FailsBeforeAnyProcessing is the case ScanVault structurally
-// cannot see: one uid in MalkaLife and the same uid in MalkaWay. The point ID does not include
+// cannot see: one uid in one vault and the same uid in the other. The point ID does not include
 // `vault`, so that repeat collides in Qdrant exactly like an in-vault duplicate, and this
 // orchestration is the only place that holds both scans at once.
 func TestOrchestrate_CrossVaultDuplicateUID_FailsBeforeAnyProcessing(t *testing.T) {
 	h := newHarness()
 
 	life := testNote(t, "research/curadoria/nota.md", 2)
-	way := testNote(t, "arcanto/nota.md", 2)
-	way.Vault = schema.VaultMalkaWay()
-	way.Area = schema.AreaArcanto()
+	way := testNote(t, "alfa/nota.md", 2)
+	way.Vault = "trabalho"
+	way.Area = "alfa"
 	way.UID = life.UID
 
 	_, err := Orchestrate(t.Context(), h.deps,
-		vault.ScanResult{Vault: schema.VaultMalkaLife(), Notes: []vault.Note{life}},
-		vault.ScanResult{Vault: schema.VaultMalkaWay(), Notes: []vault.Note{way}},
+		vault.ScanResult{Vault: "pessoal", Notes: []vault.Note{life}},
+		vault.ScanResult{Vault: "trabalho", Notes: []vault.Note{way}},
 	)
 	if err == nil {
 		t.Fatal("Orchestrate accepted the same uid in both vaults")
 	}
-	for _, want := range []string{life.Path, way.Path, schema.VaultMalkaLife().String(), schema.VaultMalkaWay().String()} {
+	for _, want := range []string{life.Path, way.Path, "pessoal", "trabalho"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not mention %q", err, want)
 		}
@@ -75,13 +74,13 @@ func TestOrchestrate_UniqueUIDs_PassThrough(t *testing.T) {
 	h := newHarness()
 
 	life := testNote(t, "research/curadoria/nota.md", 2)
-	way := testNote(t, "arcanto/outra.md", 2)
-	way.Vault = schema.VaultMalkaWay()
-	way.Area = schema.AreaArcanto()
+	way := testNote(t, "alfa/outra.md", 2)
+	way.Vault = "trabalho"
+	way.Area = "alfa"
 
 	report, err := Orchestrate(t.Context(), h.deps,
-		vault.ScanResult{Vault: schema.VaultMalkaLife(), Notes: []vault.Note{life}},
-		vault.ScanResult{Vault: schema.VaultMalkaWay(), Notes: []vault.Note{way}},
+		vault.ScanResult{Vault: "pessoal", Notes: []vault.Note{life}},
+		vault.ScanResult{Vault: "trabalho", Notes: []vault.Note{way}},
 	)
 	if err != nil {
 		t.Fatalf("Orchestrate: %v", err)

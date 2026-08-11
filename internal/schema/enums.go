@@ -6,8 +6,10 @@ import (
 )
 
 // Canonical enum values for frontmatter fields, per docs/PRD-contrato.md §2.4 (type, status,
-// visibility, vault) and §2.4b (area, scoped per vault). Each type below is an opaque struct with
-// one unexported string field, and every canonical value is reached through an exported accessor
+// visibility). `vault` and `area` used to live here too; D-26 moved them to installation
+// configuration (internal/config) because which vaults and areas exist is a fact about a deployment,
+// not a fact about the contract. Each type below is an opaque struct with one unexported string
+// field, and every canonical value is reached through an exported accessor
 // function (schema.StatusDraft(), not a bare schema.StatusDraft) over an unexported var. Two properties
 // follow, and both are properties of the code rather than conventions a drift test has to police:
 //
@@ -144,100 +146,8 @@ func VisibilityPrivate() Visibility   { return visibilityPrivate }
 func VisibilityInternal() Visibility  { return visibilityInternal }
 func VisibilityShareable() Visibility { return visibilityShareable }
 
-// Vault is the frontmatter `vault` field. Slugs are the lowercase of the literal on-disk folder
-// name (PRD-contrato §2.4b) — malkalife/malkaway, settled 2026-08-08, nothing left to confirm.
-type Vault struct{ s string }
-
-func (t Vault) String() string          { return t.s }
-func (t Vault) Valid() bool             { _, ok := vaultSet[t.s]; return ok }
-func ParseVault(s string) (Vault, bool) { t, ok := vaultSet[s]; return t, ok }
-
-// AllVaults returns every registered Vault, ordered by string value, as a fresh copy.
-func AllVaults() []Vault { return sortedValues(vaultSet) }
-
-var vaultSet = map[string]Vault{}
-
-func registerVault(s string) Vault {
-	t := Vault{s}
-	vaultSet[s] = t
-	return t
-}
-
-var (
-	vaultMalkaLife = registerVault("malkalife")
-	vaultMalkaWay  = registerVault("malkaway")
-)
-
-func VaultMalkaLife() Vault { return vaultMalkaLife }
-func VaultMalkaWay() Vault  { return vaultMalkaWay }
-
-// Area is the frontmatter `area` field, scoped per Vault (PRD-contrato §2.4b): the same string can
-// be meaningful in one vault and undefined in the other, so validity is a function of (Vault,
-// string), not of string alone — hence areaSetByVault is keyed by Vault first.
-type Area struct{ s string }
-
-func (a Area) String() string { return a.s }
-
-// ValidFor reports whether a is a registered Area for vault v.
-func (a Area) ValidFor(v Vault) bool { _, ok := areaSetByVault[v][a.s]; return ok }
-
-// ParseArea looks up s as an Area registered for vault v. ok is false if s is not registered for v,
-// even if it is registered for the other vault.
-func ParseArea(v Vault, s string) (Area, bool) { a, ok := areaSetByVault[v][s]; return a, ok }
-
-// AreasFor returns every Area registered for vault v, ordered by string value, as a fresh copy. An
-// unregistered Vault yields an empty slice, matching ParseArea's "not registered for v" answer.
-func AreasFor(v Vault) []Area { return sortedValues(areaSetByVault[v]) }
-
-var areaSetByVault = map[Vault]map[string]Area{}
-
-// registerArea builds an Area and inserts it into areaSetByVault under every vault in vaults. The
-// variadic parameter is what lets a value valid in both vaults (00-inbox) be declared exactly once
-// instead of twice, keeping the "one declaration site" property from splitting into "one per vault".
-func registerArea(s string, vaults ...Vault) Area {
-	a := Area{s}
-	for _, v := range vaults {
-		if areaSetByVault[v] == nil {
-			areaSetByVault[v] = map[string]Area{}
-		}
-		areaSetByVault[v][s] = a
-	}
-	return a
-}
-
-var (
-	// areaInbox holds the literal "00-inbox": PRD-contrato §2.4b derives area from the lowercase
-	// on-disk folder name with no normalization, and the folder keeps its sort-order prefix on disk
-	// in both vaults. The Go identifier can't start with a digit, so the var name and the string
-	// value deliberately differ — this is the one exception to "identifier mirrors value" in this
-	// file, and it exists for that reason, not by oversight.
-	areaInbox = registerArea("00-inbox", vaultMalkaLife, vaultMalkaWay)
-
-	// MalkaLife-only areas.
-	areaMOCs     = registerArea("mocs", vaultMalkaLife)
-	areaPersonal = registerArea("personal", vaultMalkaLife)
-	areaResearch = registerArea("research", vaultMalkaLife)
-
-	// MalkaWay-only areas.
-	areaArcanto          = registerArea("arcanto", vaultMalkaWay)
-	areaCarreira         = registerArea("carreira", vaultMalkaWay)
-	areaCooperativa      = registerArea("cooperativa", vaultMalkaWay)
-	areaInfra            = registerArea("infra", vaultMalkaWay)
-	areaProjetosPessoais = registerArea("projetos-pessoais", vaultMalkaWay)
-)
-
-func AreaInbox() Area            { return areaInbox }
-func AreaMOCs() Area             { return areaMOCs }
-func AreaPersonal() Area         { return areaPersonal }
-func AreaResearch() Area         { return areaResearch }
-func AreaArcanto() Area          { return areaArcanto }
-func AreaCarreira() Area         { return areaCarreira }
-func AreaCooperativa() Area      { return areaCooperativa }
-func AreaInfra() Area            { return areaInfra }
-func AreaProjetosPessoais() Area { return areaProjetosPessoais }
-
 // sortedValues returns m's values ordered by map key. The result is freshly allocated on every
-// call, which is what keeps All*()/AreasFor() from handing a caller a handle on the registry.
+// call, which is what keeps All*() from handing a caller a handle on the registry.
 func sortedValues[T any](m map[string]T) []T {
 	out := make([]T, 0, len(m))
 	for _, k := range slices.Sorted(maps.Keys(m)) {
