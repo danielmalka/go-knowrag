@@ -55,7 +55,15 @@ func Orchestrate(ctx context.Context, d Deps, scans ...vault.ScanResult) (Report
 		}
 	}
 
-	var notes []vault.Note
+	// Sized up front because the total is already known. Honest about the payoff: at this corpus
+	// the growth this avoids is a handful of reallocations of struct headers inside a run that
+	// takes tens of seconds, and profiling did not find it. It is here because the size is free to
+	// compute, not because anything measured said to do it.
+	total := 0
+	for _, s := range scans {
+		total += len(s.Notes)
+	}
+	notes := make([]vault.Note, 0, total)
 	for _, s := range scans {
 		notes = append(notes, s.Notes...)
 	}

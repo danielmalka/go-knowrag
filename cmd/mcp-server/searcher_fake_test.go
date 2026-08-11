@@ -32,6 +32,22 @@ type fakeSearcher struct {
 	// hangs makes every call block until the caller's context runs out, which is a Qdrant that
 	// accepts the connection and then never answers. Nothing but a real deadline unblocks it.
 	hangs bool
+
+	// filterAlive is what FilterMatchesAnything answers, and probeErr overrides it. The zero value
+	// is the drift case on purpose: a fake holding no points is a filter that matches nothing, so a
+	// test that wants the honest-empty case has to say so.
+	filterAlive bool
+	probeErr    error
+	probes      []retrieval.Query
+
+	// filterAliveFn answers from the probed Query instead of filterAlive, which is the only way to
+	// model an index where the answer depends on which facets the probe kept: an area full of notes
+	// and empty of one type inside it.
+	filterAliveFn func(retrieval.Query) bool
+
+	// probeHangs is hangs for the probe, and separate from it because the case that matters has a
+	// search that answered and a probe that never does. Only the caller's deadline unblocks it.
+	probeHangs bool
 }
 
 func (f *fakeSearcher) Search(ctx context.Context, q retrieval.Query) ([]retrieval.Result, error) {
@@ -65,6 +81,46 @@ func (f *fakeSearcher) Search(ctx context.Context, q retrieval.Query) ([]retriev
 		return nil, f.errs[n]
 	}
 	return f.results, nil
+}
+
+func (f *fakeSearcher) FilterMatchesAnything(ctx context.Context, q retrieval.Query) (bool, error) {
+	f.mu.Lock()
+	f.probes = append(f.probes, q)
+	hangs, err, aliveFn, alive := f.probeHangs, f.probeErr, f.filterAliveFn, f.filterAlive
+	f.mu.Unlock()
+
+	if hangs {
+		select {
+		case <-ctx.Done():
+			return false, fmt.Errorf("probing %s: %w", q.Collection, status.FromContextError(ctx.Err()).Err())
+		case <-time.After(hangCap):
+			// Same reasoning as Search's: returning rather than blocking forever is what turns a
+			// probe nobody bounds into a failed assertion instead of a wedged test binary.
+			return false, errors.New("the probe was never cancelled: nothing bounds how long it may take")
+		}
+	}
+	if err != nil {
+		return false, err
+	}
+	if aliveFn != nil {
+		return aliveFn(q), nil
+	}
+	return alive, nil
+}
+
+func (f *fakeSearcher) probeCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.probes)
+}
+
+func (f *fakeSearcher) lastProbe() retrieval.Query {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.probes) == 0 {
+		return retrieval.Query{}
+	}
+	return f.probes[len(f.probes)-1]
 }
 
 func (f *fakeSearcher) calls() int {

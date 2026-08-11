@@ -244,6 +244,109 @@ func TestSearch_Integration_PrivateReturnedOnlyWithPrivilegedFlag(t *testing.T) 
 	}
 }
 
+// TestFilterMatchesAnything_Integration_IsARequestQdrantAccepts covers the one thing no fake can:
+// the probe sends a request with no query vector and no prefetch leg, and only a real server can
+// say what comes back. The shape is supported, not a quirk being leaned on — in the pinned client
+// (github.com/qdrant/go-client v1.19.0, internal/proto/points.proto:1114) QueryPoints.Query is
+// documented as "if missing, returns points ordered by their IDs", and Filter as returning only the
+// points that satisfy it. This is the regression check that the pinned pair keeps behaving that
+// way: if it stopped, every probe would fail, the caller would fall back to the plain empty message
+// by design, and D-28 would be back with nothing to notice it by.
+//
+// The archived case is the other half, and it is why the caller's message may say only "nothing
+// visible": the probe carries the same guards the search does, so an area that is indexed and whose
+// notes are all archived is indistinguishable here from an area that was never ingested.
+func TestFilterMatchesAnything_Integration_IsARequestQdrantAccepts(t *testing.T) {
+	client := startQdrant(t)
+	applySchema(t, client)
+	searcher := newSearcher(t, client)
+
+	const collection = "interno"
+	live := newSeed("tenant-a", "cron scheduling that is current")
+	archived := newSeed("tenant-a", "cron scheduling that was retired")
+	archived.area, archived.status = "somente-arquivado", schema.StatusArchived()
+	seedPoints(t, client, collection, []seed{live, archived})
+
+	for name, tc := range map[string]struct {
+		area string
+		want bool
+	}{
+		"an area with a visible point": {live.area, true},
+		"an area nobody indexed":       {"area-que-ninguem-indexou", false},
+		"an area that is all archived": {archived.area, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			q := retrieval.Query{
+				Collection: collection, TenantID: "tenant-a", Text: "cron scheduling", TopK: 10,
+				Area: tc.area,
+			}
+			got, err := searcher.FilterMatchesAnything(t.Context(), q)
+			if err != nil {
+				t.Fatalf("FilterMatchesAnything(%q): %v", tc.area, err)
+			}
+			if got != tc.want {
+				t.Errorf("FilterMatchesAnything(%q) = %v, want %v", tc.area, got, tc.want)
+			}
+			// A probe that disagreed with the search it explains would be worse than no probe: it
+			// would tell the caller the filter is fine while the filter is what emptied the answer.
+			searched := searchUIDs(t, searcher, q)
+			if got != (len(searched) > 0) {
+				t.Errorf("the probe says %v for area %q while the search returned %d result(s)",
+					got, tc.area, len(searched))
+			}
+		})
+	}
+}
+
+// TestFilterMatchesAnything_Integration_LiveAreaEmptiedByAnotherFacet is the case that decides what
+// the caller may blame, against a real index rather than a fake that was told the answer. The
+// fixture's area holds a point and holds no `lesson`, so the search carrying both comes back empty
+// while the area behind it is alive.
+//
+// Both probes run, and the pair is the point: the search's own filter is genuinely dead, and only
+// the narrowed one answers the question the dead-area message is worded for.
+func TestFilterMatchesAnything_Integration_LiveAreaEmptiedByAnotherFacet(t *testing.T) {
+	client := startQdrant(t)
+	applySchema(t, client)
+	searcher := newSearcher(t, client)
+
+	const collection = "interno"
+	live := newSeed("tenant-a", "cron scheduling that is current")
+	seedPoints(t, client, collection, []seed{live})
+
+	q := retrieval.Query{
+		Collection: collection, TenantID: "tenant-a", Text: "cron scheduling", TopK: 10,
+		Area: live.area, Type: schema.NoteTypeLesson().String(),
+	}
+	if live.noteType == schema.NoteTypeLesson() {
+		t.Fatalf("the fixture is a %s note, so the pair is not dead and this case proves nothing", live.noteType)
+	}
+	if got := searchUIDs(t, searcher, q); len(got) != 0 {
+		t.Fatalf("the search under area %q + type lesson returned %v, want nothing", live.area, got)
+	}
+
+	// The search's own filter: dead, and correctly so. Probing this is what produced the wrong
+	// message.
+	dead, err := searcher.FilterMatchesAnything(t.Context(), q)
+	if err != nil {
+		t.Fatalf("FilterMatchesAnything(area+type): %v", err)
+	}
+	if dead {
+		t.Errorf("the area+type filter reports itself alive while the search under it returned nothing")
+	}
+
+	// The area alone: alive, which is the only thing a message naming MCP_AREAS may rest on.
+	narrowed := q
+	narrowed.Type = ""
+	alive, err := searcher.FilterMatchesAnything(t.Context(), narrowed)
+	if err != nil {
+		t.Fatalf("FilterMatchesAnything(area): %v", err)
+	}
+	if !alive {
+		t.Errorf("area %q holds a visible point and the probe calls it dead", live.area)
+	}
+}
+
 func collectionNames() []string {
 	var out []string
 	for _, c := range schema.Manifest() {
