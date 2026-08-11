@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/danielmalka/go-knowrag/internal/config"
 	"github.com/danielmalka/go-knowrag/internal/embed"
 	"github.com/danielmalka/go-knowrag/internal/ingest"
+	"github.com/danielmalka/go-knowrag/internal/ingest/lock"
 	"github.com/danielmalka/go-knowrag/internal/store"
 	"github.com/danielmalka/go-knowrag/internal/vault"
 )
@@ -141,6 +143,47 @@ func runIngest(ctx context.Context, out io.Writer, cfg *config.Config, opts inge
 	// other on the next.
 	if err := errors.Join(cfg.Require(need), cfg.RequireVaults(names...)); err != nil {
 		return err
+	}
+
+	// The lock is taken before the scan rather than before the first write. Scanning the vaults is
+	// ~15 s of reading, and a run that is going to be refused should be refused before it spends
+	// them; everything after this line is covered by the deferred release, whatever the outcome.
+	//
+	// A dry run takes no lock because it writes nothing: it never opens a connection to Qdrant, so
+	// there is nothing for a concurrent run to tread on and nothing of its own to protect. Not
+	// because it lacks the settings to build a key — `need` only governs what Require demands, and an
+	// environment that sets QDRANT_ENDPOINT and DEFAULT_COLLECTION populates cfg either way.
+	//
+	// The scope is the values this run will actually write with, not defaults re-derived here: a lock
+	// keyed on anything else excludes a run nobody is making.
+	if !opts.dryRun {
+		ingestion, err := lock.New(ctx, cfg.QdrantEndpoint, cfg.DefaultCollection, opts.tenantID)
+		if err != nil {
+			return err
+		}
+		if err := ingestion.TryAcquire(); err != nil {
+			if errors.Is(err, lock.ErrHeld) {
+				// Wrapped, not replaced: main maps ErrHeld to its own exit code, and what the operator
+				// reads has to be the situation — someone else is ingesting this scope — rather than the
+				// sentence a lock package wrote about a file descriptor.
+				return fmt.Errorf(
+					"another ingestion is already running against %s, collection %s, tenant %s: "+
+						"wait for it to finish, because two runs over one scope delete each other's "+
+						"points (%w)",
+					cfg.QdrantEndpoint, cfg.DefaultCollection, opts.tenantID, err)
+			}
+			return err
+		}
+		// The release error is not returned: the run is over by the time this fires, and the kernel
+		// drops the flock when the process exits whether Release reported anything or not, so it
+		// cannot change the outcome the operator is being told about. It is logged rather than
+		// discarded because an unlock or a close that fails is something odd about this machine, and
+		// the operator who eventually has to explain it needs a trace that it happened.
+		defer func() {
+			if err := ingestion.Release(); err != nil {
+				slog.Warn("releasing the ingestion lock", "error", err)
+			}
+		}()
 	}
 
 	tokens, err := chunk.NewHTTPTokenCounter(cfg.EmbedderEndpoint)

@@ -43,16 +43,21 @@ func (p prefetchedStore) ScrollByUID(_ context.Context, _ string, uid uuid.UUID)
 // optimization would trade a working slow path for no path at all.
 //
 // The snapshot is taken once, before the batch, and is not refreshed. That is sound only while this
-// process is the single writer for the scope, and nothing enforces that today: ADR-005 specifies a
-// local flock for exactly this, S06b carries the tasks for it, and it has not been built. Until it
-// is, "single writer" is operator discipline, not an invariant — two concurrent ingestions of the
-// same scope make this snapshot a view of a state that no longer holds, and ADR-006's
-// insert-then-prune can then delete points the other run just confirmed.
+// process is the single writer for the scope. On this machine it is enforced: cmd/cli takes a local
+// flock keyed by endpoint + collection + tenant before it scans anything (internal/ingest/lock,
+// ADR-005), so a second ingestion of the same scope is refused rather than interleaved. Without it,
+// ADR-006's insert-then-prune has one run deleting points the other just confirmed, and this
+// snapshot becomes a view of a state that no longer holds.
 //
-// An earlier version of this comment named the lock as the thing that made the snapshot sound. It
-// was describing a design, not the code, and a comment that asserts a guarantee nobody implemented
-// is worse than no comment: it answers the question a reader would otherwise have gone and checked.
-// Tracked as D-31.
+// It does not cross machines, and the difference matters to anyone reading this line to decide
+// whether the snapshot is safe. A second host with the binary, the credential and a route to Qdrant
+// is physically an executor; nothing here stops it. Against that, "single writer" is still an
+// agreement (ADR-005 §8).
+//
+// Two earlier versions of this comment were wrong in opposite directions — one named the lock as
+// what made the snapshot sound while no lock existed, the other kept saying so after it was built.
+// The lesson is the same either way: this sentence describes a mechanism in another package, so it
+// goes stale silently and is worth re-reading whenever that package moves.
 func withPrefetch(ctx context.Context, d Deps) Deps {
 	bulk, ok := d.Store.(BulkScroller)
 	if !ok {

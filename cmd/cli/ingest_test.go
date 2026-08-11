@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,6 +17,8 @@ import (
 
 	"github.com/danielmalka/go-knowrag/internal/chunk"
 	"github.com/danielmalka/go-knowrag/internal/config"
+	"github.com/danielmalka/go-knowrag/internal/embed"
+	"github.com/danielmalka/go-knowrag/internal/ingest/lock"
 )
 
 // rosterCfg builds a config with two rostered vaults, neither pointed at a real directory: tests
@@ -217,9 +220,17 @@ func TestIngestCmd_RegistersItsFlags(t *testing.T) {
 // tokenizeStub answers /tokenize the way the real service does, counting whitespace-separated
 // fields. The count rule does not have to match BGE-M3 here — what is under test is the command's
 // wiring, and internal/chunk owns what the counter does with the answer.
+//
+// It also answers /handshake with this build's own pins, which is what lets a real (non-dry) run
+// reach the end of runIngest without a service anywhere: the handshake is fail-closed, so a stub
+// that did not answer it would turn every such test into a test of the handshake.
 func tokenizeStub(t *testing.T) string {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/handshake" {
+			writeHandshake(t, w)
+			return
+		}
 		var req struct {
 			Inputs []string `json:"inputs"`
 		}
@@ -234,6 +245,27 @@ func tokenizeStub(t *testing.T) string {
 	}))
 	t.Cleanup(srv.Close)
 	return srv.URL
+}
+
+// writeHandshake answers GET /handshake with this build's own pins, read from embed.Expected()
+// instead of written out by hand: a stub carrying literal revisions would go red the day a pin
+// moves, for a reason that has nothing to do with the command under test. `precision` travels in
+// the contract's spelling rather than torch's, which the transport passes through untranslated.
+func writeHandshake(t *testing.T, w http.ResponseWriter) {
+	t.Helper()
+	expected := embed.Expected()
+	err := json.NewEncoder(w).Encode(map[string]any{
+		"model_revision":     expected.ModelRevision,
+		"tokenizer_revision": expected.TokenizerRevision,
+		"dense_dim":          expected.Dim,
+		"normalized":         expected.Normalization == embed.ExpectedNormalization,
+		"pooling":            expected.Pooling,
+		"precision":          expected.Precision,
+		"sparse":             expected.SparseParams,
+	})
+	if err != nil {
+		t.Errorf("encoding /handshake response: %v", err)
+	}
 }
 
 // writeVault builds a minimal vault: notes under an area folder, plus one root file that only the
@@ -402,5 +434,151 @@ func TestRunIngest_UnreadableVault_FailsBeforeTouchingAnything(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "scanning vault") {
 		t.Errorf("error %q does not say which stage failed", err)
+	}
+}
+
+// deadQdrant is where the lock tests below point QDRANT_ENDPOINT: a loopback address with nothing
+// behind it, so the settings are present — a non-dry run demands them, and the lock is keyed on
+// them — while nothing is ever reached. 127.0.0.2 rather than 127.0.0.1 on purpose: the machine
+// running this suite may well have a real Qdrant on the usual loopback, and a hermetic test that
+// quietly starts talking to it is not hermetic.
+const deadQdrant = "127.0.0.2:6334"
+
+// lockedCache points os.UserCacheDir — where internal/ingest/lock puts its files — at a directory
+// this test owns. XDG_CACHE_HOME is the hook os.UserCacheDir documents on Linux, so the path
+// derivation exercised here is production's, not a test-only branch.
+func lockedCache(t *testing.T) {
+	t.Helper()
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+}
+
+// holdLock takes the ingestion lock for a scope and keeps it until the test ends, on its own
+// FileLock value — the same thing a second `knowrag ingest` process would be holding.
+func holdLock(t *testing.T, cfg *config.Config, tenant string) {
+	t.Helper()
+	held, err := lock.New(t.Context(), cfg.QdrantEndpoint, cfg.DefaultCollection, tenant)
+	if err != nil {
+		t.Fatalf("lock.New for the scope under test: %v", err)
+	}
+	if err := held.TryAcquire(); err != nil {
+		t.Fatalf("pre-acquiring the ingestion lock: %v", err)
+	}
+	t.Cleanup(func() { _ = held.Release() })
+}
+
+// TestRunIngest_LockHeld_RefusedBeforeAnythingIsScanned is the fail-fast half of D-31, and the
+// "before anything is scanned" half is the one carrying weight.
+//
+// The vault path does not exist, so scanning it fails with "scanning vault" — which means an
+// implementation that scanned first and checked the lock afterwards cannot produce ErrHeld here at
+// all. A test that only asserted "an error came back" would pass that implementation happily, and
+// the whole point of taking the lock before the scan is that the refused run does no work.
+func TestRunIngest_LockHeld_RefusedBeforeAnythingIsScanned(t *testing.T) {
+	lockedCache(t)
+	cfg := &config.Config{
+		QdrantEndpoint:    deadQdrant,
+		QdrantAPIKey:      "not-a-real-key",
+		DefaultCollection: "knowrag_test",
+		EmbedderEndpoint:  tokenizeStub(t),
+		Vaults: map[string]config.VaultSettings{
+			"trabalho": {Path: filepath.Join(t.TempDir(), "absent"), Areas: "00-inbox"},
+		},
+	}
+	holdLock(t, cfg, defaultTenantID)
+
+	var out bytes.Buffer
+	err := runIngest(t.Context(), &out, cfg, ingestOptions{
+		vaultFlag: "trabalho",
+		tenantID:  defaultTenantID,
+		chunkCfg:  chunk.Config{FloorTokens: defaultFloorTokens, CeilingTokens: defaultCeilingTokens},
+	})
+	if !errors.Is(err, lock.ErrHeld) {
+		t.Fatalf("runIngest while the lock is held = %v, want lock.ErrHeld — a %q error means the "+
+			"vault was scanned before the lock was checked", err, "scanning vault")
+	}
+	// The operator's half of the message: exit code 3 says "refused", the text has to say by what.
+	for _, want := range []string{"another ingestion is already running", cfg.DefaultCollection, defaultTenantID} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+	if out.Len() != 0 {
+		t.Errorf("runIngest reported %q for a run that never started", out.String())
+	}
+}
+
+// TestRunIngest_SuccessfulRun_ReleasesTheLock covers the other end: the lock a run took has to be
+// gone once the run returns, or the next ingestion — the nightly one, most likely — is refused for
+// a run that finished hours ago.
+//
+// The vault holds an area folder and no notes, which is what makes a complete, successful run
+// hermetic: the command goes all the way through the handshake and the orchestration and finds
+// nothing to embed or write, so no Qdrant has to exist behind the endpoint the lock is keyed on.
+func TestRunIngest_SuccessfulRun_ReleasesTheLock(t *testing.T) {
+	lockedCache(t)
+	root := writeVault(t, nil)
+	if err := os.MkdirAll(filepath.Join(root, "00-inbox"), 0o750); err != nil {
+		t.Fatalf("creating the empty area folder: %v", err)
+	}
+	cfg := &config.Config{
+		QdrantEndpoint:    deadQdrant,
+		QdrantAPIKey:      "not-a-real-key",
+		DefaultCollection: "knowrag_test",
+		EmbedderEndpoint:  tokenizeStub(t),
+		Vaults:            map[string]config.VaultSettings{"trabalho": {Path: root, Areas: "00-inbox"}},
+	}
+
+	var out bytes.Buffer
+	err := runIngest(t.Context(), &out, cfg, ingestOptions{
+		vaultFlag: "trabalho",
+		tenantID:  defaultTenantID,
+		chunkCfg:  chunk.Config{FloorTokens: defaultFloorTokens, CeilingTokens: defaultCeilingTokens},
+	})
+	if err != nil {
+		t.Fatalf("runIngest over a vault with no notes: %v — output was %q", err, out.String())
+	}
+
+	next, err := lock.New(t.Context(), cfg.QdrantEndpoint, cfg.DefaultCollection, defaultTenantID)
+	if err != nil {
+		t.Fatalf("lock.New: %v", err)
+	}
+	if err := next.TryAcquire(); err != nil {
+		t.Fatalf("TryAcquire after a successful run = %v, want success: the run kept its lock", err)
+	}
+	t.Cleanup(func() { _ = next.Release() })
+}
+
+// TestRunIngest_DryRun_ProceedsWhileTheLockIsHeld pins the one path that deliberately ignores the
+// lock. A dry run writes nothing, and it has no Qdrant settings to key a lock on in the first place
+// — this configuration carries them only so the scope the test holds is the scope the run would
+// have used, which is what makes the test discriminate: wire the lock without the dry-run guard and
+// this run is refused.
+func TestRunIngest_DryRun_ProceedsWhileTheLockIsHeld(t *testing.T) {
+	lockedCache(t)
+	cfg := &config.Config{
+		QdrantEndpoint:    deadQdrant,
+		QdrantAPIKey:      "not-a-real-key",
+		DefaultCollection: "knowrag_test",
+		EmbedderEndpoint:  tokenizeStub(t),
+		Vaults: map[string]config.VaultSettings{
+			"trabalho": {Path: writeVault(t, map[string]string{
+				"00-inbox/uma.md": note("0198a7f2-4b31-7c42-9e15-3d8a92c47b06", "Uma"),
+			}), Areas: "00-inbox"},
+		},
+	}
+	holdLock(t, cfg, defaultTenantID)
+
+	var out bytes.Buffer
+	err := runIngest(t.Context(), &out, cfg, ingestOptions{
+		vaultFlag: "trabalho",
+		dryRun:    true,
+		tenantID:  defaultTenantID,
+		chunkCfg:  chunk.Config{FloorTokens: defaultFloorTokens, CeilingTokens: defaultCeilingTokens},
+	})
+	if err != nil {
+		t.Fatalf("--dry-run while another run holds the lock: %v — a dry run takes no lock", err)
+	}
+	if want := "1 note(s), 1 chunk(s) to embed"; !strings.Contains(out.String(), want) {
+		t.Errorf("dry-run output %q does not contain %q", out.String(), want)
 	}
 }
