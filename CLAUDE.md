@@ -11,6 +11,11 @@ infraestrutura, nome de host de rede privada. Quando um desses valores for neces
 ele entra por variável de ambiente e o repositório guarda só um `.example` com placeholder — é assim
 que `scripts/embedder-service/knowrag-embedder.env.example` existe.
 
+## O endurecimento da S12 está fora de escopo nesta fase
+
+O endurecimento de rede e de credenciais previsto para a S12 está fora de escopo nesta fase (decisão
+de 2026-08-11; detalhes em `docs/`). Não proponha esse trabalho como parte de outra tarefa.
+
 ## `docs/` fica fora do git, e isso é decisão fechada
 
 `docs/` está no `.gitignore` de propósito: é onde moram os ADRs, o PRD e o registro de débitos
