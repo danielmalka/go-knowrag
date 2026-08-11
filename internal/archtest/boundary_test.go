@@ -22,10 +22,10 @@ const storeDir = "internal/store"
 // that imports the client is not a small convenience; it is a second definition of how this system
 // talks to its database.
 //
-// The rule has already shaped one design: S06b's ingestion lock started as points in a Qdrant
-// collection, which would have forced an exception here, and was respecified as a local flock
-// (ADR-005) so that it would not. Respecified, not written — no lock exists in the tree yet
-// (D-31), so this paragraph records why the design moved, not a mechanism you can go read.
+// The rule has already shaped one design and been paid for once: S06b's ingestion lock started as
+// points in a Qdrant collection, which would have forced an exception here, and was respecified as
+// a local flock (ADR-005) so that it would not. It is built — internal/ingest/lock reaches the
+// kernel and never the database, which is why this test still passes with a lock in the tree.
 // No exception exists, and none should be added.
 func TestArch_QdrantClientConfinedToStore(t *testing.T) {
 	root := moduleRoot(t)

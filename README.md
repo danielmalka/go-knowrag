@@ -309,9 +309,22 @@ certa é quem escreve as notas.
 > irrelevante; para rodar à mão esperando resposta, incomoda. A causa está medida e a correção
 > identificada.
 
-Não existe ainda ingestão parcial (`--only <glob>`), remoção de órfãos sob comando (`--prune`) nem
-lock de execução concorrente — está tudo especificado e ainda não implementado. **Não rode duas
-ingestões ao mesmo tempo contra a mesma collection** enquanto o lock não existir.
+**Duas ingestões simultâneas não se atropelam mais.** Antes de ler o vault, `knowrag ingest` toma um
+lock local do sistema operacional (`flock`) identificado por endpoint do Qdrant + collection +
+tenant. A segunda execução no mesmo escopo é recusada na hora, com **código de saída 3** — separado
+do `1` genérico justamente para um agendador distinguir "a anterior ainda está rodando" de "quebrou".
+Nada é escrito e nada é lido do vault nessa recusa. `--dry-run` não toma lock: ele não escreve e nem
+chega a abrir conexão com o Qdrant.
+
+O lock é liberado pelo kernel quando o processo morre, qualquer que seja a causa — matar uma
+ingestão travada não deixa nada para limpar à mão.
+
+> **Ele não atravessa máquinas.** É um lock local. Qualquer host com o binário, a credencial e rota
+> até o Qdrant consegue rodar uma segunda ingestão sobre o mesmo escopo, e nada no sistema impede.
+> A topologia prevista tem um executor só; isso é um acordo, não uma garantia técnica.
+
+Não existe ainda ingestão parcial (`--only <glob>`) nem remoção de órfãos sob comando (`--prune`) —
+os dois estão especificados e ainda não implementados.
 
 ## O que suas notas precisam ter
 

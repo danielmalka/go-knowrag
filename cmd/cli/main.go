@@ -4,13 +4,23 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 
 	"github.com/spf13/cobra"
 
 	"github.com/danielmalka/go-knowrag/internal/config"
+	"github.com/danielmalka/go-knowrag/internal/ingest/lock"
 )
+
+// exitLockHeld is what a run refused by the ingestion lock exits with. Every other failure exits 1;
+// this one has its own code because it is not the same event: a scheduler that fires while the
+// previous ingestion is still running got an orderly refusal, not a broken system, and telling the
+// two apart is the difference between a retry and a page. 2 is left free — a usage error is what
+// most tools spend it on.
+const exitLockHeld = 3
 
 func main() {
 	cfg, err := config.Load()
@@ -22,6 +32,10 @@ func main() {
 	}
 
 	log := config.NewLogger(cfg.LogLevel)
+	// Installed as the default so a command that logs in passing — the ingestion lock's release
+	// error, for one — writes at the configured level and in the same JSON as everything else,
+	// instead of falling back to slog's plain-text logger at info.
+	slog.SetDefault(log)
 	log.Debug("cli starting", "config", cfg)
 
 	root := &cobra.Command{
@@ -41,6 +55,9 @@ func main() {
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "knowrag:", err)
+		if errors.Is(err, lock.ErrHeld) {
+			os.Exit(exitLockHeld)
+		}
 		os.Exit(1)
 	}
 }

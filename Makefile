@@ -38,8 +38,20 @@ cover:
 # process, and NFR-5 spends an unbounded first run converging the tenant before it measures anything.
 # Run `make test-integration` right after bulk-editing the vault and that convergence is a full
 # ingestion of its own, stacked on top of however long NFR-4 took to overrun.
+#
+# -p 1 because these packages are not independent: they share one deployed Qdrant and one
+# collection, and one of them writes. NFR-4 ingests the whole corpus under its own throwaway
+# tenant while internal/retrieval reads points back out of the same collection, and with packages
+# running in parallel the reader saw the writer's points mid-run. That went red accusing the search
+# of leaking across tenants — the most serious invariant in the system — while the search was
+# correct throughout. A red pointing at the wrong place costs more than a slow suite.
+#
+# The assertion that made it that specific kind of wrong was also fixed (it identified points by
+# uid, which is not unique across tenants). This flag is the other half: it removes the overlap
+# instead of relying on every future read-back to be written defensively. It costs about a minute
+# on a suite that already takes nine, because NFR-4 dominates either way. D-30.
 test-integration:
-	go test -tags integration -timeout 60m ./...
+	go test -tags integration -timeout 60m -p 1 ./...
 
 # D-24's test_server.py. Like test-integration above it needs equipment the CI runner does not
 # have — `server.py` imports torch and FlagEmbedding at module scope, so importing it at all needs
