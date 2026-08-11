@@ -21,21 +21,24 @@ var errUsage = errors.New("refused as invoked")
 // validateModes refuses the flag combinations this build cannot honour, before any of them costs
 // anything.
 //
-// Both refusals are the same fact stated twice: --dry-run returns from runIngest before
-// ingest.Orchestrate runs, so there is no index snapshot and no Report on that path. --prune would
-// therefore delete nothing while looking like it did, and --json would have nothing to print, so
-// stdout would carry the dry run's human lines to a caller that asked for machine output. Silently
-// honouring either is worse than refusing: one hides a destructive no-op, the other hands a parser
-// prose. Part A-ii unifies the paths and both refusals go away then.
+// --dry-run + --json is no longer among them: the dry run goes through the same orchestration as
+// every other mode now, so it produces a real Report and --json has something to print.
+//
+// The two that remain are both about a destructive flag over a run that cannot support it. --prune
+// with --dry-run is a contradiction in the request itself. --prune with --only is the subtler one
+// and the reason ingest.PruneOptions.Filtered exists: a run restricted to a glob visited part of the
+// corpus, so every uid outside the filter is missing from its live set while being merely unvisited,
+// and there is no reading of that state in which deleting them is right.
 func validateModes(opts ingestOptions) error {
-	if !opts.dryRun {
-		return nil
+	if opts.prune && opts.dryRun {
+		return fmt.Errorf("%w: --prune cannot be combined with --dry-run — a dry run that deleted "+
+			"points would not be a dry run. Drop one of them", errUsage)
 	}
-	for flag, set := range map[string]bool{"--prune": opts.prune, "--json": opts.json} {
-		if set {
-			return fmt.Errorf("%w: %s cannot be combined with --dry-run, because a dry run never "+
-				"reads the index — it would have nothing to prune and nothing to report", errUsage, flag)
-		}
+	if opts.prune && opts.only != "" {
+		return fmt.Errorf("%w: --prune cannot be combined with --only. --only restricted this run to "+
+			"%q, so a uid missing from it was not necessarily deleted — it may simply not match the "+
+			"pattern, and pruning would remove notes this run never looked at. Run the prune without "+
+			"--only", errUsage, opts.only)
 	}
 	return nil
 }
@@ -106,9 +109,9 @@ func isTerminal(f *os.File) bool {
 // are: the ingest package takes notes, not roots, and giving it disk access to answer one question
 // would be a worse trade than one os.Stat per candidate.
 //
-// The path comes from the stored payload, which is what the note was last indexed under. That is the
-// right question: a note moved to a location this run *does* scan is in the live set and never
-// becomes a candidate, so the only paths reaching here are ones no scanned note claims.
+// The first question is not asked here at all: Orphan.PathClaimed already carries whether a live
+// note holds this path, decided by ScanOrphans from the note set it used to decide who was alive.
+// This layer only asks the part that needs a disk.
 //
 // **Only a proven absence authorizes the prune**, which is why the test is fs.ErrNotExist and not
 // `err == nil`. A stat can fail for reasons that say nothing about whether the note exists —
@@ -118,6 +121,16 @@ func isTerminal(f *os.File) bool {
 func splitStillOnDisk(roots map[string]string, report *ingest.Report) {
 	gone := report.Orphans[:0:0]
 	for _, o := range report.Orphans {
+		// Asked before the stat, and it settles the case on its own: a note the scan returned holds
+		// this path, so whatever a stat would find there belongs to that note and says nothing about
+		// this uid. The flag is set by ScanOrphans from the same note slice it derives the live uids
+		// from (internal/ingest/orphans.go) — this layer never re-derives it, because two derivations
+		// of "what is alive" are two things that can disagree.
+		if o.PathClaimed {
+			gone = append(gone, o)
+			continue
+		}
+
 		root, known := roots[o.Vault]
 		// A vault outside this run's roots cannot be checked, and unchecked is not evidence of
 		// deletion — ScanOrphans already scoped by vault, so reaching this is a caller bug, and
@@ -144,6 +157,7 @@ func pruneOrphans(
 	s ingest.Store,
 	tenantID string,
 	roots map[string]string,
+	opts ingestOptions,
 	report *ingest.Report,
 ) error {
 	// Here and not only at the call site: this is the function that deletes, so the check that says
@@ -152,6 +166,18 @@ func pruneOrphans(
 	// is idempotent, so the second call re-stats a list that already passed and changes nothing.
 	splitStillOnDisk(roots, report)
 
+	// An interrupted run does not prune, and it is not an error that it did not: the operator asked
+	// the run to stop, and stopping includes the destructive step. The orphan list came from a
+	// snapshot taken before a reindex that then did not finish, so it describes an index this run
+	// left half-rewritten — and the Ctrl-C may well have been the operator realising they had aimed
+	// at the wrong tenant or vault, which is exactly the case where the prune must not land.
+	//
+	// Same rule as the missing snapshot below: not having finished looking never authorizes deleting.
+	if report.Interrupted {
+		report.PruneSkipped = "the run was interrupted before it finished, so nothing was pruned"
+		return nil
+	}
+
 	if !report.OrphansScanned {
 		return errors.New(
 			"refusing to prune: this run could not read the index snapshot, so it does not know " +
@@ -159,7 +185,12 @@ func pruneOrphans(
 				"run it again")
 	}
 	var err error
-	report.PointsPruned, err = ingest.Prune(
-		ctx, s, tenantID, report.Orphans, ingest.PruneOptions{Confirmed: true})
+	// Filtered is passed rather than assumed false, even though validateModes already refuses
+	// --prune with --only one layer up. Both authorizations travel the same way and for the same
+	// reason: ingest.Prune is where the destruction happens, so it is where the conditions that make
+	// destruction legitimate are checked, and a caller that reaches it with a filtered run — a bug in
+	// the validation, a second entry point, a future daemon — is refused by the function itself.
+	report.PointsPruned, err = ingest.Prune(ctx, s, tenantID, report.Orphans,
+		ingest.PruneOptions{Confirmed: true, Filtered: opts.only != ""})
 	return err
 }

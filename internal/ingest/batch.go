@@ -40,14 +40,38 @@ func RunBatch(ctx context.Context, d Deps, notes []vault.Note) (Report, error) {
 	// was false for a reason worth keeping: `live` is built from the scanned notes, never from what
 	// the run did to them, so no outcome of the loop can move a uid in or out of it. The ordering is
 	// right; the reason once given for it was not.
-	if snapshotTaken && len(d.Vaults) > 0 {
-		report.Orphans = ScanOrphans(snapshot, liveUIDs(notes), d.Vaults)
+	switch {
+	case d.Only != "":
+		report.OrphanScanSkipped = fmt.Sprintf(
+			"this run was restricted to %q, so the notes it did not visit are indistinguishable "+
+				"from notes that were deleted", d.Only)
+	case !snapshotTaken:
+		report.OrphanScanSkipped = "the index snapshot could not be read"
+	case len(d.Vaults) == 0:
+		report.OrphanScanSkipped = "the caller declared no vault scope"
+	default:
+		report.Orphans = ScanOrphans(snapshot, notes, d.Vaults)
 		report.OrphansScanned = true
 	}
 
 	for _, n := range notes {
+		// Checked between notes, never inside one. A note is the unit that converges: ADR-006's
+		// insert-then-prune leaves the index consistent at every note boundary, and stopping there
+		// means the run ends on one instead of between the write and the prune. What bounds a note
+		// already in flight is ctx, which the caller cancels when the grace period expires or a
+		// second signal arrives (cmd/cli/ingest.go) — this channel only stops new work.
+		if interrupted(d.Interrupt) {
+			report.Interrupted = true
+			return report, nil
+		}
 		report.Results = append(report.Results, ProcessNote(ctx, d, n))
 	}
+
+	// Checked again after the loop, and the reason is the case the loop check cannot see: an
+	// interrupt that arrives while the *last* note is running never reaches another iteration, so a
+	// run stopped during its final note would report itself as having completed normally — and exit
+	// as a failure rather than as an interruption, because that note was cut short and failed.
+	report.Interrupted = report.Interrupted || interrupted(d.Interrupt)
 	return report, nil
 }
 
@@ -62,10 +86,13 @@ func RunBatch(ctx context.Context, d Deps, notes []vault.Note) (Report, error) {
 // the check runs: before the notes are flattened, and before any note from either vault reaches
 // RunBatch.
 func Orchestrate(ctx context.Context, d Deps, scans ...vault.ScanResult) (Report, error) {
-	for i := range scans {
-		for j := i + 1; j < len(scans); j++ {
-			if err := vault.CheckCrossVaultDuplicateUIDs(scans[i], scans[j]); err != nil {
-				return Report{}, fmt.Errorf("vaults %s and %s: %w", scans[i].Vault, scans[j].Vault, err)
+	// Ranged over a slice expression rather than indexed. The pair loop is the same one; what the
+	// rewrite removes is the explicit index, which gosec's G602 repeatedly misread as unbounded
+	// whenever a test called this with a single scan.
+	for i, a := range scans {
+		for _, b := range scans[i+1:] {
+			if err := vault.CheckCrossVaultDuplicateUIDs(a, b); err != nil {
+				return Report{}, fmt.Errorf("vaults %s and %s: %w", a.Vault, b.Vault, err)
 			}
 		}
 	}
@@ -83,6 +110,16 @@ func Orchestrate(ctx context.Context, d Deps, scans ...vault.ScanResult) (Report
 		notes = append(notes, s.Notes...)
 	}
 
+	// After flattening, so one pattern can name a vault and a path in the same expression, and
+	// before the scope is derived: the filter narrows what is processed, never what was scanned.
+	if d.Only != "" {
+		filtered, err := FilterByGlob(notes, d.Only)
+		if err != nil {
+			return Report{}, err
+		}
+		notes = filtered
+	}
+
 	// The scans are the authority on scope, so this is where it is set — not derived from the notes
 	// downstream. A vault whose every note was deleted has zero notes and is still in scope; deriving
 	// the list from the note set would drop it silently, which is precisely the run where the orphan
@@ -97,6 +134,18 @@ func Orchestrate(ctx context.Context, d Deps, scans ...vault.ScanResult) (Report
 		d.Vaults = append(d.Vaults, s.Vault)
 	}
 	return RunBatch(ctx, d, notes)
+}
+
+// interrupted reports whether the operator asked the run to stop. A nil channel — the default for
+// every caller that does not wire signals — blocks forever in a select, so the default case makes
+// "nobody asked" the answer rather than a panic or a stall.
+func interrupted(ch <-chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
 }
 
 // checkDuplicateUIDs re-verifies within the note list at the ingest boundary.

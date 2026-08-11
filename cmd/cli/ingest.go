@@ -45,10 +45,27 @@ const (
 // instead of hanging it.
 const upsertAttempts = 3
 
-// modeIncremental is the only mode that reaches a Report today: --dry-run returns before
-// ingest.Orchestrate is ever called (see runIngest), so nothing writes "dry-run" into one. The pair
-// becomes real when part A-ii unifies the two paths.
-const modeIncremental = "incremental"
+// The modes a Report can carry. Every run goes through ingest.Orchestrate now, so all three are
+// reachable and the field says which one produced the report.
+const (
+	modeIncremental = "incremental"
+	modeDryRun      = "dry-run"
+	modeFull        = "full"
+)
+
+// reportMode names what the operator asked for. --dry-run wins over --full because it is the
+// stronger statement: a full dry run still writes nothing, and calling it "full" in a stored report
+// would read as a run that reindexed the corpus.
+func reportMode(opts ingestOptions) string {
+	switch {
+	case opts.dryRun:
+		return modeDryRun
+	case opts.full:
+		return modeFull
+	default:
+		return modeIncremental
+	}
+}
 
 // newIngestCmd builds `ingest`.
 //
@@ -56,8 +73,9 @@ const modeIncremental = "incremental"
 // without a valid configuration — same reason as newSchemaCmd.
 func newIngestCmd(cfg *config.Config) *cobra.Command {
 	opts := ingestOptions{
-		vaultFlag: bothVaults,
-		tenantID:  defaultTenantID,
+		vaultFlag:   bothVaults,
+		tenantID:    defaultTenantID,
+		gracePeriod: defaultGracePeriod,
 		chunkCfg: chunk.Config{
 			FloorTokens:   defaultFloorTokens,
 			CeilingTokens: defaultCeilingTokens,
@@ -100,20 +118,29 @@ func newIngestCmd(cfg *config.Config) *cobra.Command {
 	// text cannot name the configured vaults without breaking `--help` on a host with no config yet.
 	cmd.Flags().StringVar(&opts.vaultFlag, "vault", opts.vaultFlag,
 		fmt.Sprintf("which vault to ingest: a name from KNOWRAG_VAULTS, or %s for all of them", bothVaults))
-	// The second sentence is not decoration. A dry run reads nothing from Qdrant, so it cannot see
-	// the index and cannot know which notes were deleted; an operator who reads a clean dry run as
-	// "no orphans" has been misled by silence. --prune and --json are refused with it for the same
-	// reason (validateModes), until part A-ii gives the dry run the snapshot the real run takes.
+	// A dry run reads the index and writes nothing, and both halves belong in the help: the reading
+	// is what lets it list prune candidates and notes that left the scan, and the not-writing is the
+	// promise. --prune is still refused with it (validateModes) — a dry run that deleted would not be
+	// one.
 	cmd.Flags().BoolVar(&opts.dryRun, "dry-run", false,
-		"scan and chunk, then stop: report the counts without embedding or writing anything. "+
-			"It never reads the index, so it lists no prune candidates — a clean dry run says nothing "+
-			"about deleted notes")
+		"evaluate every note and report what a real run would do, embedding and writing nothing. "+
+			"It reads the index, so it lists the notes that would be pruned and the ones that left the "+
+			"scan without being deleted")
+	cmd.Flags().BoolVar(&opts.full, "full", false,
+		"reindex every note, skipping the integrity short-circuit that normally leaves unchanged "+
+			"notes alone")
+	cmd.Flags().StringVar(&opts.only, "only", "",
+		"restrict the run to notes whose vault/path matches this glob, e.g. 'pessoal/areas/**'. "+
+			"Refused with --prune: a subset run cannot tell a deleted note from one it did not visit")
 	cmd.Flags().BoolVar(&opts.prune, "prune", false,
 		"delete the points of notes that no longer exist in the scanned vaults. Destructive and "+
 			"opt-in: without it the orphans are reported and left alone")
 	cmd.Flags().BoolVar(&opts.yes, "yes", false,
 		"authorize --prune without being asked. Required when stdin is not a terminal, where there "+
 			"is nobody to answer the prompt")
+	cmd.Flags().DurationVar(&opts.gracePeriod, "grace-period", opts.gracePeriod,
+		"how long a note already being written may finish after the first Ctrl-C; a second Ctrl-C "+
+			"drops it immediately")
 	cmd.Flags().BoolVar(&opts.json, "json", false,
 		"print the run report as JSON on stdout and nothing else; the tokenizer summary moves to stderr")
 	cmd.Flags().StringVar(&opts.tenantID, "tenant", opts.tenantID,
@@ -129,13 +156,16 @@ func newIngestCmd(cfg *config.Config) *cobra.Command {
 // ingestOptions is the parsed flag set, in one value so runIngest takes what the command collected
 // and a test wires it once.
 type ingestOptions struct {
-	vaultFlag string
-	dryRun    bool
-	prune     bool
-	yes       bool
-	json      bool
-	tenantID  string
-	chunkCfg  chunk.Config
+	vaultFlag   string
+	dryRun      bool
+	full        bool
+	only        string
+	gracePeriod time.Duration
+	prune       bool
+	yes         bool
+	json        bool
+	tenantID    string
+	chunkCfg    chunk.Config
 }
 
 // selectVaults resolves the --vault flag against the configured roster.
@@ -171,15 +201,11 @@ func runIngest(ctx context.Context, out, errOut io.Writer, cfg *config.Config, o
 		return err
 	}
 
-	// What the run requires depends on what the run does. A dry run never opens a connection to
-	// Qdrant, so demanding its endpoint and key would refuse a command that has no use for them —
-	// the same defect that used to refuse `schema apply` for a missing EMBEDDER_ENDPOINT. The
-	// embedder is required either way: the clamp counts real BGE-M3 tokens over /tokenize and
-	// refuses to approximate, so even a dry run talks to the service.
-	need := config.NeedEmbedder
-	if !opts.dryRun {
-		need |= config.NeedQdrant | config.NeedCollection
-	}
+	// Every mode needs all of it now, dry run included: a dry run reads the index to report which
+	// notes were deleted and which are still on disk, so it opens the same connection a real run
+	// does. It used to demand less, and what it bought for that was a report that could not see
+	// either kind of deletion.
+	need := config.NeedEmbedder | config.NeedQdrant | config.NeedCollection
 	// Two independent checks, joined rather than short-circuited: a host missing both the Qdrant
 	// settings and the vault's path should hear about both in one run, not fix one and discover the
 	// other on the next.
@@ -191,10 +217,11 @@ func runIngest(ctx context.Context, out, errOut io.Writer, cfg *config.Config, o
 	// ~15 s of reading, and a run that is going to be refused should be refused before it spends
 	// them; everything after this line is covered by the deferred release, whatever the outcome.
 	//
-	// A dry run takes no lock because it writes nothing: it never opens a connection to Qdrant, so
-	// there is nothing for a concurrent run to tread on and nothing of its own to protect. Not
-	// because it lacks the settings to build a key — `need` only governs what Require demands, and an
-	// environment that sets QDRANT_ENDPOINT and DEFAULT_COLLECTION populates cfg either way.
+	// A dry run still takes no lock, and now that it reads the index that is a choice rather than a
+	// consequence. It writes nothing, so there is nothing of its own to protect; what a concurrent
+	// ingestion costs it is a snapshot that goes stale mid-report, and a stale *report* is a wrong
+	// number on a screen. The reason the write path cannot accept that — ADR-006 has two runs
+	// deleting each other's points — does not apply to a run that issues no delete.
 	//
 	// The scope is the values this run will actually write with, not defaults re-derived here: a lock
 	// keyed on anything else excludes a run nobody is making.
@@ -251,10 +278,15 @@ func runIngest(ctx context.Context, out, errOut io.Writer, cfg *config.Config, o
 		return err
 	}
 
-	if opts.dryRun {
-		return dryRun(ctx, out, scans, opts.chunkCfg, counted)
+	// A dry run is not wired for signals: it writes nothing, so Ctrl-C has nothing to leave
+	// half-done and the default behaviour — die immediately — is the right one.
+	var stop <-chan struct{}
+	if !opts.dryRun {
+		var release func()
+		ctx, stop, release = withInterrupt(ctx, opts.gracePeriod)
+		defer release()
 	}
-	return ingestScans(ctx, out, errOut, cfg, opts, scans, counted)
+	return ingestScans(ctx, out, errOut, cfg, opts, scans, counted, stop)
 }
 
 // scanVaults turns each selected vault into a ScanResult, with the areas and exclusions the
@@ -288,59 +320,6 @@ func checkCrossVault(scans []vault.ScanResult) error {
 	return nil
 }
 
-// dryRun chunks everything and writes nothing, so an operator can see the size of a run — how many
-// notes, how many chunks, how many chunks the model will be asked to embed — before spending the
-// GPU and the network on it.
-//
-// It still counts real tokens, which is what makes the number trustworthy: a dry run against an
-// approximate counter would report a chunk count the real run does not produce.
-func dryRun(
-	ctx context.Context,
-	out io.Writer,
-	scans []vault.ScanResult,
-	cfg chunk.Config,
-	tokens *chunk.CountingTokenCounter,
-) error {
-	totalNotes, totalChunks, totalOversize := 0, 0, 0
-	var failures []error
-
-	for _, scan := range scans {
-		notes, chunks, oversize := 0, 0, 0
-		for _, n := range scan.Notes {
-			cs, err := chunk.ChunkNote(ctx, n, cfg, tokens)
-			if err != nil {
-				failures = append(failures, err)
-				continue
-			}
-			notes++
-			chunks += len(cs)
-			for _, c := range cs {
-				if c.Oversize {
-					oversize++
-				}
-			}
-		}
-		_, _ = fmt.Fprintf(out, "%s: %d note(s), %d skipped, %d chunk(s), %d oversize\n",
-			scan.Vault, notes, len(scan.Skipped), chunks, oversize)
-		totalNotes += notes
-		totalChunks += chunks
-		totalOversize += oversize
-	}
-
-	_, _ = fmt.Fprintf(out,
-		"dry run: %d note(s), %d chunk(s) to embed, %d oversize — nothing was embedded or written\n",
-		totalNotes, totalChunks, totalOversize)
-	_, _ = fmt.Fprintln(out, tokens.Snapshot())
-
-	for _, err := range failures {
-		_, _ = fmt.Fprintf(out, "  - %v\n", err)
-	}
-	if len(failures) > 0 {
-		return fmt.Errorf("%d note(s) could not be chunked", len(failures))
-	}
-	return nil
-}
-
 // ingestScans runs the real thing: handshake, then embed and write.
 //
 // The handshake is not a health check placed here for tidiness. Deps.Handshake feeds point_hash and
@@ -355,6 +334,7 @@ func ingestScans(
 	opts ingestOptions,
 	scans []vault.ScanResult,
 	tokens *chunk.CountingTokenCounter,
+	stop <-chan struct{},
 ) error {
 	client, err := store.NewQdrantClient(store.Config{
 		Endpoint: cfg.QdrantEndpoint,
@@ -391,12 +371,16 @@ func ingestScans(
 		Handshake:      handshake,
 		Chunk:          opts.chunkCfg,
 		Tokens:         tokens,
+		DryRun:         opts.dryRun,
+		Interrupt:      stop,
+		Full:           opts.full,
+		Only:           opts.only,
 		UpsertAttempts: upsertAttempts,
 	}, scans...)
 	if err != nil {
 		return err
 	}
-	report.Mode = modeIncremental
+	report.Mode = reportMode(opts)
 
 	// The prune runs against the orphan list the batch already computed, from the snapshot it took
 	// before writing anything (batch.go). Confirmed is unconditionally true here because the run
@@ -421,7 +405,7 @@ func ingestScans(
 
 	var pruneErr error
 	if opts.prune {
-		pruneErr = pruneOrphans(ctx, points, opts.tenantID, roots, &report)
+		pruneErr = pruneOrphans(ctx, points, opts.tenantID, roots, opts, &report)
 	}
 
 	// Printed before the failure checks because a run with failures still did whatever it did to the
@@ -431,10 +415,23 @@ func ingestScans(
 	if err := printReport(out, errOut, opts, report, tokens); err != nil {
 		return err
 	}
-	if pruneErr != nil {
+	return runOutcome(report, pruneErr)
+}
+
+// runOutcome turns what happened into the error the process exits on, and the order is the whole
+// content of it.
+//
+// A prune that failed comes first because it is the only one that names a specific broken thing. An
+// interrupted run comes before a failed one because a run the operator stopped will have failed the
+// note it was cutting short — reporting that as a generic failure would page somebody for a Ctrl-C,
+// and the dedicated exit code exists precisely so a scheduler can tell the two apart (main.go).
+func runOutcome(report ingest.Report, pruneErr error) error {
+	switch {
+	case pruneErr != nil:
 		return pruneErr
-	}
-	if report.Failed() {
+	case report.Interrupted:
+		return errInterrupted
+	case report.Failed():
 		return errors.New("the run did not complete: see the failed note(s) above")
 	}
 	return nil

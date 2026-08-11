@@ -26,6 +26,14 @@ type Orphan struct {
 	Path  string
 	// Points is how many points the uid still holds, which is the size of what --prune would delete.
 	Points int
+	// PathClaimed reports that a note the scan *did* return now lives at this path.
+	//
+	// It is the difference between "the file is gone" and "the file belongs to somebody else now",
+	// and only the second is invisible from disk: editing a note's `uid` in the frontmatter leaves
+	// the file exactly where it was under a new identity, so the old uid stops being claimed by
+	// anything while its path still stats fine (D-34). A caller that answered "does the file exist"
+	// would preserve those points forever, with no command that ever removes them.
+	PathClaimed bool
 }
 
 // ScanOrphans compares the points already in the index against the notes the scan found on disk and
@@ -46,17 +54,24 @@ type Orphan struct {
 // a deletion either.
 func ScanOrphans(
 	snapshot map[uuid.UUID][]PointRecord,
-	live map[uuid.UUID]struct{},
+	live []vault.Note,
 	vaults []string,
 ) []Orphan {
 	inScope := make(map[string]struct{}, len(vaults))
 	for _, v := range vaults {
 		inScope[v] = struct{}{}
 	}
+	// Both sets are derived here, from the one slice, and that is the whole reason this takes notes
+	// rather than the two sets prepared. They answer two halves of one question — which uids are
+	// alive, and which paths are spoken for — and a caller that could pass them separately could
+	// pass them from different note sets. There would be no symptom: the uid half decides who is a
+	// candidate, the path half decides whether a candidate is safe to delete, and a filter applied to
+	// one and not the other silently authorizes deleting live notes.
+	liveUIDs, livePaths := liveSets(live)
 
 	var out []Orphan
 	for uid, records := range snapshot {
-		if _, alive := live[uid]; alive || len(records) == 0 {
+		if _, alive := liveUIDs[uid]; alive || len(records) == 0 {
 			continue
 		}
 		v, ok := records[0].Fields[fieldVault].(string)
@@ -67,7 +82,10 @@ func ScanOrphans(
 			continue
 		}
 		path, _ := records[0].Fields[fieldPath].(string)
-		out = append(out, Orphan{UID: uid, Vault: v, Path: path, Points: len(records)})
+		_, claimed := livePaths[v+"/"+path]
+		out = append(out, Orphan{
+			UID: uid, Vault: v, Path: path, Points: len(records), PathClaimed: claimed,
+		})
 	}
 
 	// Sorted because the source is a map: an unordered orphan list would make the report differ
@@ -84,11 +102,16 @@ func ScanOrphans(
 	return out
 }
 
-// liveUIDs is the set of uids the scan found on disk, which is the other half of the comparison.
-func liveUIDs(notes []vault.Note) map[uuid.UUID]struct{} {
-	out := make(map[uuid.UUID]struct{}, len(notes))
+// liveSets is what the scan found on disk, in the two shapes the comparison needs: the uids, which
+// say who is still alive, and the vault-qualified paths, which say which locations are spoken for.
+//
+// One function returning both, from one loop, because they must always describe the same notes.
+func liveSets(notes []vault.Note) (map[uuid.UUID]struct{}, map[string]struct{}) {
+	uids := make(map[uuid.UUID]struct{}, len(notes))
+	paths := make(map[string]struct{}, len(notes))
 	for _, n := range notes {
-		out[n.UID] = struct{}{}
+		uids[n.UID] = struct{}{}
+		paths[n.Vault+"/"+n.Path] = struct{}{}
 	}
-	return out
+	return uids, paths
 }

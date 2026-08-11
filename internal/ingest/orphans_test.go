@@ -20,7 +20,7 @@ func TestScanOrphans_ReturnsTheUIDWithNoNoteOnDisk(t *testing.T) {
 		gone: orphanRecords("pessoal", "deleted.md", 3),
 	}
 
-	got := ScanOrphans(snapshot, map[uuid.UUID]struct{}{kept: {}}, []string{"pessoal"})
+	got := ScanOrphans(snapshot, []vault.Note{testNote(t, "kept.md", 1)}, []string{"pessoal"})
 
 	want := []Orphan{{UID: gone, Vault: "pessoal", Path: "deleted.md", Points: 3}}
 	if !slices.Equal(got, want) {
@@ -45,7 +45,7 @@ func TestScanOrphans_ExcludesAVaultTheRunNeverScanned(t *testing.T) {
 		unscanned: orphanRecords("trabalho", "theirs.md", 4),
 	}
 
-	got := ScanOrphans(snapshot, map[uuid.UUID]struct{}{}, []string{"pessoal"})
+	got := ScanOrphans(snapshot, nil, []string{"pessoal"})
 
 	want := []Orphan{{UID: scanned, Vault: "pessoal", Path: "mine.md", Points: 1}}
 	if !slices.Equal(got, want) {
@@ -73,7 +73,7 @@ func TestScanOrphans_ExcludesAPointWithNoReadableVault(t *testing.T) {
 		wrongType: {{ChunkIndex: 0, Fields: map[string]any{fieldVault: 42, fieldPath: "n.md"}}},
 	}
 
-	got := ScanOrphans(snapshot, map[uuid.UUID]struct{}{}, []string{"pessoal", ""})
+	got := ScanOrphans(snapshot, nil, []string{"pessoal", ""})
 	if len(got) != 0 {
 		t.Errorf("ScanOrphans over unattributable points = %v, want none — a point whose vault "+
 			"nobody can read is not evidence that its note was deleted", got)
@@ -93,8 +93,8 @@ func TestScanOrphans_OrderIsDeterministic(t *testing.T) {
 		snapshot[uuidFromPath(t, p)] = orphanRecords("pessoal", p, 1)
 	}
 
-	first := ScanOrphans(snapshot, map[uuid.UUID]struct{}{}, []string{"pessoal"})
-	second := ScanOrphans(snapshot, map[uuid.UUID]struct{}{}, []string{"pessoal"})
+	first := ScanOrphans(snapshot, nil, []string{"pessoal"})
+	second := ScanOrphans(snapshot, nil, []string{"pessoal"})
 
 	sorted := slices.Sorted(slices.Values(paths))
 	got := make([]string, len(first))
@@ -226,5 +226,45 @@ func TestOrchestrate_VaultScopeComesFromTheScans(t *testing.T) {
 		t.Errorf("Report.Orphans = %v, want %v — `arquivo` was never scanned by this run, so nothing "+
 			"in it is evidence of a deletion, and the caller saying otherwise does not make it so",
 			report.Orphans, want)
+	}
+}
+
+// TestScanOrphans_PathClaimedComesFromTheSameNotesAsTheLiveUIDs is the single-derivation property.
+//
+// Both halves of the comparison are computed inside ScanOrphans, from the one slice it is given:
+// which uids are alive, and which paths are spoken for. That is not tidiness — a caller able to pass
+// them separately could pass them from different note sets, and the failure would be silent, because
+// the uid half decides who is a candidate while the path half decides whether a candidate is safe to
+// delete.
+//
+// The note here has the deleted uid's *path* and a different uid, which is what editing `uid` in the
+// frontmatter produces: the old uid is a candidate, and its path is claimed by the new one.
+func TestScanOrphans_PathClaimedComesFromTheSameNotesAsTheLiveUIDs(t *testing.T) {
+	oldUID := uuidFromPath(t, "old-identity")
+	renamed := testNote(t, "renamed.md", 1) // vault pessoal, path renamed.md, its own uid
+	snapshot := map[uuid.UUID][]PointRecord{
+		oldUID: orphanRecords("pessoal", "renamed.md", 3),
+	}
+
+	got := ScanOrphans(snapshot, []vault.Note{renamed}, []string{"pessoal"})
+
+	want := []Orphan{{UID: oldUID, Vault: "pessoal", Path: "renamed.md", Points: 3, PathClaimed: true}}
+	if !slices.Equal(got, want) {
+		t.Errorf("ScanOrphans = %v, want %v — the live note holds that path, so the old uid has none",
+			got, want)
+	}
+}
+
+// TestScanOrphans_UnclaimedPathIsNotFlagged is the other side: an ordinary deleted note has nothing
+// at its path, and flagging it would tell cmd/cli to skip the disk check that protects excluded
+// folders.
+func TestScanOrphans_UnclaimedPathIsNotFlagged(t *testing.T) {
+	gone := uuidFromPath(t, "deleted.md")
+	snapshot := map[uuid.UUID][]PointRecord{gone: orphanRecords("pessoal", "deleted.md", 2)}
+
+	got := ScanOrphans(snapshot, []vault.Note{testNote(t, "elsewhere.md", 1)}, []string{"pessoal"})
+
+	if len(got) != 1 || got[0].PathClaimed {
+		t.Errorf("ScanOrphans = %v, want the candidate with PathClaimed false", got)
 	}
 }

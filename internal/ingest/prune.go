@@ -30,10 +30,10 @@ type PruneOptions struct {
 	// deleted while being merely unvisited. There is no safe reading of that state — the refusal is
 	// the answer, not a warning.
 	//
-	// **Nothing sets this to true yet.** --only does not exist until part A-ii, so cmd/cli always
-	// passes false and the refusal below is exercised only by its own test. It is written now
-	// because the flag that makes it reachable is the same patch that would otherwise have to
-	// remember it.
+	// cmd/cli sets it from --only (cmd/cli/ingest_modes.go, pruneOrphans) and refuses the combination
+	// one layer earlier, so this refusal cannot fire for that caller. It is not dead code for it: it
+	// is what still refuses when the validation is bypassed, wrong, or absent — a second entry point,
+	// a future daemon, a test wiring the package directly.
 	Filtered bool
 }
 

@@ -177,6 +177,129 @@ func TestIngestCLI_PruneWithoutYes_ExitsUsageWithoutDoingAnything(t *testing.T) 
 	}
 }
 
+// TestIngestCLI_SIGINT_ExitsWithDedicatedCode is the signal path in a real process, which is the
+// only place it exists: signal.Notify, the grace timer and os.Exit are all things no in-process call
+// reaches.
+//
+// The child stalls inside its embedder, so it is interrupted with a note genuinely in flight rather
+// than between notes. The grace period is short so the test measures the timer instead of waiting
+// one out, and the exit code has to be the dedicated constant — a generic 1 would tell a scheduler
+// the ingestion is broken when somebody pressed Ctrl-C.
+func TestIngestCLI_SIGINT_ExitsWithDedicatedCode(t *testing.T) {
+	cache := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cache)
+	bin := buildCLI(t)
+
+	stalled, reached := stallingEmbedder(t)
+	proc := startIngest(t, bin, ingestEnv{
+		cache: cache, embedder: stalled, vaultPath: processVault(t),
+		collection: processCollection, tenant: processTenantA,
+		args: []string{"--grace-period", "1s"},
+	})
+	waitReached(t, reached, "the process never got as far as its embedder")
+
+	if err := proc.Process.Signal(os.Interrupt); err != nil {
+		t.Fatalf("sending SIGINT: %v", err)
+	}
+
+	code, stdout, stderr := waitExit(t, proc, refusalBudget)
+	if code != exitInterrupted {
+		t.Errorf("the interrupted process exited %d, want %d\nstdout: %s\nstderr: %s",
+			code, exitInterrupted, stdout, stderr)
+	}
+	// The partial report is what the operator reads to know where the run got to, and ADR-006 makes
+	// it safe to resume from. A run that exited without printing one leaves them with nothing.
+	if !bytes.Contains(stdout.Bytes(), []byte("note(s)")) {
+		t.Errorf("stdout %q carries no partial report", stdout)
+	}
+}
+
+// TestIngestCLI_SecondSIGINT_DoesNotWaitOutTheGracePeriod proves the second signal is not ignored.
+//
+// The grace period is set far above the budget this test allows, so a process that honoured only the
+// first signal cannot finish in time: passing means the second signal cut it short. The stalling
+// embedder guarantees there is something in flight for the grace period to apply to — without it,
+// the run would end at the note boundary and the test would pass for the wrong reason.
+func TestIngestCLI_SecondSIGINT_DoesNotWaitOutTheGracePeriod(t *testing.T) {
+	cache := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cache)
+	bin := buildCLI(t)
+
+	stalled, reached := stallingEmbedder(t)
+	proc := startIngest(t, bin, ingestEnv{
+		cache: cache, embedder: stalled, vaultPath: processVault(t),
+		collection: processCollection, tenant: processTenantA,
+		args: []string{"--grace-period", "10m"},
+	})
+	waitReached(t, reached, "the process never got as far as its embedder")
+
+	// The second signal is sent only once the child has acknowledged the first, and that ordering is
+	// the scenario rather than a convenience. SIGINT is a standard signal, and standard signals are
+	// not queued: if one is already pending, the kernel discards the next, so two sent in the same
+	// instant arrive as one and no handler on earth can tell them apart. A human pressing Ctrl-C
+	// twice always clears that window; a test that fires both in a tight loop does not, and would be
+	// measuring POSIX rather than this program.
+	//
+	// So this wait is not flakiness being papered over, and removing it does not make the test
+	// stricter — it makes it assert something no program can satisfy. The limitation is the
+	// operating system's: no handler, here or anywhere, can distinguish two coalesced signals.
+	if err := proc.Process.Signal(os.Interrupt); err != nil {
+		t.Fatalf("sending the first SIGINT: %v", err)
+	}
+	stderr := proc.Stderr.(*syncBuffer)
+	waitForOutput(t, stderr, "starting no more", startupBudget)
+	if err := proc.Process.Signal(os.Interrupt); err != nil {
+		t.Fatalf("sending the second SIGINT: %v", err)
+	}
+
+	code, stdout, stderr := waitExit(t, proc, refusalBudget)
+	if code != exitInterrupted {
+		t.Errorf("the twice-interrupted process exited %d, want %d\nstdout: %s\nstderr: %s",
+			code, exitInterrupted, stdout, stderr)
+	}
+	// Proof it was the second signal and not the grace period: the grace period is 10 minutes and
+	// this test waited 20 seconds.
+	if !bytes.Contains(stderr.Bytes(), []byte("interrupted twice")) {
+		t.Errorf("stderr %q does not show the second signal being acted on", stderr)
+	}
+}
+
+// syncBuffer is a bytes.Buffer a test can read while the child is still writing into it. The plain
+// one cannot: os/exec writes from its own goroutine, so `go test -race` calls that a data race, and
+// waiting for a line the child has printed is exactly what the double-SIGINT test needs.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func (b *syncBuffer) Bytes() []byte { return []byte(b.String()) }
+func (b *syncBuffer) Len() int      { return len(b.String()) }
+
+// waitForOutput blocks until the child has written want, or the budget expires.
+func waitForOutput(t *testing.T, b *syncBuffer, want string, budget time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(budget)
+	for time.Now().Before(deadline) {
+		if strings.Contains(b.String(), want) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("the process never wrote %q within %s; it has: %s", want, budget, b.String())
+}
+
 // buildCLI compiles the command under test once, into a directory the test owns. The binary is what
 // these tests are about — the exit code lives in main, and no in-process call reaches it.
 func buildCLI(t *testing.T) string {
@@ -239,7 +362,7 @@ func startIngest(t *testing.T, bin string, env ingestEnv) *exec.Cmd {
 		"KNOWRAG_VAULT_FIXTURE_PATH=" + env.vaultPath,
 		"KNOWRAG_VAULT_FIXTURE_AREAS=00-inbox",
 	}
-	cmd.Stdout, cmd.Stderr = &bytes.Buffer{}, &bytes.Buffer{}
+	cmd.Stdout, cmd.Stderr = &syncBuffer{}, &syncBuffer{}
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("starting `knowrag ingest --tenant %s`: %v", env.tenant, err)
 	}
@@ -253,9 +376,9 @@ func startIngest(t *testing.T, bin string, env ingestEnv) *exec.Cmd {
 // waitExit waits for a process to end, but only for so long: a run that sits waiting for the lock
 // instead of refusing is the defect, and a test that waited for it would report a timeout of its
 // own rather than the failure.
-func waitExit(t *testing.T, cmd *exec.Cmd, budget time.Duration) (int, *bytes.Buffer, *bytes.Buffer) {
+func waitExit(t *testing.T, cmd *exec.Cmd, budget time.Duration) (int, *syncBuffer, *syncBuffer) {
 	t.Helper()
-	stdout, stderr := cmd.Stdout.(*bytes.Buffer), cmd.Stderr.(*bytes.Buffer)
+	stdout, stderr := cmd.Stdout.(*syncBuffer), cmd.Stderr.(*syncBuffer)
 
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
