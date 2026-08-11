@@ -53,8 +53,8 @@ type seed struct {
 	status     schema.Status
 	visibility schema.Visibility
 	path       string
-	area       schema.Area
-	vault      schema.Vault
+	area       string
+	vault      string
 	noteType   schema.NoteType
 	tags       []string
 }
@@ -67,8 +67,8 @@ func newSeed(tenant, text string) seed {
 		status:     schema.StatusStable(),
 		visibility: schema.VisibilityInternal(),
 		path:       "notes/" + strings.ReplaceAll(text, " ", "-") + ".md",
-		area:       schema.AreaInfra(),
-		vault:      schema.VaultMalkaWay(),
+		area:       "infra",
+		vault:      "trabalho",
 		noteType:   schema.NoteTypeConcept(),
 	}
 }
@@ -308,8 +308,8 @@ func seedPoints(t *testing.T, client *qdrant.Client, collection string, seeds []
 			"headings":    []any{"Infra", "Crons"},
 			"status":      s.status.String(),
 			"visibility":  s.visibility.String(),
-			"area":        s.area.String(),
-			"vault":       s.vault.String(),
+			"area":        s.area,
+			"vault":       s.vault,
 			"type":        s.noteType.String(),
 			"tags":        []any{"cron"},
 		})

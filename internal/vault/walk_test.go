@@ -7,8 +7,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-
-	"github.com/danielmalka/go-knowrag/internal/schema"
 )
 
 // writeTree materializes a map of slash-separated relative paths to contents under a temp dir.
@@ -193,7 +191,7 @@ func TestScanVault_SymlinkContentIsNeverRead(t *testing.T) {
 		t.Skipf("symlinks unavailable on this filesystem: %v", err)
 	}
 
-	result, err := ScanVault(root, schema.VaultMalkaLife(), Exclusions{})
+	result, err := ScanVault(root, lifeVault(), lifeAreas(), Exclusions{})
 	if err == nil {
 		t.Fatal("ScanVault succeeded on a vault containing a symlink; want a refusal")
 	}

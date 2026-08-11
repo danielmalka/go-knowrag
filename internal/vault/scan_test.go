@@ -24,8 +24,22 @@ var (
 	}
 )
 
-func fixtureRoot(vault schema.Vault) string {
-	return filepath.Join("testdata", "fixture-vault", vault.String())
+// The fixture vaults' names and area sets — installation configuration (D-26), which the tests
+// supply the same way an operator does: `vault` and `area` are no longer schema enums, just names a
+// deployment's roster carries.
+func lifeVault() string { return "pessoal" }
+func wayVault() string  { return "trabalho" }
+
+func lifeAreas() []string {
+	return []string{"00-inbox", "mocs", "personal", "research"}
+}
+
+func wayAreas() []string {
+	return []string{"00-inbox", "alfa", "beta", "gama", "infra", "delta"}
+}
+
+func fixtureRoot(name string) string {
+	return filepath.Join("testdata", "fixture-vault", name)
 }
 
 // copyVault copies a fixture vault into a temp dir, passing every file's bytes through transform
@@ -76,27 +90,27 @@ func writeFileIn(t *testing.T, root, rel, content string) {
 	}
 }
 
-func scanFixture(t *testing.T, vault schema.Vault, ex Exclusions) ScanResult {
+func scanFixture(t *testing.T, name string, areas []string, ex Exclusions) ScanResult {
 	t.Helper()
-	result, err := ScanVault(fixtureRoot(vault), vault, ex)
+	result, err := ScanVault(fixtureRoot(name), name, areas, ex)
 	if err != nil {
-		t.Fatalf("ScanVault(%s): %v", vault, err)
+		t.Fatalf("ScanVault(%s): %v", name, err)
 	}
 	return result
 }
 
 func TestScanVault_FixtureProducesCorrectNotes(t *testing.T) {
-	life := scanFixture(t, schema.VaultMalkaLife(), fixtureLifeExclusions)
-	way := scanFixture(t, schema.VaultMalkaWay(), fixtureWayExclusions)
+	life := scanFixture(t, lifeVault(), lifeAreas(), fixtureLifeExclusions)
+	way := scanFixture(t, wayVault(), wayAreas(), fixtureWayExclusions)
 
 	byPath := map[string]Note{}
 	types := map[string]bool{}
 	areas := map[string]bool{}
 	for _, r := range []ScanResult{life, way} {
 		for _, n := range r.Notes {
-			byPath[r.Vault.String()+"/"+n.Path] = n
+			byPath[r.Vault+"/"+n.Path] = n
 			types[n.Type.String()] = true
-			areas[r.Vault.String()+"/"+n.Area.String()] = true
+			areas[r.Vault+"/"+n.Area] = true
 			if n.Updated.IsZero() {
 				t.Errorf("%s: Updated is the zero time", n.Path)
 			}
@@ -121,25 +135,25 @@ func TestScanVault_FixtureProducesCorrectNotes(t *testing.T) {
 		tags                                    []string
 	}{
 		{
-			key: "malkalife/research/golang/concurrency.md",
+			key: "pessoal/research/golang/concurrency.md",
 			uid: "0198a7f2-4b31-7c42-9e15-3d8a92c47b04",
 			typ: "concept", status: "stable", visibility: "internal",
 			area: "research", sub: "golang", tags: []string{"golang", "architecture"},
 		},
 		{
-			key: "malkalife/mocs/central.md",
+			key: "pessoal/mocs/central.md",
 			uid: "0198a7f2-4b31-7c42-9e15-3d8a92c47b02",
 			typ: "moc", status: "stable", visibility: "internal",
 			area: "mocs", sub: "", tags: []string{"moc", "index"},
 		},
 		{
-			key: "malkaway/infra/deploy/runbook.md",
+			key: "trabalho/infra/deploy/runbook.md",
 			uid: "0198a7f2-4b31-7c42-9e15-3d8a92c47b16",
 			typ: "agent", status: "stable", visibility: "internal",
 			area: "infra", sub: "deploy", tags: []string{"infra", "deploy"},
 		},
 		{
-			key: "malkaway/00-inbox/captura.md",
+			key: "trabalho/00-inbox/captura.md",
 			uid: "0198a7f2-4b31-7c42-9e15-3d8a92c47b10",
 			typ: "index", status: "draft", visibility: "internal",
 			area: "00-inbox", sub: "", tags: []string{"inbox", "index"},
@@ -159,7 +173,7 @@ func TestScanVault_FixtureProducesCorrectNotes(t *testing.T) {
 				t.Errorf("type/status/visibility = %s/%s/%s, want %s/%s/%s",
 					n.Type, n.Status, n.Visibility, tc.typ, tc.status, tc.visibility)
 			}
-			if n.Area.String() != tc.area || n.Sub != tc.sub {
+			if n.Area != tc.area || n.Sub != tc.sub {
 				t.Errorf("area/sub = %s/%s, want %s/%s", n.Area, n.Sub, tc.area, tc.sub)
 			}
 			if strings.Join(n.Tags, ",") != strings.Join(tc.tags, ",") {
@@ -176,10 +190,10 @@ func TestScanVault_FixtureProducesCorrectNotes(t *testing.T) {
 // ordering exists to prevent: before exclusion ran first, this fixture failed on `.git/` with an
 // *UnknownAreaError before reading a single note.
 func TestScanVault_ExcludedFoldersNeverReachDerivation(t *testing.T) {
-	root := copyVault(t, fixtureRoot(schema.VaultMalkaLife()), nil)
+	root := copyVault(t, fixtureRoot(lifeVault()), nil)
 	writeFileIn(t, root, ".git/HEAD", "ref: refs/heads/main\n")
 
-	result, err := ScanVault(root, schema.VaultMalkaLife(), fixtureLifeExclusions)
+	result, err := ScanVault(root, lifeVault(), lifeAreas(), fixtureLifeExclusions)
 	if err != nil {
 		t.Fatalf("scan failed on a vault with .git/, .obsidian/ and .trash/: %v", err)
 	}
@@ -209,10 +223,10 @@ func notePaths(r ScanResult) []string {
 // TestScanVault_UnknownFolderStillFails: exclusion narrows what reaches derivation, it does not
 // soften what derivation does then.
 func TestScanVault_UnknownFolderStillFails(t *testing.T) {
-	root := copyVault(t, fixtureRoot(schema.VaultMalkaLife()), nil)
+	root := copyVault(t, fixtureRoot(lifeVault()), nil)
 	writeFileIn(t, root, "misfiled/note.md", validNote)
 
-	_, err := ScanVault(root, schema.VaultMalkaLife(), fixtureLifeExclusions)
+	_, err := ScanVault(root, lifeVault(), lifeAreas(), fixtureLifeExclusions)
 	if err == nil {
 		t.Fatal("scan succeeded with an unknown first-level folder")
 	}
@@ -224,10 +238,10 @@ func TestScanVault_UnknownFolderStillFails(t *testing.T) {
 // TestScanVault_UnknownRootFileFails: a root `.md` outside the configured list is an error, not a
 // silent skip — "excluded is a declared decision, unknown is an error" (PRD-contrato §2.4b).
 func TestScanVault_UnknownRootFileFails(t *testing.T) {
-	root := copyVault(t, fixtureRoot(schema.VaultMalkaLife()), nil)
+	root := copyVault(t, fixtureRoot(lifeVault()), nil)
 	writeFileIn(t, root, "stray.md", validNote)
 
-	_, err := ScanVault(root, schema.VaultMalkaLife(), fixtureLifeExclusions)
+	_, err := ScanVault(root, lifeVault(), lifeAreas(), fixtureLifeExclusions)
 	if err == nil {
 		t.Fatal("scan succeeded with an unlisted root .md file")
 	}
@@ -255,9 +269,9 @@ func hasUnknownArea(err error, folder string) bool {
 // corrected §2.4b map has no `powerai` entry, so exclusion is the only thing keeping the folder
 // out of an ingestion failure.
 func TestScanVault_NamedExclusion_SkipsSilently(t *testing.T) {
-	root := fixtureRoot(schema.VaultMalkaLife())
+	root := fixtureRoot(lifeVault())
 
-	result, err := ScanVault(root, schema.VaultMalkaLife(), fixtureLifeExclusions)
+	result, err := ScanVault(root, lifeVault(), lifeAreas(), fixtureLifeExclusions)
 	if err != nil {
 		t.Fatalf("scan with PowerAI excluded returned an error: %v", err)
 	}
@@ -268,7 +282,7 @@ func TestScanVault_NamedExclusion_SkipsSilently(t *testing.T) {
 	}
 
 	withoutList := Exclusions{RootFiles: fixtureLifeExclusions.RootFiles}
-	if _, err := ScanVault(root, schema.VaultMalkaLife(), withoutList); !hasUnknownArea(err, "PowerAI") {
+	if _, err := ScanVault(root, lifeVault(), lifeAreas(), withoutList); !hasUnknownArea(err, "PowerAI") {
 		t.Errorf("without the exclusion list, got %v; want an *UnknownAreaError naming PowerAI", err)
 	}
 }
@@ -276,17 +290,17 @@ func TestScanVault_NamedExclusion_SkipsSilently(t *testing.T) {
 // TestScanVault_CRLFVaultMatchesLFVault proves T2's normalization survives the whole orchestration.
 // The CRLF twin is generated here rather than committed, so the two vaults cannot drift apart.
 func TestScanVault_CRLFVaultMatchesLFVault(t *testing.T) {
-	src := fixtureRoot(schema.VaultMalkaLife())
+	src := fixtureRoot(lifeVault())
 	crlfRoot := copyVault(t, src, func(b []byte) []byte {
 		return bytes.ReplaceAll(b, []byte("\n"), []byte("\r\n"))
 	})
 	lfRoot := copyVault(t, src, nil)
 
-	lf, err := ScanVault(lfRoot, schema.VaultMalkaLife(), fixtureLifeExclusions)
+	lf, err := ScanVault(lfRoot, lifeVault(), lifeAreas(), fixtureLifeExclusions)
 	if err != nil {
 		t.Fatalf("scanning the LF vault: %v", err)
 	}
-	crlf, err := ScanVault(crlfRoot, schema.VaultMalkaLife(), fixtureLifeExclusions)
+	crlf, err := ScanVault(crlfRoot, lifeVault(), lifeAreas(), fixtureLifeExclusions)
 	if err != nil {
 		t.Fatalf("scanning the CRLF vault: %v", err)
 	}
@@ -311,7 +325,7 @@ func TestScanVault_CRLFVaultMatchesLFVault(t *testing.T) {
 }
 
 func TestScanVault_DuplicateUID_NamesBothPaths(t *testing.T) {
-	root := copyVault(t, fixtureRoot(schema.VaultMalkaLife()), nil)
+	root := copyVault(t, fixtureRoot(lifeVault()), nil)
 	// A verbatim copy of an existing note under a second path: same uid, two places.
 	original := filepath.Join(root, "research", "golang", "concurrency.md")
 	b, err := os.ReadFile(original) // #nosec G304 -- test fixture path
@@ -320,7 +334,7 @@ func TestScanVault_DuplicateUID_NamesBothPaths(t *testing.T) {
 	}
 	writeFileIn(t, root, "mocs/copia.md", string(b))
 
-	result, err := ScanVault(root, schema.VaultMalkaLife(), fixtureLifeExclusions)
+	result, err := ScanVault(root, lifeVault(), lifeAreas(), fixtureLifeExclusions)
 	if err == nil {
 		t.Fatal("scan succeeded with a duplicate uid")
 	}
@@ -346,7 +360,7 @@ func TestScanVault_DuplicateUID_NamesBothPaths(t *testing.T) {
 // TestScanVault_ThreeNotesShareUID: three collisions must still name two concrete paths, not
 // degrade into a vague "duplicates found".
 func TestScanVault_ThreeNotesShareUID(t *testing.T) {
-	root := copyVault(t, fixtureRoot(schema.VaultMalkaLife()), nil)
+	root := copyVault(t, fixtureRoot(lifeVault()), nil)
 	b, err := os.ReadFile(filepath.Join(root, "research", "golang", "concurrency.md")) // #nosec G304
 	if err != nil {
 		t.Fatalf("read fixture note: %v", err)
@@ -354,7 +368,7 @@ func TestScanVault_ThreeNotesShareUID(t *testing.T) {
 	writeFileIn(t, root, "mocs/copia-a.md", string(b))
 	writeFileIn(t, root, "mocs/copia-b.md", string(b))
 
-	_, err = ScanVault(root, schema.VaultMalkaLife(), fixtureLifeExclusions)
+	_, err = ScanVault(root, lifeVault(), lifeAreas(), fixtureLifeExclusions)
 
 	var dup *DuplicateUIDError
 	if !errors.As(err, &dup) {
@@ -366,8 +380,8 @@ func TestScanVault_ThreeNotesShareUID(t *testing.T) {
 }
 
 func TestCheckCrossVaultDuplicateUIDs(t *testing.T) {
-	life := scanFixture(t, schema.VaultMalkaLife(), fixtureLifeExclusions)
-	way := scanFixture(t, schema.VaultMalkaWay(), fixtureWayExclusions)
+	life := scanFixture(t, lifeVault(), lifeAreas(), fixtureLifeExclusions)
+	way := scanFixture(t, wayVault(), wayAreas(), fixtureWayExclusions)
 
 	if err := CheckCrossVaultDuplicateUIDs(life, way); err != nil {
 		t.Errorf("fixtures share no uid, but got %v", err)
@@ -377,7 +391,7 @@ func TestCheckCrossVaultDuplicateUIDs(t *testing.T) {
 	// exactly like a repeat inside one.
 	collided := way
 	collided.Notes = append(append([]Note{}, way.Notes...), Note{
-		Path: "arcanto/colisao.md",
+		Path: "alfa/colisao.md",
 		UID:  life.Notes[0].UID,
 	})
 
@@ -386,7 +400,7 @@ func TestCheckCrossVaultDuplicateUIDs(t *testing.T) {
 	if !errors.As(err, &dup) {
 		t.Fatalf("got %v, want a *DuplicateUIDError", err)
 	}
-	if dup.PathA != life.Notes[0].Path || dup.PathB != "arcanto/colisao.md" {
+	if dup.PathA != life.Notes[0].Path || dup.PathB != "alfa/colisao.md" {
 		t.Errorf("error = %+v, want one path from each ScanResult", dup)
 	}
 }
@@ -395,7 +409,7 @@ func TestCheckCrossVaultDuplicateUIDs(t *testing.T) {
 // filters it at query time (S07). Dropping it here would leave it unindexed forever, with nothing
 // downstream able to notice.
 func TestScanVault_ArchivedNotesAreIncludedNotFiltered(t *testing.T) {
-	result := scanFixture(t, schema.VaultMalkaLife(), fixtureLifeExclusions)
+	result := scanFixture(t, lifeVault(), lifeAreas(), fixtureLifeExclusions)
 
 	var found *Note
 	for i, n := range result.Notes {
@@ -419,7 +433,7 @@ func TestScanVault_ArchivedNotesAreIncludedNotFiltered(t *testing.T) {
 // The cases are generated from schema.AllStatuses(), so a value added to the enum is covered the
 // day it is added rather than the day someone remembers this test.
 func TestScanVault_EveryStatusIsScannedAndPreserved(t *testing.T) {
-	root := copyVault(t, fixtureRoot(schema.VaultMalkaLife()), nil)
+	root := copyVault(t, fixtureRoot(lifeVault()), nil)
 
 	want := map[string]schema.Status{}
 	for i, st := range schema.AllStatuses() {
@@ -433,7 +447,7 @@ func TestScanVault_EveryStatusIsScannedAndPreserved(t *testing.T) {
 		want[rel] = st
 	}
 
-	result, err := ScanVault(root, schema.VaultMalkaLife(), fixtureLifeExclusions)
+	result, err := ScanVault(root, lifeVault(), lifeAreas(), fixtureLifeExclusions)
 	if err != nil {
 		t.Fatalf("ScanVault: %v", err)
 	}
@@ -492,10 +506,10 @@ func TestNoStatusBasedFiltering(t *testing.T) {
 // TestScanVault_EmptyNoteIsSkippedNotFatal documents S02's decision on the one 0-byte note in the
 // real corpus: recorded as skipped, not silently dropped and not fatal.
 func TestScanVault_EmptyNoteIsSkippedNotFatal(t *testing.T) {
-	root := copyVault(t, fixtureRoot(schema.VaultMalkaLife()), nil)
+	root := copyVault(t, fixtureRoot(lifeVault()), nil)
 	writeFileIn(t, root, "research/curadoria/vazia.md", "")
 
-	result, err := ScanVault(root, schema.VaultMalkaLife(), fixtureLifeExclusions)
+	result, err := ScanVault(root, lifeVault(), lifeAreas(), fixtureLifeExclusions)
 	if err != nil {
 		t.Fatalf("an empty note failed the scan: %v", err)
 	}
@@ -514,13 +528,13 @@ func TestScanVault_EmptyNoteIsSkippedNotFatal(t *testing.T) {
 // TestScanVault_MalformedNoteSurfacesWithItsPath: collect-all, fail-closed. A batch over hundreds
 // of files must report every bad note in one run, and must not hand back a partial list.
 func TestScanVault_MalformedNoteSurfacesWithItsPath(t *testing.T) {
-	root := copyVault(t, fixtureRoot(schema.VaultMalkaLife()), nil)
+	root := copyVault(t, fixtureRoot(lifeVault()), nil)
 	writeFileIn(t, root, "mocs/sem-uid.md", strings.Replace(validNote,
 		"uid: 0198a7f2-4b31-7c42-9e15-3d8a92c47b6a\n", "", 1))
 	writeFileIn(t, root, "personal/sem-tags.md", strings.Replace(validNote,
 		"tags: [golang, architecture]\n", "", 1))
 
-	result, err := ScanVault(root, schema.VaultMalkaLife(), fixtureLifeExclusions)
+	result, err := ScanVault(root, lifeVault(), lifeAreas(), fixtureLifeExclusions)
 	if len(result.Notes) != 0 {
 		t.Errorf("returned %d notes alongside an error; scan must be fail-closed", len(result.Notes))
 	}
@@ -550,7 +564,7 @@ func TestScanVault_GitUpdatedMapCalledOncePerScan(t *testing.T) {
 	}
 	t.Cleanup(func() { runGitLog = real })
 
-	scanFixture(t, schema.VaultMalkaLife(), fixtureLifeExclusions)
+	scanFixture(t, lifeVault(), lifeAreas(), fixtureLifeExclusions)
 
 	if calls != 1 {
 		t.Errorf("git log was invoked %d times for one ScanVault call, want exactly 1", calls)

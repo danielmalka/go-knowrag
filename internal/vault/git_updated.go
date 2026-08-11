@@ -63,10 +63,11 @@ var runGitLog = func(root string) ([]byte, error) {
 //
 // Precision, stated as it is rather than better than it is: `git log --name-only` does not list
 // files for merge commits (that needs -m), so a path whose latest change arrived through a merge
-// keeps the date of the last non-merge commit that touched it. Measured on MalkaLife: 12 merges in
-// 360 commits, one note about 90 minutes older than reality. The command deliberately stays as it
-// is — `updated` is the one §2.4 payload field kept out of point_hash precisely because it is
-// allowed this kind of drift, and -m multiplies the output of a call NFR-5 wants cheap.
+// keeps the date of the last non-merge commit that touched it. Measured on the larger vault of the
+// corpus: 12 merges in 360 commits, one note about 90 minutes older than reality. The command
+// deliberately stays as it is — `updated` is the one §2.4 payload field kept out of point_hash
+// precisely because it is allowed this kind of drift, and -m multiplies the output of a call NFR-5
+// wants cheap.
 func gitUpdatedMap(root string) (map[string]time.Time, error) {
 	out, err := runGitLog(root)
 	if err != nil {

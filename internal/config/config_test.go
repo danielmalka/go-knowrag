@@ -7,19 +7,19 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
-
-	"github.com/danielmalka/go-knowrag/internal/schema"
 )
 
-// allEnvVars is every variable Load consults, required or not. Tests clear all of them so an
-// operator's ambient environment cannot make a case pass or fail by accident. It is derived from
-// the same `fields` slice Load reads rather than retyped, so a setting added there cannot be
-// forgotten here and start leaking the host's environment into a test.
-var allEnvVars = func() []string {
-	out := []string{configFileEnv}
+// fixedEnvVars is every variable Load consults whose name is known at compile time. The per-vault
+// variables are not here on purpose: their names depend on the roster, so they are found by prefix
+// in clearEnv instead. It is derived from the same `fields` slice Load reads rather than retyped, so
+// a setting added there cannot be forgotten here and start leaking the host's environment into a
+// test.
+var fixedEnvVars = func() []string {
+	out := []string{configFileEnv, vaultsEnv}
 	for _, f := range fields {
 		out = append(out, f.env)
 	}
@@ -28,9 +28,20 @@ var allEnvVars = func() []string {
 
 // clearEnv unsets every variable Load reads, restoring the originals when the test ends.
 // t.Setenv registers the restore; the immediate Unsetenv is what actually clears the value.
+//
+// The KNOWRAG_VAULT_* sweep is not decoration. Those names are no longer in `fields`, so a list
+// derived from `fields` alone would silently stop clearing them: a vault variable set by one test
+// would survive into the next, and the failure would land somewhere else entirely with nothing
+// pointing back here.
 func clearEnv(t *testing.T) {
 	t.Helper()
-	for _, name := range allEnvVars {
+	names := slices.Clone(fixedEnvVars)
+	for _, entry := range os.Environ() {
+		if name, _, _ := strings.Cut(entry, "="); strings.HasPrefix(name, vaultEnvPrefix) {
+			names = append(names, name)
+		}
+	}
+	for _, name := range names {
 		t.Setenv(name, "")
 		if err := os.Unsetenv(name); err != nil {
 			t.Fatalf("unsetting %s: %v", name, err)
@@ -38,8 +49,9 @@ func clearEnv(t *testing.T) {
 	}
 }
 
-// allNeeds is every Need bit, so a test can ask for "everything a command could require".
-const allNeeds = NeedQdrant | NeedCollection | NeedEmbedder | NeedVaultMalkaLife | NeedVaultMalkaWay
+// allNeeds is every Need bit a command can ask Require for. The vaults are not bits any more —
+// their names are runtime configuration, so RequireVaults checks them by name.
+const allNeeds = NeedQdrant | NeedCollection | NeedEmbedder
 
 // setRequiredEnv sets every variable some command requires to a recognizable value.
 func setRequiredEnv(t *testing.T) {
@@ -48,8 +60,17 @@ func setRequiredEnv(t *testing.T) {
 	t.Setenv("QDRANT_API_KEY", "env-key")
 	t.Setenv("EMBEDDER_ENDPOINT", "http://embedder.example:8080")
 	t.Setenv("DEFAULT_COLLECTION", "knowrag_interno")
-	t.Setenv("KNOWRAG_VAULT_MALKALIFE_PATH", "/vaults/MalkaLife")
-	t.Setenv("KNOWRAG_VAULT_MALKAWAY_PATH", "/vaults/MalkaWay")
+	setRequiredVaultEnv(t)
+}
+
+// setRequiredVaultEnv rosters two vaults with everything a run needs from them.
+func setRequiredVaultEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv(vaultsEnv, "pessoal,trabalho")
+	t.Setenv("KNOWRAG_VAULT_PESSOAL_PATH", "/vaults/Pessoal")
+	t.Setenv("KNOWRAG_VAULT_PESSOAL_AREAS", "00-inbox,mocs,personal,research")
+	t.Setenv("KNOWRAG_VAULT_TRABALHO_PATH", "/vaults/Trabalho")
+	t.Setenv("KNOWRAG_VAULT_TRABALHO_AREAS", "00-inbox,alfa,beta")
 }
 
 func writeConfigFile(t *testing.T, contents string) string {
@@ -68,12 +89,15 @@ qdrant_api_key: file-key
 embedder_endpoint: http://file-embedder:8080
 default_collection: knowrag_file
 log_level: debug
-vault_malkalife:
-  path: /vaults/MalkaLife
-  exclude_folders: PowerAI, resources
-  exclude_root_files: AGENTS.md
-vault_malkaway:
-  path: /vaults/MalkaWay
+vaults:
+  pessoal:
+    path: /vaults/Pessoal
+    areas: 00-inbox, mocs
+    exclude_folders: PowerAI, resources
+    exclude_root_files: AGENTS.md
+  trabalho:
+    path: /vaults/Trabalho
+    areas: 00-inbox
 `)
 	t.Setenv("KNOWRAG_CONFIG_FILE", path)
 
@@ -87,15 +111,347 @@ vault_malkaway:
 		EmbedderEndpoint:  "http://file-embedder:8080",
 		DefaultCollection: "knowrag_file",
 		LogLevel:          "debug",
-		VaultMalkaLife: VaultSettings{
-			Path:             "/vaults/MalkaLife",
-			ExcludeFolders:   "PowerAI, resources",
-			ExcludeRootFiles: "AGENTS.md",
+		Vaults: map[string]VaultSettings{
+			"pessoal": {
+				Path:             "/vaults/Pessoal",
+				Areas:            "00-inbox, mocs",
+				ExcludeFolders:   "PowerAI, resources",
+				ExcludeRootFiles: "AGENTS.md",
+			},
+			"trabalho": {Path: "/vaults/Trabalho", Areas: "00-inbox"},
 		},
-		VaultMalkaWay: VaultSettings{Path: "/vaults/MalkaWay"},
 	}
-	if *cfg != want {
+	if !reflect.DeepEqual(*cfg, want) {
 		t.Fatalf("Load() = %+v, want %+v", *cfg, want)
+	}
+}
+
+// TestLoad_ConfigFile_FixedVaultKey_ReturnsError covers the shape the file used to have. The two
+// fixed keys are gone; strict decoding turns a config file still carrying them into a loud error
+// instead of a vault that is silently never configured.
+func TestLoad_ConfigFile_FixedVaultKey_ReturnsError(t *testing.T) {
+	clearEnv(t)
+	path := writeConfigFile(t, `qdrant_endpoint: file.example:6334
+vault_pessoal:
+  path: /vaults/Pessoal
+`)
+	t.Setenv("KNOWRAG_CONFIG_FILE", path)
+
+	cfg, err := Load()
+	if err == nil {
+		t.Fatalf("Load() with the removed vault_pessoal key = %+v, want an error", cfg)
+	}
+	if !strings.Contains(err.Error(), "vault_pessoal") {
+		t.Fatalf("Load() error %q does not name the removed key vault_pessoal", err)
+	}
+}
+
+// TestLoad_VaultRoster_FromEnv pins the whole per-vault env binding, including the <NAME> spelling
+// rule: a vault named `my-notes` reads KNOWRAG_VAULT_MY_NOTES_*, and nothing else is a legal
+// spelling of it.
+func TestLoad_VaultRoster_FromEnv(t *testing.T) {
+	clearEnv(t)
+	t.Setenv(vaultsEnv, "my-notes, work")
+	t.Setenv("KNOWRAG_VAULT_MY_NOTES_PATH", "/vaults/notes")
+	t.Setenv("KNOWRAG_VAULT_MY_NOTES_AREAS", "00-inbox,research")
+	t.Setenv("KNOWRAG_VAULT_MY_NOTES_EXCLUDE_FOLDERS", "resources")
+	t.Setenv("KNOWRAG_VAULT_WORK_PATH", "/vaults/work")
+	t.Setenv("KNOWRAG_VAULT_WORK_AREAS", "00-inbox")
+	t.Setenv("KNOWRAG_VAULT_WORK_EXCLUDE_ROOT_FILES", "AGENTS.md")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load(): %v", err)
+	}
+	want := map[string]VaultSettings{
+		"my-notes": {Path: "/vaults/notes", Areas: "00-inbox,research", ExcludeFolders: "resources"},
+		"work":     {Path: "/vaults/work", Areas: "00-inbox", ExcludeRootFiles: "AGENTS.md"},
+	}
+	if !reflect.DeepEqual(cfg.Vaults, want) {
+		t.Fatalf("Vaults = %+v, want %+v", cfg.Vaults, want)
+	}
+	if err := cfg.RequireVaults(cfg.VaultNames()...); err != nil {
+		t.Fatalf("RequireVaults with both vaults fully configured: %v", err)
+	}
+	// Sorted, not map order: `--vault both` must scan in the same order on every run.
+	if got := cfg.VaultNames(); !slices.Equal(got, []string{"my-notes", "work"}) {
+		t.Fatalf("VaultNames() = %q, want them sorted", got)
+	}
+	if got := cfg.Vaults["my-notes"].AreaNames(); !slices.Equal(got, []string{"00-inbox", "research"}) {
+		t.Fatalf("AreaNames() = %q, want the split list", got)
+	}
+}
+
+// TestLoad_EnvRosterOverridesFile keeps the environment winning over the file for the roster the
+// same way it wins for every other setting, while the file's settings for a rostered vault survive.
+func TestLoad_EnvRosterOverridesFile(t *testing.T) {
+	clearEnv(t)
+	path := writeConfigFile(t, `vaults:
+  pessoal:
+    path: /from/file
+    areas: 00-inbox
+`)
+	t.Setenv("KNOWRAG_CONFIG_FILE", path)
+	t.Setenv(vaultsEnv, "pessoal")
+	t.Setenv("KNOWRAG_VAULT_PESSOAL_AREAS", "00-inbox,mocs")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load(): %v", err)
+	}
+	want := VaultSettings{Path: "/from/file", Areas: "00-inbox,mocs"}
+	if cfg.Vaults["pessoal"] != want {
+		t.Fatalf("Vaults[pessoal] = %+v, want %+v — the file's path must survive, the env areas must win", cfg.Vaults["pessoal"], want)
+	}
+}
+
+// TestLoad_EmptyEnvRosterClearsTheFile pins the half of "the environment wins" that is easy to lose:
+// winning has to include winning with nothing.
+//
+// An operator clearing a host's roster exports KNOWRAG_VAULTS= and expects no vault to be ingested.
+// Read with Getenv and a non-empty test, that is indistinguishable from unset, so the file's roster
+// survives and the host keeps ingesting vaults the operator believes they turned off — silently,
+// because nothing in the run mentions the config file at all.
+func TestLoad_EmptyEnvRosterClearsTheFile(t *testing.T) {
+	clearEnv(t)
+	path := writeConfigFile(t, `vaults:
+  pessoal:
+    path: /from/file
+    areas: 00-inbox
+`)
+	t.Setenv("KNOWRAG_CONFIG_FILE", path)
+	t.Setenv(vaultsEnv, "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load(): %v", err)
+	}
+	if len(cfg.Vaults) != 0 {
+		t.Fatalf("Vaults = %+v, want empty — %s was set to nothing, which is a roster of no vaults, not an unset variable",
+			cfg.Vaults, vaultsEnv)
+	}
+	if err := cfg.RequireVaults(); err == nil {
+		t.Error("RequireVaults() on the cleared roster = nil, want the error that names the missing roster")
+	}
+}
+
+// TestLoad_RejectsNamesThatAreNotSlugs is the point of this validation: the value is written
+// verbatim into the payload and into point_hash, so a name that is not a slug is refused at load
+// rather than normalised. Normalising it would move every hash, and since the point ID does not
+// include `vault`, the old points would be overwritten rather than orphaned — a full reindex
+// reported as a clean run.
+func TestLoad_RejectsNamesThatAreNotSlugs(t *testing.T) {
+	bad := []string{
+		"Pessoal",     // uppercase
+		"nome vault",  // space
+		"nome\tvault", // other whitespace
+		"nomê",        // accent
+		"nome_vault",  // underscore
+		"-nome",       // leading hyphen
+		"nome-",       // trailing hyphen
+		"nome--vault", // doubled hyphen
+	}
+
+	for _, name := range bad {
+		t.Run("vault "+name, func(t *testing.T) {
+			clearEnv(t)
+			t.Setenv(vaultsEnv, name)
+
+			cfg, err := Load()
+			if err == nil {
+				t.Fatalf("Load() with vault name %q = %+v, want an error", name, cfg)
+			}
+			assertNamesValueAndFormat(t, err, name)
+		})
+
+		t.Run("area "+name, func(t *testing.T) {
+			clearEnv(t)
+			t.Setenv(vaultsEnv, "pessoal")
+			t.Setenv("KNOWRAG_VAULT_PESSOAL_PATH", "/vaults/Pessoal")
+			t.Setenv("KNOWRAG_VAULT_PESSOAL_AREAS", "00-inbox,"+name)
+
+			cfg, err := Load()
+			if err == nil {
+				t.Fatalf("Load() with area %q = %+v, want an error", name, cfg)
+			}
+			assertNamesValueAndFormat(t, err, name)
+		})
+	}
+}
+
+// assertNamesValueAndFormat holds the error to what an operator needs: the offending value, so they
+// do not have to guess which of their names is wrong, and the format, so they do not have to guess
+// whether the problem was the accent or the space.
+func assertNamesValueAndFormat(t *testing.T, err error, value string) {
+	t.Helper()
+	// Quoted, the way the error prints it: a raw tab in a message an operator has to read tells
+	// them nothing, so the value is escaped and the assertion follows it.
+	if quoted := fmt.Sprintf("%q", value); !strings.Contains(err.Error(), quoted) {
+		t.Errorf("error %q does not name the offending value %s", err, quoted)
+	}
+	if !strings.Contains(err.Error(), slugRe.String()) {
+		t.Errorf("error %q does not state the expected format", err)
+	}
+}
+
+// TestLoad_SlugsThatMustBeAccepted is the other half, and the one that says this breaks nothing:
+// every vault name and area the real installation uses today.
+func TestLoad_SlugsThatMustBeAccepted(t *testing.T) {
+	clearEnv(t)
+	t.Setenv(vaultsEnv, "pessoal,trabalho")
+	t.Setenv("KNOWRAG_VAULT_PESSOAL_PATH", "/vaults/Pessoal")
+	t.Setenv("KNOWRAG_VAULT_PESSOAL_AREAS", "00-inbox,mocs,personal,research")
+	t.Setenv("KNOWRAG_VAULT_TRABALHO_PATH", "/vaults/Trabalho")
+	t.Setenv("KNOWRAG_VAULT_TRABALHO_AREAS", "00-inbox,alfa,beta,gama,infra,delta")
+
+	if _, err := Load(); err != nil {
+		t.Fatalf("Load() refused a name the real installation already uses: %v", err)
+	}
+}
+
+// TestLoad_OrphanedVaultSetting_ReturnsError covers the failure that has no symptom: a vault dropped
+// from the roster with its variables still exported is never ingested, and its points go stale
+// without a single line of output saying so.
+func TestLoad_OrphanedVaultSetting_ReturnsError(t *testing.T) {
+	t.Run("environment", func(t *testing.T) {
+		clearEnv(t)
+		t.Setenv(vaultsEnv, "pessoal")
+		t.Setenv("KNOWRAG_VAULT_PESSOAL_PATH", "/vaults/Pessoal")
+		t.Setenv("KNOWRAG_VAULT_PESSOAL_AREAS", "00-inbox")
+		t.Setenv("KNOWRAG_VAULT_TRABALHO_PATH", "/vaults/Trabalho")
+
+		cfg, err := Load()
+		if err == nil {
+			t.Fatalf("Load() with a vault variable outside the roster = %+v, want an error", cfg)
+		}
+		for _, want := range []string{"KNOWRAG_VAULT_TRABALHO_PATH", vaultsEnv} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not name %s", err, want)
+			}
+		}
+	})
+
+	t.Run("config file", func(t *testing.T) {
+		clearEnv(t)
+		path := writeConfigFile(t, `vaults:
+  pessoal:
+    path: /vaults/Pessoal
+    areas: 00-inbox
+  trabalho:
+    path: /vaults/Trabalho
+    areas: 00-inbox
+`)
+		t.Setenv("KNOWRAG_CONFIG_FILE", path)
+		t.Setenv(vaultsEnv, "pessoal")
+
+		cfg, err := Load()
+		if err == nil {
+			t.Fatalf("Load() with a config-file vault outside the roster = %+v, want an error", cfg)
+		}
+		if !strings.Contains(err.Error(), "trabalho") {
+			t.Errorf("error %q does not name the dropped vault", err)
+		}
+	})
+
+	// No roster at all is not an orphan report: every vault variable would look orphaned, and the
+	// real fault is the missing roster, which RequireVaults names. This is also what keeps
+	// `schema apply` running on a host that has vault variables and no KNOWRAG_VAULTS.
+	t.Run("no roster is not an orphan report", func(t *testing.T) {
+		clearEnv(t)
+		t.Setenv("KNOWRAG_VAULT_TRABALHO_PATH", "/vaults/Trabalho")
+
+		if _, err := Load(); err != nil {
+			t.Fatalf("Load() with vault variables and no roster: %v", err)
+		}
+	})
+}
+
+// TestRequireVaults_NoRoster_NamesTheRosterVariable keeps the empty roster from being read as
+// "zero vaults, nothing to do" — which exits 0 and looks like a successful run.
+func TestRequireVaults_NoRoster_NamesTheRosterVariable(t *testing.T) {
+	clearEnv(t)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load(): %v", err)
+	}
+	for _, names := range [][]string{nil, {"pessoal"}} {
+		err := cfg.RequireVaults(names...)
+		if err == nil {
+			t.Fatalf("RequireVaults(%q) with no roster = nil, want an error", names)
+		}
+		if !strings.Contains(err.Error(), vaultsEnv) {
+			t.Errorf("error %q does not name %s", err, vaultsEnv)
+		}
+	}
+}
+
+// TestRequireVaults_ReportsEveryMissingSettingAtOnce keeps the property Require exists for: an
+// operator setting up a host sees the whole list in one run, not one restart at a time.
+func TestRequireVaults_ReportsEveryMissingSettingAtOnce(t *testing.T) {
+	clearEnv(t)
+	t.Setenv(vaultsEnv, "pessoal,trabalho")
+	t.Setenv("KNOWRAG_VAULT_PESSOAL_PATH", "/vaults/Pessoal")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load(): %v", err)
+	}
+	err = cfg.RequireVaults(cfg.VaultNames()...)
+	if err == nil {
+		t.Fatal("RequireVaults with two half-configured vaults = nil, want an error")
+	}
+	for _, want := range []string{
+		"KNOWRAG_VAULT_PESSOAL_AREAS", "KNOWRAG_VAULT_TRABALHO_PATH", "KNOWRAG_VAULT_TRABALHO_AREAS",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %s", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "KNOWRAG_VAULT_PESSOAL_PATH") {
+		t.Errorf("error %q names KNOWRAG_VAULT_PESSOAL_PATH, which is set", err)
+	}
+}
+
+// TestRequireVaults_OnlyChecksTheVaultsAsked mirrors Require's per-command rule: `--vault trabalho`
+// must not be refused for a vault it was not pointed at.
+func TestRequireVaults_OnlyChecksTheVaultsAsked(t *testing.T) {
+	clearEnv(t)
+	setRequiredVaultEnv(t)
+	if err := os.Unsetenv("KNOWRAG_VAULT_PESSOAL_PATH"); err != nil {
+		t.Fatalf("unsetting: %v", err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load(): %v", err)
+	}
+	if err := cfg.RequireVaults("trabalho"); err != nil {
+		t.Fatalf("RequireVaults(trabalho) with trabalho fully configured: %v", err)
+	}
+	if err := cfg.RequireVaults(cfg.VaultNames()...); err == nil {
+		t.Fatal("RequireVaults over the whole roster with pessoal's path missing = nil, want an error")
+	}
+}
+
+// TestRequireVaults_UnknownVault_NamesTheRoster covers the name a command was pointed at that the
+// roster does not have: the fix is the roster, so the message says so.
+func TestRequireVaults_UnknownVault_NamesTheRoster(t *testing.T) {
+	clearEnv(t)
+	setRequiredVaultEnv(t)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load(): %v", err)
+	}
+	err = cfg.RequireVaults("ghost")
+	if err == nil {
+		t.Fatal("RequireVaults(ghost) with ghost outside the roster = nil, want an error")
+	}
+	for _, want := range []string{"ghost", vaultsEnv} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %s", err, want)
+		}
 	}
 }
 
@@ -132,16 +488,21 @@ func TestLoad_AllRequiredPresent_ReturnsConfig(t *testing.T) {
 	if err := cfg.Require(allNeeds); err != nil {
 		t.Fatalf("Require(allNeeds) with every required var set: %v", err)
 	}
+	if err := cfg.RequireVaults(cfg.VaultNames()...); err != nil {
+		t.Fatalf("RequireVaults with every required var set: %v", err)
+	}
 	want := Config{
 		QdrantEndpoint:    "qdrant.example:6334",
 		QdrantAPIKey:      "env-key",
 		EmbedderEndpoint:  "http://embedder.example:8080",
 		DefaultCollection: "knowrag_interno",
 		LogLevel:          "info",
-		VaultMalkaLife:    VaultSettings{Path: "/vaults/MalkaLife"},
-		VaultMalkaWay:     VaultSettings{Path: "/vaults/MalkaWay"},
+		Vaults: map[string]VaultSettings{
+			"pessoal":  {Path: "/vaults/Pessoal", Areas: "00-inbox,mocs,personal,research"},
+			"trabalho": {Path: "/vaults/Trabalho", Areas: "00-inbox,alfa,beta"},
+		},
 	}
-	if *cfg != want {
+	if !reflect.DeepEqual(*cfg, want) {
 		t.Fatalf("Load() = %+v, want %+v", *cfg, want)
 	}
 }
@@ -150,10 +511,9 @@ func TestLoad_AllRequiredPresent_ReturnsConfig(t *testing.T) {
 // setting some command requires, absent, is reported by name. It asks for every Need at once, which
 // is the "all of them" case the old all-or-nothing Load covered.
 func TestRequire_MissingVar_ReturnsError(t *testing.T) {
-	missing := []string{
-		"QDRANT_ENDPOINT", "QDRANT_API_KEY", "EMBEDDER_ENDPOINT", "DEFAULT_COLLECTION",
-		"KNOWRAG_VAULT_MALKALIFE_PATH", "KNOWRAG_VAULT_MALKAWAY_PATH",
-	}
+	// The per-vault settings are not here: their names depend on the roster, so RequireVaults
+	// checks them — see TestRequireVaults_ReportsEveryMissingSettingAtOnce.
+	missing := []string{"QDRANT_ENDPOINT", "QDRANT_API_KEY", "EMBEDDER_ENDPOINT", "DEFAULT_COLLECTION"}
 
 	for _, name := range missing {
 		t.Run(name, func(t *testing.T) {
@@ -208,11 +568,11 @@ func TestRequire_ReportsEveryMissingSettingAtOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load(): %v", err)
 	}
-	err = cfg.Require(NeedEmbedder | NeedVaultMalkaWay)
+	err = cfg.Require(NeedEmbedder | NeedCollection)
 	if err == nil {
 		t.Fatal("Require with nothing set = nil, want an error")
 	}
-	for _, name := range []string{"EMBEDDER_ENDPOINT", "KNOWRAG_VAULT_MALKAWAY_PATH"} {
+	for _, name := range []string{"EMBEDDER_ENDPOINT", "DEFAULT_COLLECTION"} {
 		if !strings.Contains(err.Error(), name) {
 			t.Errorf("Require error %q does not name %s", err, name)
 		}
@@ -220,29 +580,7 @@ func TestRequire_ReportsEveryMissingSettingAtOnce(t *testing.T) {
 	// The needs not asked for must not appear: a message that lists settings the command does not
 	// read is what sent the operator to set EMBEDDER_ENDPOINT for a schema apply.
 	if strings.Contains(err.Error(), "QDRANT_ENDPOINT") {
-		t.Errorf("Require error %q names QDRANT_ENDPOINT, which NeedEmbedder|NeedVaultMalkaWay does not cover", err)
-	}
-}
-
-// TestVaultOf_MapsEachVaultToItsSettings pins the accessor the CLI routes through. An unregistered
-// vault must yield a zero Need, so Require is told there is nothing to check rather than silently
-// requiring the wrong vault's path.
-func TestVaultOf_MapsEachVaultToItsSettings(t *testing.T) {
-	cfg := &Config{
-		VaultMalkaLife: VaultSettings{Path: "/vaults/MalkaLife"},
-		VaultMalkaWay:  VaultSettings{Path: "/vaults/MalkaWay"},
-	}
-
-	life, lifeNeed := cfg.VaultOf(schema.VaultMalkaLife())
-	if life.Path != "/vaults/MalkaLife" || lifeNeed != NeedVaultMalkaLife {
-		t.Errorf("VaultOf(MalkaLife) = %v, %d", life, lifeNeed)
-	}
-	way, wayNeed := cfg.VaultOf(schema.VaultMalkaWay())
-	if way.Path != "/vaults/MalkaWay" || wayNeed != NeedVaultMalkaWay {
-		t.Errorf("VaultOf(MalkaWay) = %v, %d", way, wayNeed)
-	}
-	if unknown, need := cfg.VaultOf(schema.Vault{}); unknown != (VaultSettings{}) || need != 0 {
-		t.Errorf("VaultOf(unregistered) = %v, %d, want the zero settings and a zero Need", unknown, need)
+		t.Errorf("Require error %q names QDRANT_ENDPOINT, which NeedEmbedder|NeedCollection does not cover", err)
 	}
 }
 
@@ -251,10 +589,15 @@ func TestVaultOf_MapsEachVaultToItsSettings(t *testing.T) {
 // nothing while looking like it matched something.
 func TestVaultSettings_SplitLists(t *testing.T) {
 	v := VaultSettings{
+		Areas:            " 00-inbox, mocs ,,research ",
 		ExcludeFolders:   " PowerAI, resources ,,templates ",
 		ExcludeRootFiles: "",
 	}
 
+	wantAreas := []string{"00-inbox", "mocs", "research"}
+	if got := v.AreaNames(); !slices.Equal(got, wantAreas) {
+		t.Errorf("AreaNames() = %q, want %q", got, wantAreas)
+	}
 	wantFolders := []string{"PowerAI", "resources", "templates"}
 	if got := v.Folders(); !slices.Equal(got, wantFolders) {
 		t.Errorf("Folders() = %q, want %q", got, wantFolders)

@@ -90,5 +90,6 @@ func testConfig() Config {
 		QdrantEndpoint:   "qdrant.internal:6334",
 		QdrantAPIKey:     "runtime-read-key",
 		EmbedderEndpoint: "http://embedder.internal:8080",
+		Areas:            []string{"infra", "research"},
 	}
 }

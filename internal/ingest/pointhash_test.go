@@ -32,7 +32,7 @@ func baselineHashInput() hashInput {
 	created := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 	return hashInput{
 		note: vault.Note{
-			Vault:      schema.VaultMalkaLife(),
+			Vault:      "pessoal",
 			Path:       "research/curadoria/nota.md",
 			UID:        uuid.MustParse("0198a7f2-4b31-7c42-9e15-3d8a92c47b6a"),
 			Type:       schema.NoteTypeConcept(),
@@ -42,7 +42,7 @@ func baselineHashInput() hashInput {
 			Created:    created,
 			Title:      "Uma nota",
 			Lang:       "pt",
-			Area:       schema.AreaResearch(),
+			Area:       "research",
 			Sub:        "curadoria",
 			Updated:    created.Add(72 * time.Hour),
 			Body:       "## Alpha\n\ncorpo\n",
@@ -92,7 +92,7 @@ func TestComputePointHash_ChangesPerComponent(t *testing.T) {
 		{"chunk_index", func(h *hashInput) { h.chunk.Index = 4 }},
 
 		// The eleven note-metadata fields of vault.NoteMetadataFields.
-		{"vault", func(h *hashInput) { h.note.Vault = schema.VaultMalkaWay() }},
+		{"vault", func(h *hashInput) { h.note.Vault = "trabalho" }},
 		{"path", func(h *hashInput) { h.note.Path = "research/curadoria/outra.md" }},
 		{"type", func(h *hashInput) { h.note.Type = schema.NoteTypeReference() }},
 		{"status", func(h *hashInput) { h.note.Status = schema.StatusArchived() }},
@@ -101,7 +101,7 @@ func TestComputePointHash_ChangesPerComponent(t *testing.T) {
 		{"title", func(h *hashInput) { h.note.Title = "Outra nota" }},
 		{"lang", func(h *hashInput) { h.note.Lang = "en" }},
 		{"created", func(h *hashInput) { h.note.Created = h.note.Created.Add(24 * time.Hour) }},
-		{"area", func(h *hashInput) { h.note.Area = schema.AreaPersonal() }},
+		{"area", func(h *hashInput) { h.note.Area = "personal" }},
 		{"sub", func(h *hashInput) { h.note.Sub = "outra-sub" }},
 
 		// The two per-chunk payload fields S02's metadata does not carry.
@@ -166,8 +166,16 @@ func TestComputePointHash_UpdatedDoesNotChangeHash(t *testing.T) {
 // invalidating every point already in Qdrant.
 //
 // Updating this value is never a fix. It is a declaration that the index has to be rebuilt.
+//
+// It was re-pinned once, on 2026-08-10, and the circumstance is written down because it is the only
+// legitimate one: D-26 renamed this fixture's `vault` field, so the **input** changed by decision and
+// the expected digest had to follow. That is not the forbidden move — the forbidden move is the
+// digest changing while the input stands still. The order mattered and was chosen: this fixture was
+// the last value renamed in the whole migration, after a real ingestion had already reported
+// `skipped=735`, zero writes. Until that ran, this vector was the evidence that no point_hash had
+// moved, and rewriting it earlier would have destroyed the proof while it was still needed.
 func TestComputePointHash_KnownVector(t *testing.T) {
-	const want = "b5fc3efe06295fd0c4d80bbe32734265d7f451c3b113ca963b45d3ec11a649ba"
+	const want = "358b296630d91bf3469660a9482319afd471f186d179d81c504eada95863c829"
 	if got := baselineHashInput().hash(); got != want {
 		t.Errorf("point_hash of the pinned input = %s, want %s — if this change is intentional, it is "+
 			"a full reindex of all three collections, not a test update (PRD-contrato §2.4)", got, want)

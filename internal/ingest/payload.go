@@ -75,8 +75,8 @@ func PayloadFields(n vault.Note, c chunk.Chunk, tenantID, embeddingModel string)
 		fieldChunkIndex: c.Index,
 		fieldText:       c.Text,
 
-		fieldVault:      n.Vault.String(),
-		fieldArea:       n.Area.String(),
+		fieldVault:      n.Vault,
+		fieldArea:       n.Area,
 		fieldSub:        n.Sub,
 		fieldPath:       n.Path,
 		fieldType:       n.Type.String(),

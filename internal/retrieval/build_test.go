@@ -180,10 +180,10 @@ func TestBuildFilter_TenantAlwaysMust(t *testing.T) {
 		{"with offset", func(q *Query) { q.Offset = 40 }},
 		{"with area", func(q *Query) { q.Area = "infra" }},
 		{"with type", func(q *Query) { q.Type = "concept" }},
-		{"with vault", func(q *Query) { q.Vault = "malkaway" }},
+		{"with vault", func(q *Query) { q.Vault = "trabalho" }},
 		{"with tags", func(q *Query) { q.Tags = []string{"golang", "qdrant"} }},
 		{"with every facet", func(q *Query) {
-			q.Area, q.Type, q.Vault, q.Tags = "infra", "concept", "malkaway", []string{"golang"}
+			q.Area, q.Type, q.Vault, q.Tags = "infra", "concept", "trabalho", []string{"golang"}
 		}},
 		{"archived included", func(q *Query) { q.IncludeArchived = true }},
 		{"private included", func(q *Query) { q.IncludePrivate = true }},
@@ -280,7 +280,7 @@ func TestBuildFilter(t *testing.T) {
 		}
 
 		q := validQuery()
-		q.Area, q.Type, q.Vault, q.Tags = "infra", "concept", "malkaway", []string{"golang", "qdrant"}
+		q.Area, q.Type, q.Vault, q.Tags = "infra", "concept", "trabalho", []string{"golang", "qdrant"}
 		f := buildFilter(q)
 		for _, want := range []Condition{
 			{Field: fieldArea, Value: q.Area},

@@ -7,12 +7,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"os"
+	"regexp"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
-
-	"github.com/danielmalka/go-knowrag/internal/schema"
 )
 
 // redacted replaces the API key wherever a Config is logged.
@@ -21,6 +22,16 @@ const redacted = "[REDACTED]"
 // configFileEnv names the one variable that points at an optional config file.
 // There is no default path: an operator who wants file-based config sets this.
 const configFileEnv = "KNOWRAG_CONFIG_FILE"
+
+// vaultsEnv names the roster: which vaults this installation has. Everything per-vault hangs off it,
+// and a run that needs a vault and finds it empty is refused rather than reported as "zero vaults,
+// nothing to do" — an exit 0 that looks like success is how a stale index goes unnoticed.
+const vaultsEnv = "KNOWRAG_VAULTS"
+
+// vaultEnvPrefix is what every per-vault variable starts with. It is also what the orphan scan
+// looks for: any variable with this prefix that no rostered vault can produce is a misconfiguration.
+// KNOWRAG_VAULTS itself does not match — it has no trailing underscore.
+const vaultEnvPrefix = "KNOWRAG_VAULT_"
 
 // Config is the settings every entrypoint needs. No value here is ever committed to the repo:
 // it comes from the config file or the environment, with the environment winning.
@@ -31,9 +42,16 @@ type Config struct {
 	DefaultCollection string `yaml:"default_collection"` // DEFAULT_COLLECTION
 	LogLevel          string `yaml:"log_level"`          // LOG_LEVEL, optional, default "info"
 
-	VaultMalkaLife VaultSettings `yaml:"vault_malkalife"` // KNOWRAG_VAULT_MALKALIFE_*
-	VaultMalkaWay  VaultSettings `yaml:"vault_malkaway"`  // KNOWRAG_VAULT_MALKAWAY_*
+	// Vaults is the roster and its per-vault settings, keyed by vault name — the installation's
+	// vaults, not the domain's. KNOWRAG_VAULTS names the keys; KNOWRAG_VAULT_<NAME>_* fills each
+	// one. See vaultEnv for how <NAME> is spelled.
+	Vaults map[string]VaultSettings `yaml:"vaults"`
 }
+
+// VaultNames returns the rostered vault names, sorted. Every place that iterates the roster goes
+// through this: map order is random, and `--vault both` scanning in a different order on each run
+// would make an output diff meaningless.
+func (c *Config) VaultNames() []string { return slices.Sorted(maps.Keys(c.Vaults)) }
 
 // VaultSettings is where one vault lives and what inside it is not indexed.
 //
@@ -44,11 +62,17 @@ type Config struct {
 // see Folders and RootFiles for the split.
 type VaultSettings struct {
 	Path string `yaml:"path"`
+	// Areas names the first-level folders that are valid `area` values in this vault,
+	// comma-separated. Which areas exist is installation configuration, not contract (D-26).
+	Areas string `yaml:"areas"`
 	// ExcludeFolders names first-level folders skipped in silence, comma-separated.
 	ExcludeFolders string `yaml:"exclude_folders"`
 	// ExcludeRootFiles names root-level `.md` files skipped in silence, comma-separated.
 	ExcludeRootFiles string `yaml:"exclude_root_files"`
 }
+
+// AreaNames returns the vault's area names, empty entries dropped.
+func (v VaultSettings) AreaNames() []string { return splitList(v.Areas) }
 
 // Folders returns the excluded folder names, empty entries dropped.
 func (v VaultSettings) Folders() []string { return splitList(v.ExcludeFolders) }
@@ -59,8 +83,8 @@ func (v VaultSettings) RootFiles() []string { return splitList(v.ExcludeRootFile
 // String renders the settings compactly for the two redaction paths on Config. Nothing here is
 // secret — a vault path is not a credential — so nothing is hidden.
 func (v VaultSettings) String() string {
-	return fmt.Sprintf("{path:%q exclude_folders:%q exclude_root_files:%q}",
-		v.Path, v.ExcludeFolders, v.ExcludeRootFiles)
+	return fmt.Sprintf("{path:%q areas:%q exclude_folders:%q exclude_root_files:%q}",
+		v.Path, v.Areas, v.ExcludeFolders, v.ExcludeRootFiles)
 }
 
 // splitList turns "a, b ,, c" into [a b c]. Empty entries are dropped rather than passed on: a
@@ -76,6 +100,188 @@ func splitList(s string) []string {
 	return out
 }
 
+// vaultEnv spells the variable that carries suffix for vault name: the name uppercased with every
+// `-` turned into `_`, between the prefix and the suffix. A vault named `my-notes` reads
+// KNOWRAG_VAULT_MY_NOTES_PATH.
+//
+// The mapping is not injective on arbitrary strings — `my-notes` and `my_notes` would collide — and
+// it does not have to be: slugRe rejects underscores, so only one of the two spellings is ever a
+// legal vault name.
+func vaultEnv(name, suffix string) string {
+	return vaultEnvPrefix + strings.ToUpper(strings.ReplaceAll(name, "-", "_")) + "_" + suffix
+}
+
+// vaultField binds one per-vault variable to the setting it fills, so the override pass, the
+// required-field check and the orphan scan all read the same list.
+type vaultField struct {
+	suffix string
+	// required is whether a rostered vault must have this set. A vault that excludes nothing is a
+	// legal configuration; a vault with no path or no areas is not — it cannot be scanned, and
+	// "no areas" would make every folder in it unknown.
+	required bool
+	ptr      func(*VaultSettings) *string
+}
+
+var vaultFields = []vaultField{
+	{suffix: "PATH", required: true, ptr: func(v *VaultSettings) *string { return &v.Path }},
+	{suffix: "AREAS", required: true, ptr: func(v *VaultSettings) *string { return &v.Areas }},
+	{suffix: "EXCLUDE_FOLDERS", ptr: func(v *VaultSettings) *string { return &v.ExcludeFolders }},
+	{suffix: "EXCLUDE_ROOT_FILES", ptr: func(v *VaultSettings) *string { return &v.ExcludeRootFiles }},
+}
+
+// slugRe is the one shape a vault name or an area name may have: ASCII lowercase letters and digits
+// in hyphen-separated groups. It rejects uppercase, whitespace, accented characters, underscores,
+// leading, trailing and doubled hyphens, and the empty string.
+var slugRe = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
+
+// errNotSlug rejects a name; it never normalises one, and that is deliberate.
+//
+// `vault` and `area` are written into the point payload and into `point_hash` as their literal
+// strings. Lowercasing a name behind the operator's back would move every hash, and because the
+// point ID is uuid5(tenant_id + uid + chunk_index) — no `vault` in it — the old points would be
+// overwritten rather than orphaned. The operator would see a full silent reindex reported as a clean
+// run. Refusing to start is the cheap failure; accepting the name and rewriting the corpus is not.
+func errNotSlug(kind, value string) error {
+	return fmt.Errorf(
+		"%s %q is not a valid name — use lowercase ASCII letters and digits in hyphen-separated "+
+			"groups (%s): no uppercase, no spaces, no accents, no underscores. The value is stored verbatim "+
+			"in the payload and in point_hash, so it is rejected rather than silently normalised",
+		kind, value, slugRe.String())
+}
+
+// ValidateSlug rejects value unless it has the one shape a vault name or an area name may have —
+// see slugRe. It is exported because the vault roster is not the only place a value ends up in a
+// payload and in point_hash: cmd/mcp-server publishes its own area list to an MCP client, and if the
+// two disagreed on what counts as a name, an area the ingestor accepted could be one the server never
+// advertises (or the reverse) — a search that returns nothing, with no error anywhere naming why.
+func ValidateSlug(kind, value string) error {
+	if !slugRe.MatchString(value) {
+		return errNotSlug(kind, value)
+	}
+	return nil
+}
+
+// loadVaults builds the roster, overlays the per-vault environment on it, and refuses every
+// misconfiguration it can see before the process does any work.
+func loadVaults(cfg *Config) error {
+	fromFile := cfg.Vaults
+	// LookupEnv, not Getenv-and-test-for-empty: the environment wins over the file the same way it
+	// does for every scalar setting, and that has to include being set to nothing. An operator who
+	// exports KNOWRAG_VAULTS= to clear a host's roster means it — treating that as "unset" would let
+	// the file's roster survive in silence, which is the one behaviour no other setting here has.
+	if raw, ok := os.LookupEnv(vaultsEnv); ok {
+		roster := splitList(raw)
+		cfg.Vaults = make(map[string]VaultSettings, len(roster))
+		for _, name := range roster {
+			cfg.Vaults[name] = fromFile[name]
+		}
+	}
+
+	// Names first, and nothing else until they are all legal: vaultEnv on a name with a space in it
+	// would look up a variable nobody can set, and report a missing PATH instead of the real fault.
+	var nameErrs []error
+	for _, name := range cfg.VaultNames() {
+		if err := ValidateSlug("vault name", name); err != nil {
+			nameErrs = append(nameErrs, fmt.Errorf("config: %w", err))
+		}
+	}
+	if len(nameErrs) > 0 {
+		return errors.Join(nameErrs...)
+	}
+
+	for name, settings := range cfg.Vaults {
+		for _, f := range vaultFields {
+			if v, ok := os.LookupEnv(vaultEnv(name, f.suffix)); ok {
+				*f.ptr(&settings) = v
+			}
+		}
+		cfg.Vaults[name] = settings
+	}
+
+	var errs []error
+	for _, name := range cfg.VaultNames() {
+		for _, area := range cfg.Vaults[name].AreaNames() {
+			if err := ValidateSlug("area", area); err != nil {
+				errs = append(errs, fmt.Errorf("config: vault %q: %w", name, err))
+			}
+		}
+	}
+	return errors.Join(append(errs, orphanedVaultSettings(cfg, fromFile)...)...)
+}
+
+// orphanedVaultSettings reports every per-vault setting that belongs to no rostered vault.
+//
+// Without this, dropping a vault from KNOWRAG_VAULTS while its variables stay exported means that
+// vault is simply never ingested: no error, no mention in any output, and its points in the
+// collection quietly go stale. The same scan catches a misspelled suffix, which fails the same way.
+//
+// It is skipped when the roster is empty, because then every vault variable looks orphaned and the
+// real fault is the missing roster — which RequireVaults names, for the commands that need one.
+// This is also what keeps `schema apply` working on a host that has vault variables and no roster.
+func orphanedVaultSettings(cfg *Config, fromFile map[string]VaultSettings) []error {
+	if len(cfg.Vaults) == 0 {
+		return nil
+	}
+
+	known := make(map[string]bool, len(cfg.Vaults)*len(vaultFields))
+	for name := range cfg.Vaults {
+		for _, f := range vaultFields {
+			known[vaultEnv(name, f.suffix)] = true
+		}
+	}
+
+	var orphans []string
+	for _, entry := range os.Environ() {
+		name, _, _ := strings.Cut(entry, "=")
+		if strings.HasPrefix(name, vaultEnvPrefix) && !known[name] {
+			orphans = append(orphans, name)
+		}
+	}
+	for name := range fromFile {
+		if _, ok := cfg.Vaults[name]; !ok {
+			orphans = append(orphans, "vaults."+name+" (config file)")
+		}
+	}
+	if len(orphans) == 0 {
+		return nil
+	}
+	slices.Sort(orphans)
+	return []error{fmt.Errorf(
+		"config: setting(s) for a vault that is not in the roster: %s — add the vault to %s or remove the setting; "+
+			"left as they are, that vault is never ingested and its points go stale in silence",
+		strings.Join(orphans, ", "), vaultsEnv)}
+}
+
+// RequireVaults reports every setting the named vaults need and do not have.
+//
+// It is the per-vault half of Require, split out because vault names are runtime configuration: a
+// bitmask cannot carry one bit per vault when the set of vaults is not known at compile time. It
+// keeps the property Require exists for — one run reports every missing setting at once, so an
+// operator setting up a host sees the whole list instead of discovering it one restart at a time.
+func (c *Config) RequireVaults(names ...string) error {
+	if len(c.Vaults) == 0 {
+		return fmt.Errorf(
+			"config: no vaults are configured — set %s to the vault names this installation has, "+
+				"each with its %s<NAME>_PATH and %s<NAME>_AREAS",
+			vaultsEnv, vaultEnvPrefix, vaultEnvPrefix)
+	}
+
+	var missing []string
+	for _, name := range slices.Sorted(slices.Values(names)) {
+		settings, ok := c.Vaults[name]
+		if !ok {
+			missing = append(missing, fmt.Sprintf("%s (vault %q is not in it)", vaultsEnv, name))
+			continue
+		}
+		for _, f := range vaultFields {
+			if f.required && *f.ptr(&settings) == "" {
+				missing = append(missing, vaultEnv(name, f.suffix))
+			}
+		}
+	}
+	return missingErr(missing)
+}
+
 // Need is the set of settings one command actually consumes.
 //
 // It exists because requirement is per command, not global. `schema apply` talks only to Qdrant; it
@@ -88,8 +294,6 @@ const (
 	NeedQdrant Need = 1 << iota
 	NeedCollection
 	NeedEmbedder
-	NeedVaultMalkaLife
-	NeedVaultMalkaWay
 )
 
 // field binds one setting to its environment variable, for both the env override pass and the
@@ -107,17 +311,6 @@ var fields = []field{
 	{env: "EMBEDDER_ENDPOINT", need: NeedEmbedder, ptr: func(c *Config) *string { return &c.EmbedderEndpoint }},
 	{env: "DEFAULT_COLLECTION", need: NeedCollection, ptr: func(c *Config) *string { return &c.DefaultCollection }},
 	{env: "LOG_LEVEL", ptr: func(c *Config) *string { return &c.LogLevel }},
-
-	{env: "KNOWRAG_VAULT_MALKALIFE_PATH", need: NeedVaultMalkaLife, ptr: func(c *Config) *string { return &c.VaultMalkaLife.Path }},
-	// The exclusion lists are read but never required: a vault that excludes nothing is a legal
-	// configuration, and refusing to start without them would only teach an operator to set them
-	// to a placeholder.
-	{env: "KNOWRAG_VAULT_MALKALIFE_EXCLUDE_FOLDERS", ptr: func(c *Config) *string { return &c.VaultMalkaLife.ExcludeFolders }},
-	{env: "KNOWRAG_VAULT_MALKALIFE_EXCLUDE_ROOT_FILES", ptr: func(c *Config) *string { return &c.VaultMalkaLife.ExcludeRootFiles }},
-
-	{env: "KNOWRAG_VAULT_MALKAWAY_PATH", need: NeedVaultMalkaWay, ptr: func(c *Config) *string { return &c.VaultMalkaWay.Path }},
-	{env: "KNOWRAG_VAULT_MALKAWAY_EXCLUDE_FOLDERS", ptr: func(c *Config) *string { return &c.VaultMalkaWay.ExcludeFolders }},
-	{env: "KNOWRAG_VAULT_MALKAWAY_EXCLUDE_ROOT_FILES", ptr: func(c *Config) *string { return &c.VaultMalkaWay.ExcludeRootFiles }},
 }
 
 // Load reads the optional config file named by KNOWRAG_CONFIG_FILE and overlays the environment on
@@ -133,19 +326,13 @@ func Load() (*Config, error) {
 		}
 	}
 	overrideFromEnv(cfg)
-	return cfg, nil
-}
-
-// VaultOf returns v's settings and the Need bit that makes its path required. An unregistered vault
-// yields the zero settings and a zero Need, which Require reads as "nothing to check".
-func (c *Config) VaultOf(v schema.Vault) (VaultSettings, Need) {
-	switch v {
-	case schema.VaultMalkaLife():
-		return c.VaultMalkaLife, NeedVaultMalkaLife
-	case schema.VaultMalkaWay():
-		return c.VaultMalkaWay, NeedVaultMalkaWay
+	// The one exception to "Load checks no setting": a vault or area name that is not a slug is
+	// refused here, before any command runs, because by the time it reaches ingest it has already
+	// been written into a payload and a point_hash. See errNotSlug.
+	if err := loadVaults(cfg); err != nil {
+		return nil, err
 	}
-	return VaultSettings{}, 0
+	return cfg, nil
 }
 
 // loadFile decodes the YAML file in strict mode, so a typo'd key is an error rather than a
@@ -188,6 +375,12 @@ func (c *Config) Require(need Need) error {
 			missing = append(missing, f.env)
 		}
 	}
+	return missingErr(missing)
+}
+
+// missingErr is the one shape a "you have not set this" error takes, shared by Require and
+// RequireVaults so the two never drift into two different messages for the same problem.
+func missingErr(missing []string) error {
 	if len(missing) == 0 {
 		return nil
 	}
@@ -213,9 +406,21 @@ func (c Config) LogValue() slog.Value {
 		slog.String("embedder_endpoint", c.EmbedderEndpoint),
 		slog.String("default_collection", c.DefaultCollection),
 		slog.String("log_level", c.LogLevel),
-		slog.String("vault_malkalife", c.VaultMalkaLife.String()),
-		slog.String("vault_malkaway", c.VaultMalkaWay.String()),
+		slog.String("vaults", c.vaultsString()),
 	)
+}
+
+// vaultsString renders the roster in name order, so two runs of the same configuration produce the
+// same line and a diff of two logs means something.
+func (c Config) vaultsString() string {
+	var b strings.Builder
+	for i, name := range c.VaultNames() {
+		if i > 0 {
+			b.WriteString(" ")
+		}
+		fmt.Fprintf(&b, "%s:%s", name, c.Vaults[name])
+	}
+	return b.String()
 }
 
 // String implements fmt.Stringer so the other route to a leak — fmt.Printf("%+v", cfg), which
@@ -224,9 +429,9 @@ func (c Config) LogValue() slog.Value {
 func (c Config) String() string {
 	return fmt.Sprintf(
 		"config.Config{QdrantEndpoint:%q QdrantAPIKey:%q EmbedderEndpoint:%q DefaultCollection:%q "+
-			"LogLevel:%q VaultMalkaLife:%s VaultMalkaWay:%s}",
+			"LogLevel:%q Vaults:{%s}}",
 		c.QdrantEndpoint, c.redactedKey(), c.EmbedderEndpoint, c.DefaultCollection, c.LogLevel,
-		c.VaultMalkaLife, c.VaultMalkaWay)
+		c.vaultsString())
 }
 
 // redactedKey reports the API key's presence without its value: an empty key stays empty, so an

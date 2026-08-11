@@ -129,136 +129,6 @@ func TestVisibilityValues(t *testing.T) {
 	}
 }
 
-func TestVaultValues(t *testing.T) {
-	cases := []struct {
-		name string
-		want Vault
-	}{
-		{"malkalife", VaultMalkaLife()},
-		{"malkaway", VaultMalkaWay()},
-	}
-	if got := len(AllVaults()); got != len(cases) {
-		t.Fatalf("AllVaults() has %d values, cases cover %d", got, len(cases))
-	}
-	for _, c := range cases {
-		got, ok := ParseVault(c.name)
-		if !ok {
-			t.Errorf("ParseVault(%q) failed", c.name)
-			continue
-		}
-		if got != c.want {
-			t.Errorf("ParseVault(%q) = %v, want %v", c.name, got, c.want)
-		}
-		if !got.Valid() {
-			t.Errorf("Vault %q not Valid()", c.name)
-		}
-		if got.String() != c.name {
-			t.Errorf("Vault %q String() = %q", c.name, got.String())
-		}
-	}
-	if _, ok := ParseVault("bogus"); ok {
-		t.Error("ParseVault(\"bogus\") should fail")
-	}
-	var zero Vault
-	if zero.Valid() {
-		t.Error("zero-value Vault should not be Valid()")
-	}
-}
-
-func TestAreaValues(t *testing.T) {
-	malkaLife := []struct {
-		name string
-		want Area
-	}{
-		{"00-inbox", AreaInbox()},
-		{"mocs", AreaMOCs()},
-		{"personal", AreaPersonal()},
-		{"research", AreaResearch()},
-	}
-	malkaWay := []struct {
-		name string
-		want Area
-	}{
-		{"00-inbox", AreaInbox()},
-		{"arcanto", AreaArcanto()},
-		{"carreira", AreaCarreira()},
-		{"cooperativa", AreaCooperativa()},
-		{"infra", AreaInfra()},
-		{"projetos-pessoais", AreaProjetosPessoais()},
-	}
-
-	if got := len(AreasFor(VaultMalkaLife())); got != len(malkaLife) {
-		t.Fatalf("AreasFor(MalkaLife) has %d values, cases cover %d", got, len(malkaLife))
-	}
-	if got := len(AreasFor(VaultMalkaWay())); got != len(malkaWay) {
-		t.Fatalf("AreasFor(MalkaWay) has %d values, cases cover %d", got, len(malkaWay))
-	}
-
-	for _, c := range malkaLife {
-		got, ok := ParseArea(VaultMalkaLife(), c.name)
-		if !ok {
-			t.Errorf("ParseArea(MalkaLife, %q) failed", c.name)
-			continue
-		}
-		if got != c.want {
-			t.Errorf("ParseArea(MalkaLife, %q) = %v, want %v", c.name, got, c.want)
-		}
-		if !got.ValidFor(VaultMalkaLife()) {
-			t.Errorf("Area %q not ValidFor(MalkaLife)", c.name)
-		}
-		if got.String() != c.name {
-			t.Errorf("Area %q String() = %q", c.name, got.String())
-		}
-	}
-	for _, c := range malkaWay {
-		got, ok := ParseArea(VaultMalkaWay(), c.name)
-		if !ok {
-			t.Errorf("ParseArea(MalkaWay, %q) failed", c.name)
-			continue
-		}
-		if got != c.want {
-			t.Errorf("ParseArea(MalkaWay, %q) = %v, want %v", c.name, got, c.want)
-		}
-		if !got.ValidFor(VaultMalkaWay()) {
-			t.Errorf("Area %q not ValidFor(MalkaWay)", c.name)
-		}
-		if got.String() != c.name {
-			t.Errorf("Area %q String() = %q", c.name, got.String())
-		}
-	}
-
-	if _, ok := ParseArea(VaultMalkaLife(), "bogus"); ok {
-		t.Error("ParseArea(MalkaLife, \"bogus\") should fail")
-	}
-	if _, ok := ParseArea(VaultMalkaWay(), "bogus"); ok {
-		t.Error("ParseArea(MalkaWay, \"bogus\") should fail")
-	}
-
-	var zero Area
-	if zero.ValidFor(VaultMalkaLife()) || zero.ValidFor(VaultMalkaWay()) {
-		t.Error("zero-value Area should not be ValidFor either vault")
-	}
-
-	// Cross-vault rejection: values scoped to one vault must not validate for the other.
-	if AreaArcanto().ValidFor(VaultMalkaLife()) {
-		t.Error("AreaArcanto() (MalkaWay-only) should not be ValidFor(MalkaLife)")
-	}
-	if AreaResearch().ValidFor(VaultMalkaWay()) {
-		t.Error("AreaResearch() (MalkaLife-only) should not be ValidFor(MalkaWay)")
-	}
-	if _, ok := ParseArea(VaultMalkaLife(), "arcanto"); ok {
-		t.Error("ParseArea(MalkaLife, \"arcanto\") should fail")
-	}
-	if _, ok := ParseArea(VaultMalkaWay(), "research"); ok {
-		t.Error("ParseArea(MalkaWay, \"research\") should fail")
-	}
-
-	// 00-inbox is the one Area shared across both vaults.
-	if !AreaInbox().ValidFor(VaultMalkaLife()) || !AreaInbox().ValidFor(VaultMalkaWay()) {
-		t.Error("AreaInbox() should be ValidFor both vaults")
-	}
-}
-
 // enumValue is what checkEnumeration needs from each enum type: comparable (to match a returned
 // value against the registered one) and String() (to check ordering by the canonical string).
 type enumValue interface {
@@ -291,15 +161,6 @@ func TestEnumerationAccessors(t *testing.T) {
 	checkEnumeration(t, "AllNoteTypes", AllNoteTypes(), noteTypeSet)
 	checkEnumeration(t, "AllStatuses", AllStatuses(), statusSet)
 	checkEnumeration(t, "AllVisibilities", AllVisibilities(), visibilitySet)
-	checkEnumeration(t, "AllVaults", AllVaults(), vaultSet)
-	checkEnumeration(t, "AreasFor(MalkaLife)", AreasFor(VaultMalkaLife()), areaSetByVault[VaultMalkaLife()])
-	checkEnumeration(t, "AreasFor(MalkaWay)", AreasFor(VaultMalkaWay()), areaSetByVault[VaultMalkaWay()])
-
-	// An unregistered Vault has no areas, matching ParseArea's answer for the same vault.
-	var zero Vault
-	if got := AreasFor(zero); len(got) != 0 {
-		t.Errorf("AreasFor(zero Vault) = %v, want empty", got)
-	}
 
 	// The returned slices must be copies: a consumer mutating one cannot reach the registry.
 	want := AllStatuses()[0]
@@ -307,12 +168,5 @@ func TestEnumerationAccessors(t *testing.T) {
 	mutated[0] = StatusStable()
 	if AllStatuses()[0] != want {
 		t.Error("AllStatuses returned a slice aliasing the registry")
-	}
-
-	wantArea := AreasFor(VaultMalkaWay())[0]
-	mutatedAreas := AreasFor(VaultMalkaWay())
-	mutatedAreas[0] = AreaInfra()
-	if AreasFor(VaultMalkaWay())[0] != wantArea {
-		t.Error("AreasFor returned a slice aliasing the registry")
 	}
 }

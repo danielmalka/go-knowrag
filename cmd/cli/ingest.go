@@ -14,14 +14,13 @@ import (
 	"github.com/danielmalka/go-knowrag/internal/config"
 	"github.com/danielmalka/go-knowrag/internal/embed"
 	"github.com/danielmalka/go-knowrag/internal/ingest"
-	"github.com/danielmalka/go-knowrag/internal/schema"
 	"github.com/danielmalka/go-knowrag/internal/store"
 	"github.com/danielmalka/go-knowrag/internal/vault"
 )
 
 // bothVaults is the --vault value that means "every registered vault". It is spelled here rather
-// than taken from internal/schema because it is not a vault: it is this flag's word for all of
-// them, and schema.AllVaults() is what it resolves to.
+// than read from the roster because it is not a vault: it is this flag's word for all of the
+// roster's names, and cfg.VaultNames() is what it resolves to.
 const bothVaults = "both"
 
 // defaultTenantID is the tenant this build populates. The CLI is privileged by declaration
@@ -73,9 +72,10 @@ func newIngestCmd(cfg *config.Config) *cobra.Command {
 		},
 	}
 
+	// The roster lives in cfg, and cfg is read at run time (see newIngestCmd's own comment), so this
+	// text cannot name the configured vaults without breaking `--help` on a host with no config yet.
 	cmd.Flags().StringVar(&opts.vaultFlag, "vault", opts.vaultFlag,
-		fmt.Sprintf("which vault to ingest: %s, or %s for all of them",
-			strings.Join(vaultNames(), "|"), bothVaults))
+		fmt.Sprintf("which vault to ingest: a name from KNOWRAG_VAULTS, or %s for all of them", bothVaults))
 	cmd.Flags().BoolVar(&opts.dryRun, "dry-run", false,
 		"scan and chunk, then stop: report the counts without embedding or writing anything")
 	cmd.Flags().StringVar(&opts.tenantID, "tenant", opts.tenantID,
@@ -97,33 +97,32 @@ type ingestOptions struct {
 	chunkCfg  chunk.Config
 }
 
-// vaultNames lists the registered vault slugs for the flag's help text. It reads schema.AllVaults()
-// rather than spelling them, because a second list of vault names is a second place to update the
-// day a third vault exists (internal/schema owns the set — see enums.go).
-func vaultNames() []string {
-	all := schema.AllVaults()
-	names := make([]string, len(all))
-	for i, v := range all {
-		names[i] = v.String()
+// selectVaults resolves the --vault flag against the configured roster.
+//
+// The collision check comes first because D-26 is what made it reachable: `both` is a valid slug, so
+// the roster — operator input now, not a compile-time enum — may legally contain a vault by that
+// name, and then the flag has two meanings and no way to say which. Neither resolution order is
+// salvageable: sentinel-first makes that vault unselectable, roster-first makes "every vault"
+// unsayable, and both report the wrong scope as a clean run. Refusing every run until the name
+// changes is the only answer that does not quietly ingest the wrong thing.
+func selectVaults(cfg *config.Config, flag string) ([]string, error) {
+	if _, taken := cfg.Vaults[bothVaults]; taken {
+		return nil, fmt.Errorf(
+			"a vault in the roster is named %q, which is also --vault's word for every vault; "+
+				"rename that vault, because as it stands there is no way to select it alone", bothVaults)
 	}
-	return names
-}
-
-// selectVaults resolves the --vault flag.
-func selectVaults(flag string) ([]schema.Vault, error) {
 	if flag == bothVaults {
-		return schema.AllVaults(), nil
+		return cfg.VaultNames(), nil
 	}
-	v, ok := schema.ParseVault(flag)
-	if !ok {
+	if _, ok := cfg.Vaults[flag]; !ok {
 		return nil, fmt.Errorf("--vault %q is not a vault; use one of %s, or %s",
-			flag, strings.Join(vaultNames(), ", "), bothVaults)
+			flag, strings.Join(cfg.VaultNames(), ", "), bothVaults)
 	}
-	return []schema.Vault{v}, nil
+	return []string{flag}, nil
 }
 
 func runIngest(ctx context.Context, out io.Writer, cfg *config.Config, opts ingestOptions) error {
-	vaults, err := selectVaults(opts.vaultFlag)
+	names, err := selectVaults(cfg, opts.vaultFlag)
 	if err != nil {
 		return err
 	}
@@ -137,11 +136,10 @@ func runIngest(ctx context.Context, out io.Writer, cfg *config.Config, opts inge
 	if !opts.dryRun {
 		need |= config.NeedQdrant | config.NeedCollection
 	}
-	for _, v := range vaults {
-		_, vaultNeed := cfg.VaultOf(v)
-		need |= vaultNeed
-	}
-	if err := cfg.Require(need); err != nil {
+	// Two independent checks, joined rather than short-circuited: a host missing both the Qdrant
+	// settings and the vault's path should hear about both in one run, not fix one and discover the
+	// other on the next.
+	if err := errors.Join(cfg.Require(need), cfg.RequireVaults(names...)); err != nil {
 		return err
 	}
 
@@ -153,7 +151,7 @@ func runIngest(ctx context.Context, out io.Writer, cfg *config.Config, opts inge
 	// Wrapping here means both dry-run and the real write path report through the same instrument.
 	counted := chunk.NewCountingTokenCounter(tokens)
 
-	scans, err := scanVaults(cfg, vaults)
+	scans, err := scanVaults(cfg, names)
 	if err != nil {
 		return err
 	}
@@ -174,20 +172,20 @@ func runIngest(ctx context.Context, out io.Writer, cfg *config.Config, opts inge
 	return ingestScans(ctx, out, cfg, opts, scans, counted)
 }
 
-// scanVaults turns each selected vault into a ScanResult, with the exclusions the operator
-// configured. A vault that fails the contract fails the run before any other vault is read: the
-// scan reports every offending note at once, and ingesting half a corpus while the other half is
-// unreadable is not a partial success.
-func scanVaults(cfg *config.Config, vaults []schema.Vault) ([]vault.ScanResult, error) {
-	scans := make([]vault.ScanResult, 0, len(vaults))
-	for _, v := range vaults {
-		settings, _ := cfg.VaultOf(v)
-		scan, err := vault.ScanVault(settings.Path, v, vault.Exclusions{
+// scanVaults turns each selected vault into a ScanResult, with the areas and exclusions the
+// operator configured. A vault that fails the contract fails the run before any other vault is
+// read: the scan reports every offending note at once, and ingesting half a corpus while the
+// other half is unreadable is not a partial success.
+func scanVaults(cfg *config.Config, names []string) ([]vault.ScanResult, error) {
+	scans := make([]vault.ScanResult, 0, len(names))
+	for _, name := range names {
+		settings := cfg.Vaults[name]
+		scan, err := vault.ScanVault(settings.Path, name, settings.AreaNames(), vault.Exclusions{
 			Folders:   settings.Folders(),
 			RootFiles: settings.RootFiles(),
 		})
 		if err != nil {
-			return nil, fmt.Errorf("scanning vault %s at %s: %w", v, settings.Path, err)
+			return nil, fmt.Errorf("scanning vault %s at %s: %w", name, settings.Path, err)
 		}
 		scans = append(scans, scan)
 	}

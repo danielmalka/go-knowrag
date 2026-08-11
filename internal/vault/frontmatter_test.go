@@ -124,11 +124,11 @@ func TestParseFrontmatter_EnumFieldsAreValidated(t *testing.T) {
 		accepted          []string
 	}{
 		{"type", "type", "type: conceito", stringsOf(schema.AllNoteTypes())},
-		// MalkaLife/research/ingles/resources/index.md
+		// A real path in the corpus, one vault.
 		{"status maduro", "status", "status: maduro", stringsOf(schema.AllStatuses())},
-		// MalkaLife, a tag written into the status field
+		// Same vault, a tag written into the status field
 		{"status tag", "status", `status: "#em-progresso"`, stringsOf(schema.AllStatuses())},
-		// MalkaWay
+		// The other vault
 		{"status todo", "status", "status: todo", stringsOf(schema.AllStatuses())},
 		{"visibility", "visibility", "visibility: publico", stringsOf(schema.AllVisibilities())},
 		// Case matters: the contract fixes the spelling, and a value that only matches when

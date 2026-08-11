@@ -163,7 +163,7 @@ func TestProcessNote_MetadataOnlyChange_StillEmbeds(t *testing.T) {
 		field  string
 		change func(n *vault.Note)
 	}{
-		{fieldVault, func(n *vault.Note) { n.Vault = schema.VaultMalkaWay() }},
+		{fieldVault, func(n *vault.Note) { n.Vault = "trabalho" }},
 		{fieldPath, func(n *vault.Note) { n.Path = "research/curadoria/renomeada.md" }},
 		{fieldType, func(n *vault.Note) { n.Type = schema.NoteTypeReference() }},
 		{fieldStatus, func(n *vault.Note) { n.Status = schema.StatusArchived() }},
@@ -172,7 +172,7 @@ func TestProcessNote_MetadataOnlyChange_StillEmbeds(t *testing.T) {
 		{fieldTitle, func(n *vault.Note) { n.Title = "Outro título" }},
 		{fieldLang, func(n *vault.Note) { n.Lang = "en" }},
 		{fieldCreated, func(n *vault.Note) { n.Created = n.Created.Add(24 * time.Hour) }},
-		{fieldArea, func(n *vault.Note) { n.Area = schema.AreaPersonal() }},
+		{fieldArea, func(n *vault.Note) { n.Area = "personal" }},
 		{fieldSub, func(n *vault.Note) { n.Sub = "outra-sub" }},
 	}
 

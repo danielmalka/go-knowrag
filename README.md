@@ -8,9 +8,10 @@ Ele lê, divide por seção, gera embeddings, indexa num Qdrant e expõe uma fer
 qualquer cliente MCP consegue chamar. O agente passa a responder com base no seu conteúdo, citando o
 trecho de origem.
 
-Não é "aponte para qualquer pasta e funciona": os enums de frontmatter e o mapa de áreas por vault
-são fechados na especificação, e pasta de primeiro nível fora do mapa é erro explícito, não `area`
-vazia. Um fork adapta esses dois pontos antes de indexar suas próprias notas.
+Não é "aponte para qualquer pasta e funciona": os enums de frontmatter (`type`, `status`,
+`visibility`) são fechados no contrato, e pasta de primeiro nível fora da lista de áreas configurada
+é erro explícito, não `area` vazia. Um fork aponta para suas próprias pastas e declara seus próprios
+vaults e áreas em configuração, sem editar Go.
 
 > **Status: pipeline funcionando ponta a ponta.** Ingestão, busca híbrida e o servidor MCP estão
 > implementados e rodando contra um corpus real. O que falta são os modos de ingestão (`S06b`), a CLI
@@ -226,12 +227,32 @@ do embedder, que ele nunca usa.
 | `EMBEDDER_ENDPOINT` | URL do serviço de embedding, ex.: `http://127.0.0.1:7999` |
 | `DEFAULT_COLLECTION` | collection alvo |
 | `LOG_LEVEL` | opcional, default `info` |
+| `KNOWRAG_VAULTS` | os vaults desta instalação, separados por vírgula — ex.: `pessoal,trabalho` |
 | `KNOWRAG_VAULT_<NOME>_PATH` | raiz do vault no disco |
+| `KNOWRAG_VAULT_<NOME>_AREAS` | pastas de 1º nível que são `area` válida neste vault, separadas por vírgula |
 | `KNOWRAG_VAULT_<NOME>_EXCLUDE_FOLDERS` | pastas de 1º nível ignoradas, separadas por vírgula |
 | `KNOWRAG_VAULT_<NOME>_EXCLUDE_ROOT_FILES` | arquivos `.md` na raiz ignorados, separados por vírgula |
 
-As exclusões vêm de configuração, não do código: re-incluir uma pasta excluída é uma linha de
-config. Pasta de 1º nível que não está nem no mapa de áreas nem na lista de exclusão é **erro** —
+`KNOWRAG_VAULTS` é a lista mestra: nada é lido de um vault que não está nela. Uma variável
+`KNOWRAG_VAULT_*` de um vault fora da lista é **erro** — deixada em silêncio, aquele vault
+simplesmente nunca seria indexado e os pontos dele envelheceriam sem aviso.
+
+**`<NOME>` é o nome do vault em maiúsculas, com `-` virando `_`.** Um vault chamado `my-notes` lê
+`KNOWRAG_VAULT_MY_NOTES_PATH`; não existe outra grafia dele.
+
+**Nome de vault e nome de área têm de ser *slug* ASCII minúsculo** — `^[a-z0-9]+(-[a-z0-9]+)*$`:
+sem maiúsculas, sem espaços, sem acentos, sem `_`, sem hífen no início, no fim ou dobrado. Um nome
+fora dessa forma é recusado no carregamento da configuração, antes de qualquer trabalho, e **não é
+normalizado**: `vault` e `area` são gravados literalmente no payload e no `point_hash`, então
+minúscular um nome por baixo do operador moveria todos os hashes — e como o ID do ponto não inclui
+`vault`, os pontos antigos seriam **sobrescritos**, não órfãos. Seria uma reindexação completa
+reportada como execução limpa.
+
+No arquivo YAML os vaults ficam num mapa aninhado sob `vaults:`, com as mesmas chaves em
+`snake_case` (`path`, `areas`, `exclude_folders`, `exclude_root_files`).
+
+As áreas e as exclusões vêm de configuração, não do código: re-incluir uma pasta excluída é uma
+linha de config. Pasta de 1º nível que não está nem em `AREAS` nem na lista de exclusão é **erro** —
 excluído é decisão declarada, desconhecido é erro.
 
 ### Servidor MCP (`knowrag-mcp`)
@@ -243,10 +264,22 @@ excluído é decisão declarada, desconhecido é erro.
 | `MCP_EMBEDDER_ENDPOINT` | URL do serviço de embedding |
 | `MCP_COLLECTION` | collection consultada |
 | `MCP_TENANT_ID` | tenant de toda busca |
+| `MCP_AREAS` | lista de `area` válida, separada por vírgula, que o servidor anuncia ao cliente MCP |
 
 `MCP_TENANT_ID` vem do ambiente e **não existe** como parâmetro da ferramenta. Não é validado e
 rejeitado — está ausente do schema publicado, então não é um valor que o modelo possa nomear,
 escrever errado, ou ser convencido a trocar por um trecho de nota hostil.
+
+`MCP_AREAS` não espelha `KNOWRAG_VAULT_<NOME>_AREAS`: uma instância MCP serve uma coleção, que pode
+ter sido montada a partir de vários vaults, então a lista que ela anuncia é declarada de novo, à
+parte, na configuração do servidor.
+
+> **Essa lista é manutenção manual, e envelhecer nela falha em silêncio.** Nada compara `MCP_AREAS`
+> com o que existe de fato no índice. Uma área acrescentada a um vault e esquecida aqui simplesmente
+> não é oferecida ao cliente; uma área listada aqui que não existe no índice é aceita como filtro,
+> casa zero pontos e volta como **resultado vazio comum** — indistinguível de "não há notas sobre
+> isso". Ao acrescentar ou renomear uma área em qualquer vault, atualize esta variável na mesma
+> passada.
 
 ## Quando a ingestão acontece
 
@@ -312,30 +345,6 @@ O segundo segmento do caminho vira `sub`, verbatim.
 **Pasta de primeiro nível que não está no mapa de áreas nem na lista de exclusão é erro.** A regra é
 *excluído é decisão declarada, desconhecido é erro* — nunca `area` vazia em silêncio. O mesmo vale
 para `.md` solto na raiz do vault: ou está na lista de exclusão, ou falha.
-
-### O acoplamento desta primeira versão
-
-> **Os nomes de vault e o mapa de `area` por vault estão cravados em
-> [`internal/schema/enums.go`](internal/schema/enums.go).** Não são configuração — são constantes de
-> compilação, com um teste de arquitetura que recusa qualquer outro pacote redeclarando esses
-> valores.
-
-Isso é dívida conhecida, não desenho pretendido. `type`, `status` e `visibility` são fechados **pelo
-contrato** e nenhuma instalação deveria mudá-los; nome de vault e mapa de áreas são **configuração de
-instalação** e não deveriam estar ali. A separação virá; por ora, saiba onde ela não existe.
-
-**Para adaptar a um fork, edite `internal/schema/enums.go`:**
-
-| O que mudar | Onde |
-|---|---|
-| Nomes de vault (`registerVault`) | um por vault seu |
-| Áreas por vault (`registerArea`) | o segundo argumento diz **em quais vaults** aquela área vale |
-
-A validade de `area` é **por vault**: a mesma pasta pode ser válida num e desconhecida no outro, e
-isso é intencional. `registerArea("00-inbox", vaultA, vaultB)` declara uma área compartilhada uma
-vez; `registerArea("carreira", vaultB)` declara uma exclusiva.
-
-Depois de editar, `go build` e o teste de arquitetura dizem se sobrou alguma lista paralela.
 
 ### Padrões que evitam dor de cabeça
 
