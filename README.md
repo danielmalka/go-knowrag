@@ -212,6 +212,12 @@ QDRANT_API_KEY=$(openssl rand -base64 32) docker compose up -d
 O `docker-compose.yml` na raiz exige a variável e falha se ela faltar, em vez de subir um banco sem
 autenticação.
 
+**Esse arquivo é de desenvolvimento local.** O Qdrant implantado tem o seu, em
+`deploy/docker-compose.yml`: mesma imagem pinada, sem porta em interface pública — o endereço de bind
+vem de `deploy/.env`, documentado em `deploy/.env.example`. `make verify-deploy` confere pino de
+imagem, endereço de bind e credencial obrigatória lendo o arquivo, sem precisar de Docker nem da
+máquina implantada, e o CI roda isso ao lado do linter.
+
 ### 2. Serviço de embedding
 
 ```bash

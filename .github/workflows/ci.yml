@@ -15,6 +15,9 @@ jobs:
       # Installed by exact version so CI lints with the same binary as the developer machine.
       - run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
       - run: make lint
+      # Beside the linter because it is the same kind of check: static, fast, and about a property
+      # nobody notices losing. It reads deploy/docker-compose.yml and needs no infrastructure.
+      - run: make verify-deploy
 
   test:
     runs-on: ubuntu-latest

@@ -1,4 +1,4 @@
-.PHONY: test lint build test-integration test-embedder cover
+.PHONY: test lint build test-integration test-embedder cover verify-deploy
 
 # Interpreter of the virtualenv that has FlagEmbedding installed — the same variable
 # knowrag-embedder.env already defines for the systemd unit, so an installed machine exports it
@@ -67,6 +67,12 @@ test-embedder:
 
 lint:
 	golangci-lint run ./...
+
+# Checks deploy/docker-compose.yml — image pin, bind addresses, mandatory API key — by reading the
+# file, so it needs no Docker and no deployed machine. CI runs it beside the linter for that reason:
+# the properties it guards are the ones a hurried edit removes without anything else noticing.
+verify-deploy:
+	./scripts/verify-deploy.sh
 
 build:
 	go build -o bin/mcp-server ./cmd/mcp-server

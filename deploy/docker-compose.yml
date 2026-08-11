@@ -1,0 +1,67 @@
+# The Qdrant this system actually runs against, as a file rather than as state on one machine.
+#
+# It is not the compose at the repository root. That one is for local development and for poking at
+# what `cli schema apply` produced; this one describes the deployed instance, and the difference that
+# matters is the interface it listens on.
+#
+# **Qdrant is the only thing from this system on that machine.** An earlier version of the S12 task
+# document has this file running "Qdrant + embedding sidecar"; that stopped being true on 2026-08-08,
+# when ADR-001 §0 moved the embedding runtime to the ingesting host. The sidecar is a systemd unit
+# there, not a container here — see scripts/embedder-service/README.md.
+#
+# What reaches it: `knowrag ingest` and `knowrag search` from the operator's host, and the MCP server
+# from the same host. All three come across the private mesh (ADR-003). Nothing on the public
+# internet has a reason to, which is what the bind address below is about.
+services:
+  qdrant:
+    # Pinned to an exact patch on the v1.19.x line, never `:latest`. The client module in go.mod and
+    # the server here are re-pinned as a pair (the qdrant/go-client require block), and a floating
+    # tag would let the server half move on its own — during a `docker compose pull` nobody
+    # associated with a client upgrade. The root docker-compose.yml carries the same pin, and
+    # scripts/verify-deploy.sh checks this file's.
+    image: qdrant/qdrant:v1.19.0
+    restart: unless-stopped
+    environment:
+      # No literal ever lives in this file — it is tracked in a public repository. `?` makes a
+      # missing value a startup error rather than a Qdrant that comes up with authentication off,
+      # which is the one failure mode that looks like success from every angle.
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:?set QDRANT_API_KEY in deploy/.env}
+    ports:
+      # gRPC, the only protocol this codebase speaks (PRD-contrato §2.3b), published on **one
+      # interface, named by a variable**.
+      #
+      # Not `expose:` alone: the S12 task document says internal-only, and that was written when the
+      # MCP server was going to run on this machine inside this compose network. It does not
+      # (ADR-001 §0) — every client is on the operator's host, across the mesh — so a service
+      # reachable only from inside the compose network would be a service with no clients.
+      #
+      # Not a bare "6334:6334" either: docker publishes that on every interface, including the
+      # public one, and it also writes the mapping past most host firewalls. The address belongs in
+      # deploy/.env, both because it is the mesh address of one machine (which a public repository
+      # must not carry) and because making it explicit is what stops the wildcard default from
+      # arriving by omission. deploy/.env.example says which address it has to be.
+      - "${QDRANT_BIND_ADDR:?set QDRANT_BIND_ADDR in deploy/.env — the private mesh address, never 0.0.0.0}:6334:6334"
+      # The REST port is deliberately not published. It exists for a human with curl and for the
+      # dashboard; on this machine that human is already on the host, where `docker exec` reaches it
+      # without a listener. Every published port is a thing to keep verifying.
+    volumes:
+      - qdrant-storage:/qdrant/storage
+    # There is deliberately **no memory limit here, and its absence is a blocked task, not an
+    # oversight.**
+    #
+    # The limit is supposed to come from a number recorded in ADR-001, and ADR-001 records none for
+    # Qdrant: §6.1 cancelled the headroom measurement outright, on the grounds that it was budgeting
+    # for an embedder that had left the machine, and §8 says NFR-6's "RSS combinado Qdrant + embedder
+    # ≤ 3 GB" now "descreve uma máquina que não existe mais". PRD.md's NFR table says the same about
+    # that 3 GB in its own words: the ceiling "não foi recalculado, só ficou folgado", to be
+    # confirmed or corrected in S12 against the real deployment.
+    #
+    # Writing `mem_limit: 3g` here would take a budget measured for two processes, apply it to one,
+    # and give scripts/verify-deploy.sh a number to pass against that nobody measured. The next
+    # honest step is a measurement on the running VPS — `MemAvailable` and Qdrant's own RSS under
+    # load — recorded in ADR-001; then the limit and its check land here together.
+volumes:
+  # Named, so collections survive `docker compose down` and a container restart. Dropping the data
+  # is then an explicit `docker compose down -v` — which is also step 2 of the rebuild recovery in
+  # the runbook, and the only reason that procedure is safe to write down.
+  qdrant-storage:
