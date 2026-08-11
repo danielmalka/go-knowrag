@@ -17,7 +17,8 @@ import (
 // cannot detect a rename of.
 func goldenReport() Report {
 	return Report{
-		Mode: "incremental",
+		Mode:        "incremental",
+		Interrupted: true,
 		Results: []NoteResult{
 			{Path: "areas/kept.md", UID: uuid.MustParse("0198a7f2-4b31-7c42-9e15-3d8a92c47b01"),
 				State: StateSkipped, Chunks: 2},
@@ -31,11 +32,15 @@ func goldenReport() Report {
 				State: StateFailed, Err: errors.New("chunking: frontmatter has no title")},
 		},
 		OrphansScanned: true,
+		// Set alongside OrphansScanned, which the batch never does: the two are mutually exclusive by
+		// design, and this fixture is about the wire shape rather than about a state the code can
+		// reach. A key with a zero value is a key whose rename the golden cannot catch.
+		OrphanScanSkipped: "carried so this field appears in the fixture",
 		Orphans: []Orphan{
 			{UID: uuid.MustParse("0198a7f2-4b31-7c42-9e15-3d8a92c47b06"),
 				Vault: "pessoal", Path: "areas/deleted.md", Points: 2},
 			{UID: uuid.MustParse("0198a7f2-4b31-7c42-9e15-3d8a92c47b07"),
-				Vault: "pessoal", Path: "areas/gone.md", Points: 3},
+				Vault: "pessoal", Path: "areas/gone.md", Points: 3, PathClaimed: true},
 		},
 		OnDisk: []Orphan{
 			{UID: uuid.MustParse("0198a7f2-4b31-7c42-9e15-3d8a92c47b08"),

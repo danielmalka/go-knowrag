@@ -1,5 +1,6 @@
 {
   "mode": "incremental",
+  "interrupted": true,
   "notes": 5,
   "counts": {
     "embedded": 1,
@@ -11,18 +12,22 @@
   "points_written": 5,
   "points_pruned": 5,
   "orphans_scanned": true,
+  "orphans_not_scanned_reason": "carried so this field appears in the fixture",
+  "prune_skipped_reason": "",
   "orphans": [
     {
       "uid": "0198a7f2-4b31-7c42-9e15-3d8a92c47b06",
       "vault": "pessoal",
       "path": "areas/deleted.md",
-      "points": 2
+      "points": 2,
+      "path_claimed": false
     },
     {
       "uid": "0198a7f2-4b31-7c42-9e15-3d8a92c47b07",
       "vault": "pessoal",
       "path": "areas/gone.md",
-      "points": 3
+      "points": 3,
+      "path_claimed": true
     }
   ],
   "indexed_not_scanned": [
@@ -30,7 +35,8 @@
       "uid": "0198a7f2-4b31-7c42-9e15-3d8a92c47b08",
       "vault": "pessoal",
       "path": "areas/excluded.md",
-      "points": 1
+      "points": 1,
+      "path_claimed": false
     }
   ],
   "errors": [

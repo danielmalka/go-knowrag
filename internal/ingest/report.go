@@ -18,14 +18,27 @@ type Report struct {
 	// cannot. The scan needs the whole-tenant snapshot, and that snapshot is an optimization allowed
 	// to fail (prefetch.go); a run that lost it must not print a clean orphan report.
 	OrphansScanned bool
-	// OnDisk are candidates the scan did not return whose file is still on disk — excluded by
-	// configuration, or emptied to zero bytes (vault.ScanVault sends those to Skipped, and
-	// SkippedNote carries no uid, so they vanish from the live set exactly like a deletion).
+	// OnDisk are candidates the scan did not return that this run could not confirm deleted. Three
+	// things land here, and only the first is a sighting: the file is present (excluded by
+	// configuration, or emptied to zero bytes — vault.ScanVault sends those to Skipped, and
+	// SkippedNote carries no uid, so they vanish from the live set exactly like a deletion); the file
+	// could not be read at all (permission, I/O, a mount that dropped); or the vault has no root in
+	// this run and there was nothing to check against.
 	//
-	// They are reported and never pruned. The distinction is the difference between an index that
-	// lags the config and an index that lost a note nobody meant to delete. Only a caller that can
-	// read the vault roots can tell the two apart, so this is filled by cmd/cli, not by RunBatch.
+	// They are reported and never pruned, because none of the three is evidence of a deletion. Only a
+	// caller that can read the vault roots can tell them apart, so this is filled by cmd/cli, not by
+	// RunBatch — cmd/cli/ingest_modes.go, splitStillOnDisk, which is also where the list of causes
+	// will grow next and where this sentence goes stale if it does.
 	OnDisk []Orphan
+	// OrphanScanSkipped is why the scan did not run, empty when it did. It exists because "nobody
+	// looked" has more than one cause and they are not equally alarming: a snapshot that failed is a
+	// broken link, while a --only run simply cannot ask the question. Both must print, and printing
+	// the wrong reason is its own way of misleading.
+	OrphanScanSkipped string
+	// PruneSkipped is why an authorized prune did not run, empty when it did or was never asked for.
+	// A run that was told to delete and then did not has to say so: silence there reads as "there was
+	// nothing to delete", which is the one meaning it never has.
+	PruneSkipped string
 	// PointsPruned is how many points the orphan prune removed. It is filled by the caller that ran
 	// Prune, not by RunBatch: the batch reports what it found, deleting is a separate, authorized
 	// step (prune.go).
@@ -35,6 +48,10 @@ type Report struct {
 	// the other side. It answers "how much was indexed for the notes we deleted", which is the
 	// question an operator reconciling a run actually asks.
 	PointsPruned int
+	// Interrupted reports that the run stopped early because the operator asked it to. The notes it
+	// never reached are simply absent from Results — a partial report, which ADR-006 makes safe to
+	// resume from: the next run converges on whatever this one left.
+	Interrupted bool
 	// Mode is what the operator asked for ("incremental", "full", "dry-run"), carried so the JSON
 	// report is self-describing — a stored report that does not say which mode produced it cannot be
 	// compared to another one.
@@ -117,7 +134,11 @@ func (r Report) String() string {
 		}
 	}
 
-	lines := []string{fmt.Sprintf("%d note(s): %s", len(r.Results), strings.Join(parts, " "))}
+	summary := fmt.Sprintf("%d note(s): %s", len(r.Results), strings.Join(parts, " "))
+	if r.Interrupted {
+		summary += " — interrupted, the remaining notes were not started; the next run converges"
+	}
+	lines := []string{summary}
 	lines = append(lines, r.orphanLines()...)
 	for _, f := range r.Failures() {
 		lines = append(lines, fmt.Sprintf("  - %s: %v", f.Path, f.Err))
@@ -130,8 +151,12 @@ func (r Report) String() string {
 // occur is silence that an operator reads as "no orphans".
 func (r Report) orphanLines() []string {
 	if !r.OrphansScanned {
-		return []string{"orphans: not scanned — the index snapshot could not be read, so this run " +
-			"cannot say whether any note was deleted"}
+		why := r.OrphanScanSkipped
+		if why == "" {
+			why = "the index snapshot could not be read"
+		}
+		return []string{"orphans: not scanned — " + why + ", so this run cannot say whether any " +
+			"note was deleted"}
 	}
 	if len(r.Orphans) == 0 && len(r.OnDisk) == 0 {
 		return []string{"orphans: none"}
@@ -160,11 +185,22 @@ func (r Report) orphanLines() []string {
 			"remaining %d are still indexed", found, r.PointsPruned, found-r.PointsPruned)
 	}
 
+	if r.PruneSkipped != "" {
+		outcome = fmt.Sprintf("%d point(s) still indexed; the prune was skipped — %s",
+			found, r.PruneSkipped)
+	}
 	lines := []string{fmt.Sprintf("orphans: %d note(s) deleted from the vault, %s",
 		len(r.Orphans), outcome)}
 	for _, o := range r.Orphans {
-		lines = append(lines, fmt.Sprintf("  - %s/%s (%d point(s), uid %s)",
-			o.Vault, o.Path, o.Points, o.UID))
+		// The claimed case gets a reason on the line, because it is the one that looks wrong from
+		// outside: the operator can open that path and find a file sitting there, and without this
+		// the report reads as a prune of a note that plainly exists.
+		reason := ""
+		if o.PathClaimed {
+			reason = " — its path now belongs to another note, so this uid has none"
+		}
+		lines = append(lines, fmt.Sprintf("  - %s/%s (%d point(s), uid %s)%s",
+			o.Vault, o.Path, o.Points, o.UID, reason))
 	}
 	return append(lines, r.onDiskLines()...)
 }

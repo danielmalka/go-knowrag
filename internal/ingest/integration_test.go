@@ -216,7 +216,7 @@ func TestIngestRealCorpus_IncrementalNoop(t *testing.T) {
 //
 // The wiring is duplicated from cmd/cli/ingest.go rather than called, because that code lives in
 // package main. What it must never do is diverge from it: see the mirrored constants above.
-func ingestOnce(t *testing.T, cfg *config.Config, tenant string) (ingest.Report, time.Duration) {
+func ingestOnce(t *testing.T, cfg *config.Config, tenant string, tweaks ...func(*ingest.Deps)) (ingest.Report, time.Duration) {
 	t.Helper()
 	start := time.Now()
 
@@ -280,7 +280,7 @@ func ingestOnce(t *testing.T, cfg *config.Config, tenant string) (ingest.Report,
 		t.Fatalf("embedder handshake: %v", err)
 	}
 
-	report, err := ingest.Orchestrate(t.Context(), ingest.Deps{
+	deps := ingest.Deps{
 		TenantID:       tenant,
 		Store:          points,
 		Embedder:       embedder,
@@ -288,7 +288,12 @@ func ingestOnce(t *testing.T, cfg *config.Config, tenant string) (ingest.Report,
 		Chunk:          chunk.Config{FloorTokens: floorTokens, CeilingTokens: ceilingTokens},
 		Tokens:         tokens,
 		UpsertAttempts: upsertAttempts,
-	}, scans...)
+	}
+	for _, tweak := range tweaks {
+		tweak(&deps)
+	}
+
+	report, err := ingest.Orchestrate(t.Context(), deps, scans...)
 	if err != nil {
 		t.Fatalf("ingest.Orchestrate: %v", err)
 	}
@@ -423,5 +428,40 @@ func assertRealCorpus(t *testing.T, report ingest.Report) {
 	}
 	if report.Failed() {
 		t.Fatalf("the run did not complete, so its duration is not the NFR's:\n%s", report)
+	}
+}
+
+// TestIngestRealCorpus_DryRunWritesNothing is T4's acceptance criterion, asserted the way it is
+// written: the number of points in Qdrant is identical before and after.
+//
+// It runs against the tenant the operator actually populates, and that is the point — a dry run over
+// a throwaway empty tenant would report every note as work to do and write nothing for the trivial
+// reason that there was nothing there. Over the real tenant the run reaches the integrity check for
+// all ~730 notes, decides what each one would become, and still must not touch a single point.
+//
+// Counting is a Count call rather than a scroll because the assertion is a number, and because a
+// scroll that paginated wrong would make this test fail for its own reasons.
+func TestIngestRealCorpus_DryRunWritesNothing(t *testing.T) {
+	cfg := realDeployment(t)
+	tenant := realTenant()
+
+	before := countTenantPoints(t, cfg, tenant)
+	if before == 0 {
+		t.Skipf("tenant %s holds no points; a before/after count over an empty tenant proves nothing",
+			tenant)
+	}
+
+	report, _ := ingestOnce(t, cfg, tenant, func(d *ingest.Deps) { d.DryRun = true })
+
+	if after := countTenantPoints(t, cfg, tenant); after != before {
+		t.Errorf("point count went from %d to %d across a dry run; --dry-run must write nothing",
+			before, after)
+	}
+	// Not a vacuous pass: the run has to have reached the per-note decision for the whole corpus.
+	if n := len(report.Results); n < minCorpusNotes {
+		t.Errorf("the dry run evaluated %d note(s), want at least %d", n, minCorpusNotes)
+	}
+	if !report.OrphansScanned {
+		t.Error("the dry run did not scan for orphans; reading the index is what it gained in A-ii")
 	}
 }

@@ -125,7 +125,10 @@ func TestSelectVaults_VaultNamedBoth_RefusesEveryRun(t *testing.T) {
 // fail, and the counts would read like progress.
 func TestRunIngest_MalformedArea_RefusedBeforeAnythingIsScanned(t *testing.T) {
 	cfg := &config.Config{
-		EmbedderEndpoint: tokenizeStub(t),
+		QdrantEndpoint:    deadQdrant,
+		QdrantAPIKey:      "not-a-real-key",
+		DefaultCollection: "knowrag_test",
+		EmbedderEndpoint:  tokenizeStub(t),
 		Vaults: map[string]config.VaultSettings{
 			"trabalho": {Path: writeVault(t, map[string]string{
 				"my area/uma.md": note("0198a7f2-4b31-7c42-9e15-3d8a92c47b03", "Uma"),
@@ -151,21 +154,22 @@ func TestRunIngest_MalformedArea_RefusedBeforeAnythingIsScanned(t *testing.T) {
 	}
 }
 
-// TestRunIngest_TwoVaults_EachScannedWithItsOwnSettings closes a gap that only existed after D-26.
+// TestScanVaults_TwoVaults_EachScannedWithItsOwnSettings closes a gap that only existed after D-26.
 //
 // While the roster was a compile-time enum, settings came from cfg.VaultOf(v) — a switch with one
 // case per vault, where using the wrong vault's settings meant writing the wrong case and reading
 // it back wrong. The map-and-loop version cannot be written wrong that visibly: `cfg.Vaults[name]`
 // and `cfg.Vaults[names[0]]` differ by three characters and the compiler is happy with either.
 //
-// It was invisible to the fast gate too. Every other test in this file runs one vault, so a
-// scanVaults that ignored `name` entirely and always read the first roster entry passed the whole
-// package. Two vaults with different areas is the smallest input where that shows: `um` accepts
-// only `alfa` and `dois` only `beta`, so any mix-up makes one of the notes an unknown area and the
-// run fails instead of quietly reporting a count.
-func TestRunIngest_TwoVaults_EachScannedWithItsOwnSettings(t *testing.T) {
+// Two vaults with different areas is the smallest input where that shows: `um` accepts only `alfa`
+// and `dois` only `beta`, so any mix-up makes one of the notes an unknown area and the scan fails
+// instead of quietly returning a count.
+//
+// It asserts on scanVaults rather than on a whole run, because scanning is the subject and every
+// mode now reaches Qdrant afterwards — routing this through runIngest would make it a test of the
+// index connection instead.
+func TestScanVaults_TwoVaults_EachScannedWithItsOwnSettings(t *testing.T) {
 	cfg := &config.Config{
-		EmbedderEndpoint: tokenizeStub(t),
 		Vaults: map[string]config.VaultSettings{
 			"um": {Path: writeVault(t, map[string]string{
 				"alfa/uma.md": note("0198a7f2-4b31-7c42-9e15-3d8a92c47b04", "Uma"),
@@ -176,22 +180,14 @@ func TestRunIngest_TwoVaults_EachScannedWithItsOwnSettings(t *testing.T) {
 		},
 	}
 
-	var out bytes.Buffer
-	err := runIngest(context.Background(), &out, io.Discard, cfg, ingestOptions{
-		vaultFlag: bothVaults,
-		dryRun:    true,
-		tenantID:  defaultTenantID,
-		chunkCfg:  chunk.Config{FloorTokens: defaultFloorTokens, CeilingTokens: defaultCeilingTokens},
-	})
+	scans, err := scanVaults(cfg, []string{"um", "dois"})
 	if err != nil {
-		t.Fatalf("runIngest over two vaults: %v — a vault scanned with another's settings makes its "+
+		t.Fatalf("scanVaults over two vaults: %v — a vault scanned with another's settings makes its "+
 			"own area unknown, which is what this failure looks like", err)
 	}
-
-	got := out.String()
-	for _, want := range []string{"um: 1 note(s)", "dois: 1 note(s)", "2 note(s), 2 chunk(s) to embed"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("dry-run output %q does not contain %q", got, want)
+	for _, scan := range scans {
+		if len(scan.Notes) != 1 {
+			t.Errorf("vault %s returned %d note(s), want 1", scan.Vault, len(scan.Notes))
 		}
 	}
 }
@@ -304,45 +300,40 @@ Body of %s, long enough to be a chunk on its own.
 `, uid, title, title, title)
 }
 
-// TestRunIngest_DryRun_ReportsCountsAndNeedsNoQdrant is the dry run's whole contract in one test:
-// it reports what a real run would embed, it writes nothing, and — the part that is easy to lose in
-// a refactor — it does not demand Qdrant settings it never uses.
-func TestRunIngest_DryRun_ReportsCountsAndNeedsNoQdrant(t *testing.T) {
-	root := writeVault(t, map[string]string{
-		"00-inbox/uma.md":   note("0198a7f2-4b31-7c42-9e15-3d8a92c47b01", "Uma"),
-		"00-inbox/outra.md": note("0198a7f2-4b31-7c42-9e15-3d8a92c47b02", "Outra"),
-		"CLAUDE.md":         "# agent instructions, excluded by configuration\n",
-	})
-	cfg := &config.Config{
-		EmbedderEndpoint: tokenizeStub(t),
-		Vaults: map[string]config.VaultSettings{
-			"trabalho": {
-				Path:             root,
-				Areas:            "00-inbox",
-				ExcludeRootFiles: "CLAUDE.md",
-			},
-		},
-	}
+// TestRunIngest_DryRun_ReportsThroughTheSameReport is the wiring, and its name now says only what it
+// checks: a dry run goes through the unified orchestration and produces a machine report labelled
+// dry-run.
+//
+// It used to be called "...WithoutWriting" and asserted nothing about any store — the vault is empty
+// and Qdrant is dead, so the run had nothing to write with. "It wrote nothing" is proven where a
+// store can be watched: internal/ingest's TestRunBatch_DryRun_TouchesNothingAndReportsWhatItWould
+// against the fake's call log, and the before/after point count in integration_test.go.
+func TestRunIngest_DryRun_ReportsThroughTheSameReport(t *testing.T) {
+	lockedCache(t)
+	cfg := emptyVaultCfg(t)
 
-	var out bytes.Buffer
-	err := runIngest(context.Background(), &out, io.Discard, cfg, ingestOptions{
+	var out, errOut bytes.Buffer
+	err := runIngest(t.Context(), &out, &errOut, cfg, ingestOptions{
 		vaultFlag: "trabalho",
 		dryRun:    true,
+		json:      true,
 		tenantID:  defaultTenantID,
 		chunkCfg:  chunk.Config{FloorTokens: defaultFloorTokens, CeilingTokens: defaultCeilingTokens},
 	})
 	if err != nil {
-		t.Fatalf("runIngest --dry-run with no Qdrant settings: %v", err)
+		t.Fatalf("runIngest --dry-run: %v — stdout %q, stderr %q", err, &out, &errOut)
 	}
 
-	got := out.String()
-	// "tokenizer:" is the D-25 instrument's line. It is asserted here and not only in the counter's
-	// own unit test because the counter can keep counting perfectly while nobody prints the number,
-	// and a measurement nobody reads is the same as no measurement.
-	for _, want := range []string{"2 note(s)", "2 chunk(s) to embed", "nothing was embedded or written", "tokenizer:"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("dry-run output %q does not contain %q", got, want)
-		}
+	var report map[string]any
+	if err := json.Unmarshal(out.Bytes(), &report); err != nil {
+		t.Fatalf("stdout does not parse as JSON: %v\n%s", err, out.String())
+	}
+	// --dry-run --json used to be refused outright, because the dry run produced no report at all.
+	if got := report["mode"]; got != "dry-run" {
+		t.Errorf("report mode is %v, want %q", got, "dry-run")
+	}
+	if !strings.Contains(errOut.String(), "tokenizer:") {
+		t.Errorf("stderr %q does not carry the tokenizer summary", errOut.String())
 	}
 }
 
@@ -366,11 +357,13 @@ func TestRunIngest_MissingSettings_NamesOnlyWhatTheRunNeeds(t *testing.T) {
 			wantNamed:  []string{"QDRANT_ENDPOINT", "QDRANT_API_KEY", "DEFAULT_COLLECTION"},
 			wantAbsent: []string{"KNOWRAG_VAULT_PESSOAL_PATH"},
 		},
-		"a dry run does not": {
+		// A dry run reads the index now, so it needs the same settings the write path does. What it
+		// still must not name is a vault it was not pointed at.
+		"a dry run needs it too": {
 			dryRun:     true,
 			vaultFlag:  "trabalho",
-			wantNamed:  []string{"EMBEDDER_ENDPOINT", "KNOWRAG_VAULT_TRABALHO_PATH"},
-			wantAbsent: []string{"QDRANT_ENDPOINT", "KNOWRAG_VAULT_PESSOAL_PATH"},
+			wantNamed:  []string{"EMBEDDER_ENDPOINT", "QDRANT_ENDPOINT", "KNOWRAG_VAULT_TRABALHO_PATH"},
+			wantAbsent: []string{"KNOWRAG_VAULT_PESSOAL_PATH"},
 		},
 	}
 
@@ -420,7 +413,10 @@ func TestRunIngest_EmptyRoster_FailsAsConfigurationNotAnEmptyRun(t *testing.T) {
 // reporting an empty but successful run.
 func TestRunIngest_UnreadableVault_FailsBeforeTouchingAnything(t *testing.T) {
 	cfg := &config.Config{
-		EmbedderEndpoint: tokenizeStub(t),
+		QdrantEndpoint:    deadQdrant,
+		QdrantAPIKey:      "not-a-real-key",
+		DefaultCollection: "knowrag_test",
+		EmbedderEndpoint:  tokenizeStub(t),
 		Vaults: map[string]config.VaultSettings{
 			"trabalho": {Path: filepath.Join(t.TempDir(), "absent"), Areas: "00-inbox"},
 		},
@@ -551,27 +547,18 @@ func TestRunIngest_SuccessfulRun_ReleasesTheLock(t *testing.T) {
 }
 
 // TestRunIngest_DryRun_ProceedsWhileTheLockIsHeld pins the one path that deliberately ignores the
-// lock. A dry run writes nothing, and it has no Qdrant settings to key a lock on in the first place
-// — this configuration carries them only so the scope the test holds is the scope the run would
-// have used, which is what makes the test discriminate: wire the lock without the dry-run guard and
-// this run is refused.
+// lock. A dry run writes nothing, so there is nothing for a concurrent run to tread on — and now
+// that it reads the index, that is a choice rather than a consequence of never connecting.
+//
+// The vault is empty so the run completes hermetically; that costs the test nothing, because a
+// missing dry-run guard refuses the run at the lock, before the note count matters at all.
 func TestRunIngest_DryRun_ProceedsWhileTheLockIsHeld(t *testing.T) {
 	lockedCache(t)
-	cfg := &config.Config{
-		QdrantEndpoint:    deadQdrant,
-		QdrantAPIKey:      "not-a-real-key",
-		DefaultCollection: "knowrag_test",
-		EmbedderEndpoint:  tokenizeStub(t),
-		Vaults: map[string]config.VaultSettings{
-			"trabalho": {Path: writeVault(t, map[string]string{
-				"00-inbox/uma.md": note("0198a7f2-4b31-7c42-9e15-3d8a92c47b06", "Uma"),
-			}), Areas: "00-inbox"},
-		},
-	}
+	cfg := emptyVaultCfg(t)
 	holdLock(t, cfg, defaultTenantID)
 
-	var out bytes.Buffer
-	err := runIngest(t.Context(), &out, io.Discard, cfg, ingestOptions{
+	var out, errOut bytes.Buffer
+	err := runIngest(t.Context(), &out, &errOut, cfg, ingestOptions{
 		vaultFlag: "trabalho",
 		dryRun:    true,
 		tenantID:  defaultTenantID,
@@ -580,8 +567,8 @@ func TestRunIngest_DryRun_ProceedsWhileTheLockIsHeld(t *testing.T) {
 	if err != nil {
 		t.Fatalf("--dry-run while another run holds the lock: %v — a dry run takes no lock", err)
 	}
-	if want := "1 note(s), 1 chunk(s) to embed"; !strings.Contains(out.String(), want) {
-		t.Errorf("dry-run output %q does not contain %q", out.String(), want)
+	if !strings.Contains(out.String(), "note(s)") {
+		t.Errorf("dry-run output %q does not carry a report", out.String())
 	}
 }
 

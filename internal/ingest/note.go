@@ -36,6 +36,38 @@ type Deps struct {
 	// whose output authorizes deletion.
 	Vaults []string
 
+	// DryRun stops every note after the integrity check: the state reported is the one the note
+	// *would* reach, computed without embedding and without writing.
+	//
+	// It is a field on Deps rather than a second entry point because the two modes have to walk the
+	// same code to be worth anything. A separate dry-run path that chunked notes its own way is what
+	// this replaced, and it could not answer the question an operator actually asks — it never read
+	// the index, so it saw neither deleted notes nor notes still on disk that the scan stopped
+	// returning (cmd/cli/ingest_modes.go).
+	DryRun bool
+
+	// Full skips the integrity short-circuit and rechunks every note, whatever the index holds.
+	//
+	// The snapshot is still taken: it is what the orphan scan subtracts from (orphans.go), so a full
+	// run that skipped the prefetch would lose the deleted-note report to buy nothing.
+	Full bool
+
+	// Only is the --only glob, empty when the run is over the whole corpus. It is carried on Deps
+	// rather than applied by the caller because it changes two things at once, and the second is
+	// easy to forget: it narrows the note set, and it makes the orphan scan meaningless. `snapshot \
+	// liveUIDs` over a filtered live set reports every unvisited note as deleted, so the scan does
+	// not run at all on a filtered run (batch.go) and the report says why.
+	Only string
+
+	// Interrupt is closed when the operator asks the run to stop, and it stops the *scheduling* of
+	// new notes rather than the note in flight (batch.go). Nil means nothing can interrupt.
+	//
+	// It is separate from ctx on purpose, and the separation is the whole grace period: ctx cancelled
+	// is "drop what you are doing", this is "finish what you have and start nothing else". Collapsing
+	// them would abort a note between its confirmed upsert and its prune, which is the one window
+	// ADR-006 §3 spends the most care avoiding.
+	Interrupt <-chan struct{}
+
 	// UpsertAttempts bounds the retry of a non-confirmed upsert. Zero means one attempt, no retry.
 	//
 	// ponytail: no backoff between attempts. Retrying instantly is worth roughly nothing against a
@@ -99,12 +131,22 @@ func ProcessNote(ctx context.Context, d Deps, n vault.Note) NoteResult {
 		return res.failed(fmt.Errorf("reading back the points of %s: %w", n.UID, err))
 	}
 
-	if CheckIntegrity(records, expected).Integral {
+	if !d.Full && CheckIntegrity(records, expected).Integral {
 		// Nothing is written here, deliberately — not even a payload refresh to bring `updated` in
 		// line with disk. That refresh would be the removed payload_only branch under a new name,
 		// and the accepted cost of the 2026-08-08 decision is precisely that the stored `updated`
 		// goes stale (PRD-contrato §2.4).
 		res.State = StateSkipped
+		return res
+	}
+
+	// A dry run stops here, reporting the state this note would have ended in. StatePruned and not
+	// StateEmbedded: the question is what a real run would achieve, and a note that reaches the
+	// embedder goes on to be written and to have its stale tail removed in the same round. Stopping
+	// short of the embedder is also what keeps the promise measurable — the point count in Qdrant is
+	// identical before and after, and no GPU time is spent to find that out.
+	if d.DryRun {
+		res.State = StatePruned
 		return res
 	}
 

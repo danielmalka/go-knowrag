@@ -28,11 +28,14 @@ import (
 // objects, which is a shape that parses cleanly and says nothing.
 type reportJSON struct {
 	Mode           string          `json:"mode"`
+	Interrupted    bool            `json:"interrupted"`
 	Notes          int             `json:"notes"`
 	Counts         map[string]int  `json:"counts"`
 	PointsWritten  int             `json:"points_written"`
 	PointsPruned   int             `json:"points_pruned"`
 	OrphansScanned bool            `json:"orphans_scanned"`
+	OrphansSkipped string          `json:"orphans_not_scanned_reason"`
+	PruneSkipped   string          `json:"prune_skipped_reason"`
 	Orphans        []orphanJSON    `json:"orphans"`
 	OnDisk         []orphanJSON    `json:"indexed_not_scanned"`
 	Errors         []noteErrorJSON `json:"errors"`
@@ -43,6 +46,9 @@ type orphanJSON struct {
 	Vault  string    `json:"vault"`
 	Path   string    `json:"path"`
 	Points int       `json:"points"`
+	// PathClaimed answers, in the machine report, the question the human line answers in prose:
+	// why a candidate was pruned although a file sits at that path.
+	PathClaimed bool `json:"path_claimed"`
 }
 
 type noteErrorJSON struct {
@@ -72,11 +78,14 @@ func (r Report) JSON() ([]byte, error) {
 
 	return json.Marshal(reportJSON{
 		Mode:           r.Mode,
+		Interrupted:    r.Interrupted,
 		Notes:          len(r.Results),
 		Counts:         counts,
 		PointsWritten:  r.PointsWritten(),
 		PointsPruned:   r.PointsPruned,
 		OrphansScanned: r.OrphansScanned,
+		OrphansSkipped: r.OrphanScanSkipped,
+		PruneSkipped:   r.PruneSkipped,
 		Orphans:        orphans,
 		OnDisk:         onDisk,
 		Errors:         errs,
@@ -92,7 +101,9 @@ func orphansJSON(in []Orphan) []orphanJSON {
 		// file exists to avoid: it compiles only while the two structs stay field-for-field identical,
 		// which is a promise the wire format must not make to a Go type that later stories will keep
 		// changing. Spelling the fields out is what lets Orphan grow without the shape following it.
-		out = append(out, orphanJSON{UID: o.UID, Vault: o.Vault, Path: o.Path, Points: o.Points})
+		out = append(out, orphanJSON{
+			UID: o.UID, Vault: o.Vault, Path: o.Path, Points: o.Points, PathClaimed: o.PathClaimed,
+		})
 	}
 	return out
 }

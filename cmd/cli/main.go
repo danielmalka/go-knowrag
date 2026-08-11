@@ -66,6 +66,9 @@ func main() {
 		if errors.Is(err, errUsage) {
 			os.Exit(exitUsage)
 		}
+		if errors.Is(err, errInterrupted) {
+			os.Exit(exitInterrupted)
+		}
 		os.Exit(1)
 	}
 }
