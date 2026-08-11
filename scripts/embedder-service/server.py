@@ -13,9 +13,13 @@ Both are recorded in ADR-001 §6.2. FlagEmbedding is the reference implementatio
 own authors, where sparse is first-class -- so what is left to write is the thin HTTP shell around
 it, which is this file.
 
-Resident by design, not by preference: loading the model measured **314.5 s**. A process that loads
-on demand would make the first query of the day take five minutes and turn the measured 71 ms p99
-into fiction. This process loads once at startup and stays up. It is never invoked per request.
+Resident by design, not by preference: loading the model measured **~11 s** with the weights already
+in the Hugging Face cache, which is the normal case for a restart. The **314.5 s** of the first run
+is a different number and not this one -- it included downloading the 2.2 GB of weights, and only
+happens on a machine that has never loaded the model. Both are recorded in ADR-001 §6.2, and the
+systemd unit next to this file quotes the ~11 s. A process that loaded on demand would put eleven
+seconds in front of the first query of the day, against a measured 71 ms p99 -- three orders of
+magnitude. This process loads once at startup and stays up. It is never invoked per request.
 
 Inference is serialized. One CUDA model is not safe to call concurrently, and the consumers do not
 need it: query embedding is one at a time by nature, and ingestion sends batches. Serialized is not
