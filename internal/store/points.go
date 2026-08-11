@@ -181,6 +181,79 @@ func scopeConditions(tenantID string, uid uuid.UUID) []*qdrant.Condition {
 	}
 }
 
+// Stats is what one collection holds: how many points, and how many distinct notes they came from.
+//
+// The two numbers together are the whole point. Points alone cannot tell a corpus that grew from a
+// corpus that was reindexed with a smaller chunk ceiling, and uids alone cannot show the stale tail
+// a shrunken note leaves behind. The gap between them is where an orphan shows up.
+type Stats struct {
+	Points int
+	UIDs   int
+}
+
+// Stats counts the points and the distinct uids of this collection, optionally narrowed to one
+// tenant. An empty tenantID counts every tenant — that is the unscoped total, not a filter on the
+// empty string.
+//
+// It is a scroll and not two RPCs, and not Qdrant's facet API. Count would give the first number in
+// one round trip, but there is no request that answers "how many distinct values does uid have":
+// facet returns the top values by frequency under a limit, so a collection with more notes than the
+// limit would report a number that looks exact and is not. One pass that carries the uid and
+// nothing else answers both questions and cannot silently truncate.
+//
+// The cost is that pass: pages of scrollPageSize points across whatever link separates this process
+// from Qdrant. On the deployed corpus — a few thousand points over a ~257 ms link (the measurement
+// internal/store's ScrollTenant comment cites) — that is on the order of a dozen round trips and a
+// few seconds. It grows linearly with the collection, so it is a command an operator runs, never
+// something on a request path.
+//
+// A point with no uid is an error naming that point rather than a distinct uid of "". Only two
+// things put a point in this index without one — a write from outside this pipeline, or a hand edit
+// — and both are exactly what a command for checking an ingestion has to surface (the same rule
+// internal/retrieval/result.go applies to a hit missing a payload field).
+func (c *Client) Stats(ctx context.Context, tenantID string) (Stats, error) {
+	uids := map[string]struct{}{}
+	points := 0
+	var offset *qdrant.PointId
+
+	var filter *qdrant.Filter
+	if tenantID != "" {
+		filter = &qdrant.Filter{
+			Must: []*qdrant.Condition{qdrant.NewMatchKeyword("tenant_id", tenantID)},
+		}
+	}
+
+	for {
+		page, next, err := c.api.ScrollAndOffset(ctx, &qdrant.ScrollPoints{
+			CollectionName: c.collection,
+			Filter:         filter,
+			Limit:          qdrant.PtrOf(uint32(scrollPageSize)),
+			Offset:         offset,
+			// The one field this read needs. Asking for the whole payload would drag every chunk's
+			// text across the link to count rows.
+			WithPayload: withPayload([]string{"uid"}),
+			WithVectors: qdrant.NewWithVectors(false),
+		})
+		if err != nil {
+			return Stats{}, fmt.Errorf("counting %s: %w", c.collection, err)
+		}
+		for _, p := range page {
+			uid := p.GetPayload()["uid"].GetStringValue()
+			if uid == "" {
+				return Stats{}, fmt.Errorf(
+					"counting %s: point %s carries no uid — it was not written by this pipeline "+
+						"(PRD-contrato §2.4)", c.collection, pointID(p.GetId()))
+			}
+			uids[uid] = struct{}{}
+			points++
+		}
+		if next == nil || len(page) == 0 {
+			return Stats{Points: points, UIDs: len(uids)}, nil
+		}
+		offset = next
+	}
+}
+
 // ScrollTenant returns every point of tenantID, grouped by uid.
 //
 // It exists because the integrity check is a read of the whole corpus asked one note at a time: a

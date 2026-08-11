@@ -19,8 +19,17 @@ func TestNewQdrantClient_EmptyHost_ReturnsError(t *testing.T) {
 	if err == nil {
 		t.Fatal("NewQdrantClient(Config{}) = nil error, want an error naming the missing endpoint")
 	}
-	if !strings.Contains(err.Error(), "QDRANT_ENDPOINT") {
-		t.Errorf("error %q does not name the missing setting (QDRANT_ENDPOINT)", err)
+	if !strings.Contains(err.Error(), "endpoint") {
+		t.Errorf("error %q does not say which field is empty", err)
+	}
+	// The absent half, and the same assertion the empty-key test makes for the same reason: this
+	// constructor serves two entrypoints that read two different variables, so a message naming
+	// either one misdirects the operator of the other.
+	for _, env := range []string{"QDRANT_ENDPOINT", "MCP_QDRANT_ENDPOINT"} {
+		if strings.Contains(err.Error(), env) {
+			t.Errorf("error %q names %s, but this constructor cannot know which variable filled "+
+				"the Config it was handed", err, env)
+		}
 	}
 }
 

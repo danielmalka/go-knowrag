@@ -362,8 +362,38 @@ por isso que a CLI usa credencial administrativa própria. A paridade entre esta
 servidor MCP é definida com esta flag e `--include-archived` desligadas, e é verificada em cada
 `go test` por `cmd/mcp-server/search_parity_test.go`, sem rede e sem Qdrant.
 
-Exit codes: `0` ok, `2` erro de uso (o comando precisa mudar), `1` falha de backend (vale tentar de
-novo), `3` outra ingestão segurando o lock, `130` interrompido.
+Exit codes, válidos para toda a CLI: `0` ok, `2` erro de uso (o comando precisa mudar), `1` falha de
+backend (vale tentar de novo), `3` outra ingestão segurando o lock, `4` gate que rodou e reprovou,
+`130` interrompido. O `4` é separado do `1` de propósito: recall que caiu é uma medição verdadeira de
+um sistema pior, e quem lê `1` volta a tentar.
+
+### `knowrag stats`
+
+```bash
+knowrag stats                      # todo tenant, todas as collections
+knowrag stats --tenant interno --json
+```
+
+Por collection, quantos pontos e quantas notas distintas. **A diferença entre os dois números é onde
+o órfão aparece**: uma nota que encolheu deixa pontos para trás que não pertencem mais a chunk nenhum.
+Para contar uid distinto ele lê o uid de cada ponto — uma passada inteira pela collection, alguns
+segundos contra o Qdrant implantado. É comando para rodar de propósito, não em cron.
+
+Escopo deliberadamente mínimo (PRD): serve para conferir ingestão e detectar órfão, não é
+observabilidade. Não tem flag além de `--tenant` e `--json`.
+
+### `knowrag eval`
+
+```bash
+knowrag eval --golden      # recall contra o golden set
+knowrag eval --isolation   # a suíte de isolamento entre tenants
+```
+
+Exatamente um dos dois modos, obrigatório. **Nenhum dos dois tem harness ainda** — S10 constrói o
+golden set, S11 a suíte de isolamento — e o comando recusa dizendo qual história falta em vez de
+reportar um passe que ninguém mediu. Os dois jobs de CI rodam este comando em toda push e reportam
+*pendente*; o dia em que o harness existir, eles viram gate sem ninguém ligar nada
+(`scripts/ci/eval-gate.sh`).
 
 ### Servidor MCP (`knowrag-mcp`)
 

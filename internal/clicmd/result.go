@@ -49,6 +49,14 @@ func Usage(format string, args ...any) error {
 // Backend wraps a failure of something the command depends on.
 func Backend(err error) error { return &Error{Category: CategoryBackend, Err: err} }
 
+// Assertion marks a command that ran perfectly and answered no — a gate below its threshold. It is
+// a separate category from Backend because the two need opposite things from whoever reads them:
+// a backend failure is worth retrying, and a gate that failed will fail again until somebody fixes
+// what it measured.
+func Assertion(format string, args ...any) error {
+	return &Error{Category: CategoryAssertion, Err: fmt.Errorf(format, args...)}
+}
+
 // CategoryOf reports the category err carries, and CategoryBackend when it carries none.
 //
 // The default is the whole reason this is a function rather than a type switch at each call site:

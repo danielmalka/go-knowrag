@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -12,8 +14,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
+
 	"github.com/danielmalka/go-knowrag/internal/clicmd"
 	"github.com/danielmalka/go-knowrag/internal/config"
+	"github.com/danielmalka/go-knowrag/internal/ingest/lock"
 )
 
 // rootHelp renders the top-level help the way an operator sees it, from a configuration that is
@@ -51,11 +56,12 @@ func TestRootHelp_DeclaresThePrivilegedTool(t *testing.T) {
 	}
 
 	for _, unwanted := range []string{
-		// The wording this replaced, refused rather than merely superseded. It listed what was
-		// wired up and search was not on the list; left in place it would keep telling an operator
-		// that the command they just ran does not exist. A test that only checks the new sentence
-		// is present would pass with both of them in the file.
+		// The two wordings this replaced, refused rather than merely superseded. Each listed what
+		// was wired up and each went stale the moment a command joined the tree; left in place they
+		// would keep telling an operator that a command they just ran does not exist. A test that
+		// only checks the new sentence is present would pass with all three in the file.
 		"Schema provisioning and ingestion are wired up",
+		"Schema provisioning, ingestion and search are wired up",
 		// Naming the MCP server's runtime key here would send an operator to export the wrong
 		// variable, and the wrong one is the scoped one — the failure would be a permission error
 		// against a key that is doing its job.
@@ -88,7 +94,7 @@ func TestRootHelp_ListsEveryCommand(t *testing.T) {
 		list = list[:end]
 	}
 
-	for _, want := range []string{"schema", "ingest", "search"} {
+	for _, want := range []string{"schema", "ingest", "search", "stats", "eval"} {
 		if !strings.Contains(list, want) {
 			t.Errorf("the command list does not offer %q:\n%s", want, list)
 		}
@@ -213,6 +219,73 @@ func moduleRoot(t *testing.T) string {
 		t.Fatalf("no go.mod at %s — the walk root is wrong, so this test proves nothing: %v", root, err)
 	}
 	return root
+}
+
+// TestExitCodeFor_ARefusedCommandLineIsAUsageError covers the half the category mechanism cannot
+// reach on its own.
+//
+// Cobra refuses a bad command line before any RunE runs, so those failures carry no category and
+// used to land on the code that means "the run broke" — telling a scheduler to retry an invocation
+// that will fail identically every time. The whole tree is driven here rather than a synthetic
+// command, because what is under test is that every real command's RunE marks itself the way the
+// mapping expects.
+func TestExitCodeFor_ARefusedCommandLineIsAUsageError(t *testing.T) {
+	tests := map[string][]string{
+		"an unknown subcommand":         {"bogus"},
+		"an unknown flag":               {"search", "text", "--bogus"},
+		"a missing argument":            {"search"},
+		"neither eval mode":             {"eval"},
+		"both eval modes":               {"eval", "--golden", "--isolation"},
+		"an argument a command refuses": {"stats", "extra"},
+	}
+
+	for name, args := range tests {
+		t.Run(name, func(t *testing.T) {
+			root := newRootCmd(&config.Config{})
+			var out bytes.Buffer
+			root.SetOut(&out)
+			root.SetErr(&out)
+			root.SetArgs(args)
+
+			cmd, err := root.ExecuteC()
+			if err == nil {
+				t.Fatalf("knowrag %v was accepted", args)
+			}
+			if got := exitCodeFor(cmd, err); got != exitUsage {
+				t.Errorf("knowrag %v exits %d, want %d — the command line is what has to change, "+
+					"and %d reads as a failure worth retrying", args, got, exitUsage, got)
+			}
+		})
+	}
+}
+
+// TestExitCodeFor_AFailureInsideACommandKeepsItsCategory is the other direction, and the reason the
+// case above cannot simply be "cobra returned an error". A command that got as far as running and
+// then failed answers for its own category; only a command line cobra never accepted is a usage
+// error.
+func TestExitCodeFor_AFailureInsideACommandKeepsItsCategory(t *testing.T) {
+	// SilenceUsage set, exactly as every RunE in this tree sets it before doing anything else.
+	ran := &cobra.Command{Use: "ran"}
+	ran.SilenceUsage = true
+
+	tests := map[string]struct {
+		err  error
+		want int
+	}{
+		"a broken backend":    {err: clicmd.Backend(errors.New("qdrant is unreachable")), want: exitFailure},
+		"a gate that failed":  {err: clicmd.Assertion("recall regressed"), want: exitAssertion},
+		"a refusal it raised": {err: clicmd.Usage("--tenant is required"), want: exitUsage},
+		"an interrupted run":  {err: errInterrupted, want: exitInterrupted},
+		"the ingestion lock":  {err: fmt.Errorf("wrapped: %w", lock.ErrHeld), want: exitLockHeld},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			if got := exitCodeFor(ran, tc.err); got != tc.want {
+				t.Errorf("exitCodeFor(%v) = %d, want %d", tc.err, got, tc.want)
+			}
+		})
+	}
 }
 
 // TestExitFor_MapsEveryCategoryToItsOwnCode is the exit-code contract. The categories exist so a

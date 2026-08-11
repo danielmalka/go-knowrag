@@ -25,16 +25,35 @@ jobs:
           go-version: '1.26'
       - run: make test
 
+  # The two gates below run on every push. Both used to be switched off by a job condition that was
+  # constantly false, under a TODO naming S10 and S11 — the failure mode this repository catalogues
+  # at length: a check that reports nothing every time is indistinguishable from a check that is
+  # passing, and it stays that way on the push that breaks it.
+  #
+  # What they run against today is a command whose harness does not exist, so they report pending
+  # rather than red — a permanently failing gate is one everybody learns to scroll past. The
+  # distinction is made by scripts/ci/eval-gate.sh, which fails on every outcome except that one,
+  # and the pending branch stops being taken by itself the day the harness lands. Neither job needs
+  # a TODO, because neither has anything left to remember.
   eval-golden-hermetic:
     runs-on: ubuntu-latest
-    if: false # TODO(S10): enable once `cli eval --golden` runs against the versioned synthetic
-              # fixture (docs/PRD-stories-servico.md §3 S10). Never runs against real vaults/Qdrant here.
     steps:
-      - run: echo "not implemented until S10"
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      # Hermetic, as the job name claims: `eval` opens no Qdrant connection and reads no vault.
+      # S10 fills the harness behind `--golden` against a versioned synthetic fixture
+      # (docs/PRD-stories-servico.md §3 S10) — never against the real vaults or the deployed Qdrant.
+      - run: ./scripts/ci/eval-gate.sh golden
 
   eval-isolation-hermetic:
     runs-on: ubuntu-latest
-    if: false # TODO(S11): enable once `cli eval --isolation` runs against the synthetic
-              # multi-tenant fixture (docs/PRD-stories-servico.md §3 S11).
     steps:
-      - run: echo "not implemented until S11"
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      # S11 fills the harness behind `--isolation` against a synthetic multi-tenant fixture
+      # (docs/PRD-stories-servico.md §3 S11).
+      - run: ./scripts/ci/eval-gate.sh isolation

@@ -43,11 +43,11 @@ var allowedStoreExports = []string{
 	// same category as ScrollByUID. It exists because asking that question one uid at a time cost
 	// one network round trip per note, which is what put NFR-5 8x over budget.
 	"ScrollTenant",
-	// ScrollTenant (D-22): the same scroll as ScrollByUID with one condition fewer, returning the
-	// tenant's points grouped by uid. It is on this list because it decides nothing about a search:
-	// no vector, no fusion, no ranking, no scoring — it is a filtered read of stored payloads, the
-	// same category as ScrollByUID. It exists because asking that question one uid at a time cost
-	// one network round trip per note, which is what put NFR-5 8x over its budget.
+	// Stats (S09 T10): the same scroll again, projecting the uid alone, counting rows and distinct
+	// uids. It decides nothing about a search — no vector, no fusion, no ranking, no scoring — and
+	// it ranks nothing it returns: two integers come back. The reason it is a scroll rather than
+	// Qdrant's facet API is written where it is implemented (points.go).
+	"Stats",
 	// The one sanctioned query passthrough (S07 T8). Its signature is checked below.
 	"ExecuteQuery",
 	// Value-type plumbing: redaction, formatting and error unwrapping. None of these reach Qdrant.

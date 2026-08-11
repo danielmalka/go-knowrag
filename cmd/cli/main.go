@@ -1,9 +1,13 @@
 // Command cli is the operator CLI for ingestion, inspection and evaluation.
-// The subcommands land in S09; this entrypoint only proves config, logging and the command
-// tree wire up.
+//
+// This file is the wiring: it loads configuration, installs the logger, assembles the command tree
+// and turns whatever a command returns into a process exit code. Every subcommand's own logic lives
+// beside it, or — for `search`, which one test outside this package has to drive — in
+// internal/clicmd.
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -13,7 +17,9 @@ import (
 
 	"github.com/danielmalka/go-knowrag/internal/clicmd"
 	"github.com/danielmalka/go-knowrag/internal/config"
+	"github.com/danielmalka/go-knowrag/internal/eval"
 	"github.com/danielmalka/go-knowrag/internal/ingest/lock"
+	"github.com/danielmalka/go-knowrag/internal/store"
 )
 
 // exitLockHeld is what a run refused by the ingestion lock exits with. Every other failure exits 1;
@@ -33,9 +39,10 @@ const exitUsage = 2
 // below its threshold. It is not 1, because 1 means the run broke, and a scheduler that cannot tell
 // "the golden set regressed" from "Qdrant is unreachable" will page somebody for the wrong one.
 //
-// Nothing in this build produces it yet — `eval` is S10/S11's, and until it lands the only route to
-// this number is a command returning clicmd.CategoryAssertion, which none does. It is declared with
-// the others so the mapping below is the whole contract rather than two thirds of it.
+// `eval` is what produces it: a gate that ran and came back negative returns
+// clicmd.CategoryAssertion, and lands here. A gate whose harness does not exist yet is a different
+// event and does not land here — nothing was measured, so there is no verdict to report (see
+// eval.ErrNotImplemented).
 const exitAssertion = 4
 
 // exitFor turns a failure category into the process exit code for it. The categories are
@@ -72,22 +79,39 @@ func main() {
 	slog.SetDefault(log)
 	log.Debug("cli starting", "config", cfg)
 
-	if err := newRootCmd(cfg).Execute(); err != nil {
+	// ExecuteC rather than Execute, for the command it hands back — exitCodeFor needs it.
+	cmd, err := newRootCmd(cfg).ExecuteC()
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "knowrag:", err)
-		if errors.Is(err, lock.ErrHeld) {
-			os.Exit(exitLockHeld)
-		}
-		if errors.Is(err, errUsage) {
-			os.Exit(exitUsage)
-		}
-		if errors.Is(err, errInterrupted) {
-			os.Exit(exitInterrupted)
-		}
-		// Everything else answers for its own category, defaulting to "the run broke" for an error
-		// nobody classified (clicmd.CategoryOf). The three sentinels above are checked first because
-		// they predate the categories and carry codes no category maps to.
-		os.Exit(exitFor(clicmd.CategoryOf(err)))
+		os.Exit(exitCodeFor(cmd, err))
 	}
+}
+
+// exitCodeFor decides what the process exits with. It is a function so the whole mapping is
+// assertable without running the binary.
+//
+// The SilenceUsage case is the one worth explaining. Cobra validates flags and arguments before any
+// RunE runs and returns those failures raw — an unknown flag, a missing argument, a mode flag group
+// nobody satisfied — so they arrive with no category on them and would fall through to "the run
+// broke", which tells a scheduler to retry a command line that will fail identically forever. Every
+// RunE in this tree sets SilenceUsage as its first statement, so the flag is still false exactly
+// when cobra refused the command line before reaching one, and that is the signal: cobra printing a
+// usage block and this exiting on the usage code are the same event, decided by the same field.
+func exitCodeFor(cmd *cobra.Command, err error) int {
+	switch {
+	// The three sentinels come first because they predate the categories and carry codes no
+	// category maps to. All three are returned from inside a RunE, where SilenceUsage is already
+	// set, so the case below can never take one of them.
+	case errors.Is(err, lock.ErrHeld):
+		return exitLockHeld
+	case errors.Is(err, errUsage):
+		return exitUsage
+	case errors.Is(err, errInterrupted):
+		return exitInterrupted
+	case cmd != nil && !cmd.SilenceUsage:
+		return exitUsage
+	}
+	return exitFor(clicmd.CategoryOf(err))
 }
 
 // newRootCmd assembles the command tree. It is a function rather than ten lines inside main so a
@@ -101,9 +125,10 @@ func newRootCmd(cfg *config.Config) *cobra.Command {
 		// --tenant and --collection as ordinary flags and searches whatever it is given, including
 		// content marked private, which no MCP client can ask for. Whoever can run this binary with
 		// this configuration can read every tenant in the collection.
-		Long: "knowrag ingests Obsidian vaults into Qdrant, searches what was indexed, and evaluates\n" +
-			"what comes back out. Schema provisioning, ingestion and search are wired up; evaluation\n" +
-			"arrives with its story.\n\n" +
+		Long: "knowrag ingests Obsidian vaults into Qdrant, searches what was indexed, counts what is\n" +
+			"in there, and runs the quality gates over it. The gates are the one part not built yet:\n" +
+			"`eval` exists, names the story that builds each harness, and refuses rather than\n" +
+			"reporting a pass it did not measure.\n\n" +
 			"This is a privileged administrative tool. It accepts any --tenant and any --collection,\n" +
 			"and `search --include-private` reaches notes the MCP server structurally cannot return.\n" +
 			"It therefore uses its own administrative Qdrant credential, " + config.AdminQdrantAPIKeyEnv + ",\n" +
@@ -117,6 +142,13 @@ func newRootCmd(cfg *config.Config) *cobra.Command {
 	root.AddCommand(newSchemaCmd(cfg))
 	root.AddCommand(newIngestCmd(cfg))
 	root.AddCommand(newSearchCmd(cfg))
+	root.AddCommand(newStatsCmd(func(ctx context.Context, tenantID string) (map[string]store.Stats, error) {
+		return readStats(ctx, cfg, tenantID)
+	}))
+	// The two gates, pointed at internal/eval's entry points. Both refuse with eval.ErrNotImplemented
+	// until S10 and S11 build the harnesses behind them; what is fixed here is the call shape and the
+	// exit code, so neither story has to invent one.
+	root.AddCommand(newEvalCmd(cfg, evalModes{golden: eval.RunGolden, isolation: eval.RunIsolation}))
 	// Cobra prints its own message for a bad flag or unknown subcommand; the extra copy Execute
 	// would return here is noise.
 	root.SilenceErrors = true
