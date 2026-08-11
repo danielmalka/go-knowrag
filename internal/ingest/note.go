@@ -26,6 +26,16 @@ type Deps struct {
 	Chunk  chunk.Config
 	Tokens chunk.TokenCounter
 
+	// Vaults is the vault scope of the run: which vaults this batch actually looked at on disk.
+	//
+	// It is not used to select notes — the caller already did that — and exists for one thing only:
+	// bounding the orphan scan (orphans.go). A uid in the index whose vault is not in this list was
+	// never checked against a disk, so its absence from the note set is not evidence of anything.
+	// Empty means the caller declares no scope, and the orphan scan does not run at all rather than
+	// running over everything, because "I did not say" must not read as "all of it" for a comparison
+	// whose output authorizes deletion.
+	Vaults []string
+
 	// UpsertAttempts bounds the retry of a non-confirmed upsert. Zero means one attempt, no retry.
 	//
 	// ponytail: no backoff between attempts. Retrying instantly is worth roughly nothing against a

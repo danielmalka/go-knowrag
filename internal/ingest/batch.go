@@ -21,7 +21,7 @@ func RunBatch(ctx context.Context, d Deps, notes []vault.Note) (Report, error) {
 	// One snapshot for the whole batch instead of one round trip per note. See withPrefetch: it
 	// changes only how current state is read, and degrades to the per-note path if the store cannot
 	// produce a snapshot.
-	d = withPrefetch(ctx, d)
+	d, snapshot, snapshotTaken := withPrefetch(ctx, d)
 	if err := d.Validate(); err != nil {
 		return Report{}, err
 	}
@@ -30,6 +30,21 @@ func RunBatch(ctx context.Context, d Deps, notes []vault.Note) (Report, error) {
 	}
 
 	report := Report{Results: make([]NoteResult, 0, len(notes))}
+
+	// Before the loop, not after, so both sides of the comparison come from the same moment: the
+	// snapshot is the index as this run found it, and the note set is the disk as the scan found it.
+	// Running it afterwards would subtract a start-of-run disk from an index this run had already
+	// rewritten, and the answer to that subtraction describes no point in time at all.
+	//
+	// An earlier version of this comment justified the ordering with the upsert results instead, and
+	// was false for a reason worth keeping: `live` is built from the scanned notes, never from what
+	// the run did to them, so no outcome of the loop can move a uid in or out of it. The ordering is
+	// right; the reason once given for it was not.
+	if snapshotTaken && len(d.Vaults) > 0 {
+		report.Orphans = ScanOrphans(snapshot, liveUIDs(notes), d.Vaults)
+		report.OrphansScanned = true
+	}
+
 	for _, n := range notes {
 		report.Results = append(report.Results, ProcessNote(ctx, d, n))
 	}
@@ -66,6 +81,20 @@ func Orchestrate(ctx context.Context, d Deps, scans ...vault.ScanResult) (Report
 	notes := make([]vault.Note, 0, total)
 	for _, s := range scans {
 		notes = append(notes, s.Notes...)
+	}
+
+	// The scans are the authority on scope, so this is where it is set — not derived from the notes
+	// downstream. A vault whose every note was deleted has zero notes and is still in scope; deriving
+	// the list from the note set would drop it silently, which is precisely the run where the orphan
+	// list matters most.
+	//
+	// Overwritten rather than filled in when empty. Whatever a caller put in Deps.Vaults is a claim
+	// about what was scanned, and the scans are the scan — a caller that disagrees is wrong, and the
+	// way it is wrong authorizes deleting a vault this run never opened. Taking the authoritative
+	// value costs nothing and leaves no version of that mistake reachable.
+	d.Vaults = make([]string, 0, len(scans))
+	for _, s := range scans {
+		d.Vaults = append(d.Vaults, s.Vault)
 	}
 	return RunBatch(ctx, d, notes)
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"strings"
 	"time"
 
@@ -44,6 +45,11 @@ const (
 // instead of hanging it.
 const upsertAttempts = 3
 
+// modeIncremental is the only mode that reaches a Report today: --dry-run returns before
+// ingest.Orchestrate is ever called (see runIngest), so nothing writes "dry-run" into one. The pair
+// becomes real when part A-ii unifies the two paths.
+const modeIncremental = "incremental"
+
 // newIngestCmd builds `ingest`.
 //
 // cfg is read at run time, not at build time, so the command tree assembles and prints its help
@@ -66,11 +72,27 @@ func newIngestCmd(cfg *config.Config) *cobra.Command {
 			"writes nothing: a note whose points are all integral is skipped.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			// From here on every error is a runtime failure — bad config, unreachable service,
-			// a note that breaks the contract — and printing the usage block after it buries the
-			// message that matters. Flag errors happen before this line and still print usage.
+			// Silenced for everything RunE can return, which now includes the two refusals below.
+			// Cobra writes the usage block to stdout, and with --json stdout is the report — a run
+			// refused for a bad flag combination would hand a parser a wall of flag descriptions where
+			// it expected a document. The refusals name the flags they are about, so nothing an
+			// operator needs is lost. Cobra's own parse errors (an unknown flag) never reach this
+			// function, so they keep their usage block.
 			cmd.SilenceUsage = true
-			return runIngest(cmd.Context(), cmd.OutOrStdout(), cfg, opts)
+
+			// Before anything opens a socket or reads a directory: these are refusals about the
+			// command line itself, so the operator hears about them without waiting out a vault scan.
+			//
+			// os.Stdin rather than cmd.InOrStdin(): the question is whether a human is on the other
+			// end, which is a property of the file descriptor, not of the io.Reader cobra hands over.
+			// The prompt goes to stderr for the same reason the usage block is silenced.
+			if err := validateModes(opts); err != nil {
+				return err
+			}
+			if err := confirmPrune(os.Stdin, cmd.ErrOrStderr(), opts); err != nil {
+				return err
+			}
+			return runIngest(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), cfg, opts)
 		},
 	}
 
@@ -78,8 +100,22 @@ func newIngestCmd(cfg *config.Config) *cobra.Command {
 	// text cannot name the configured vaults without breaking `--help` on a host with no config yet.
 	cmd.Flags().StringVar(&opts.vaultFlag, "vault", opts.vaultFlag,
 		fmt.Sprintf("which vault to ingest: a name from KNOWRAG_VAULTS, or %s for all of them", bothVaults))
+	// The second sentence is not decoration. A dry run reads nothing from Qdrant, so it cannot see
+	// the index and cannot know which notes were deleted; an operator who reads a clean dry run as
+	// "no orphans" has been misled by silence. --prune and --json are refused with it for the same
+	// reason (validateModes), until part A-ii gives the dry run the snapshot the real run takes.
 	cmd.Flags().BoolVar(&opts.dryRun, "dry-run", false,
-		"scan and chunk, then stop: report the counts without embedding or writing anything")
+		"scan and chunk, then stop: report the counts without embedding or writing anything. "+
+			"It never reads the index, so it lists no prune candidates — a clean dry run says nothing "+
+			"about deleted notes")
+	cmd.Flags().BoolVar(&opts.prune, "prune", false,
+		"delete the points of notes that no longer exist in the scanned vaults. Destructive and "+
+			"opt-in: without it the orphans are reported and left alone")
+	cmd.Flags().BoolVar(&opts.yes, "yes", false,
+		"authorize --prune without being asked. Required when stdin is not a terminal, where there "+
+			"is nobody to answer the prompt")
+	cmd.Flags().BoolVar(&opts.json, "json", false,
+		"print the run report as JSON on stdout and nothing else; the tokenizer summary moves to stderr")
 	cmd.Flags().StringVar(&opts.tenantID, "tenant", opts.tenantID,
 		"tenant_id every point is written under and filtered by")
 	cmd.Flags().IntVar(&opts.chunkCfg.FloorTokens, "floor-tokens", opts.chunkCfg.FloorTokens,
@@ -95,6 +131,9 @@ func newIngestCmd(cfg *config.Config) *cobra.Command {
 type ingestOptions struct {
 	vaultFlag string
 	dryRun    bool
+	prune     bool
+	yes       bool
+	json      bool
 	tenantID  string
 	chunkCfg  chunk.Config
 }
@@ -123,7 +162,10 @@ func selectVaults(cfg *config.Config, flag string) ([]string, error) {
 	return []string{flag}, nil
 }
 
-func runIngest(ctx context.Context, out io.Writer, cfg *config.Config, opts ingestOptions) error {
+// runIngest takes two writers because --json splits them: out carries whatever a machine is meant
+// to parse, errOut whatever a human reads alongside it. Without --json both are the same stream in
+// practice and every line goes to out, as it always did.
+func runIngest(ctx context.Context, out, errOut io.Writer, cfg *config.Config, opts ingestOptions) error {
 	names, err := selectVaults(cfg, opts.vaultFlag)
 	if err != nil {
 		return err
@@ -212,7 +254,7 @@ func runIngest(ctx context.Context, out io.Writer, cfg *config.Config, opts inge
 	if opts.dryRun {
 		return dryRun(ctx, out, scans, opts.chunkCfg, counted)
 	}
-	return ingestScans(ctx, out, cfg, opts, scans, counted)
+	return ingestScans(ctx, out, errOut, cfg, opts, scans, counted)
 }
 
 // scanVaults turns each selected vault into a ScanResult, with the areas and exclusions the
@@ -308,7 +350,7 @@ func dryRun(
 // with nothing written.
 func ingestScans(
 	ctx context.Context,
-	out io.Writer,
+	out, errOut io.Writer,
 	cfg *config.Config,
 	opts ingestOptions,
 	scans []vault.ScanResult,
@@ -354,13 +396,79 @@ func ingestScans(
 	if err != nil {
 		return err
 	}
+	report.Mode = modeIncremental
 
-	// Printed before the failure check because a run with failures still did whatever it did to the
-	// notes it got through, and the operator needs to see that half.
-	_, _ = fmt.Fprintln(out, report)
-	_, _ = fmt.Fprintln(out, tokens.Snapshot())
+	// The prune runs against the orphan list the batch already computed, from the snapshot it took
+	// before writing anything (batch.go). Confirmed is unconditionally true here because the run
+	// would not have reached this line otherwise — confirmPrune refused, in RunE, before the vaults
+	// were scanned. ingest.Prune re-checks it anyway, for callers that are not this one.
+	//
+	// A run whose snapshot failed is refused rather than pruned, and the empty orphan list is exactly
+	// why the refusal has to be explicit. ingest.Prune over nothing succeeds, removes nothing and
+	// returns 0 (prune.go: the loop body never runs) — so without the guard `--prune --yes` would
+	// exit clean, and an operator reads a clean exit from a command they asked to delete things as
+	// "there was nothing to delete". The human report does say `orphans: not scanned` above it, but a
+	// scheduled run reads the exit code and not the prose. This is the same rule the report itself
+	// follows: not having looked is never allowed to render as having found nothing.
+	// Unconditional, not gated on opts.prune: a candidate whose file is on disk is misreported as a
+	// deleted note whether or not this run deletes it, and the report is what an operator reads
+	// before deciding to pass --prune next time.
+	roots := make(map[string]string, len(scans))
+	for _, s := range scans {
+		roots[s.Vault] = cfg.Vaults[s.Vault].Path
+	}
+	splitStillOnDisk(roots, &report)
+
+	var pruneErr error
+	if opts.prune {
+		pruneErr = pruneOrphans(ctx, points, opts.tenantID, roots, &report)
+	}
+
+	// Printed before the failure checks because a run with failures still did whatever it did to the
+	// notes it got through, and the operator needs to see that half. A prune that died partway
+	// through is the sharpest case: PointsPruned already holds what it removed before it stopped,
+	// and that number is the one thing the next run's operator needs.
+	if err := printReport(out, errOut, opts, report, tokens); err != nil {
+		return err
+	}
+	if pruneErr != nil {
+		return pruneErr
+	}
 	if report.Failed() {
 		return errors.New("the run did not complete: see the failed note(s) above")
+	}
+	return nil
+}
+
+// printReport writes the run report, and with --json it writes nothing else to out: a caller piping
+// stdout into a parser must not have to strip a human line first. The tokenizer summary (D-25) moves
+// to errOut rather than being dropped — an instrument nobody reads is the same as no instrument.
+func printReport(
+	out, errOut io.Writer,
+	opts ingestOptions,
+	report ingest.Report,
+	tokens *chunk.CountingTokenCounter,
+) error {
+	// The write errors are returned rather than discarded, unlike everywhere else in this file that
+	// prints. A closed pipe or a full disk truncates the report mid-object, and with --json a
+	// consumer that got half a document and a zero exit status has been told the run was clean by a
+	// write that did not finish. Fprintln reports a short write as an error, which is the case a
+	// bare `_, _ =` throws away.
+	human := out
+	if opts.json {
+		human = errOut
+		encoded, err := report.JSON()
+		if err != nil {
+			return fmt.Errorf("rendering the run report as JSON: %w", err)
+		}
+		if _, err := fmt.Fprintln(out, string(encoded)); err != nil {
+			return fmt.Errorf("writing the run report: %w", err)
+		}
+	} else if _, err := fmt.Fprintln(out, report); err != nil {
+		return fmt.Errorf("writing the run report: %w", err)
+	}
+	if _, err := fmt.Fprintln(human, tokens.Snapshot()); err != nil {
+		return fmt.Errorf("writing the tokenizer summary: %w", err)
 	}
 	return nil
 }
