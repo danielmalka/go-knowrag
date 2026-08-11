@@ -178,11 +178,34 @@ func TestSearch_RealCorpus_TenantFilterIsServerSide(t *testing.T) {
 }
 
 // assertRealCorpusScope reads the returned points back out of the live collection and checks the
-// three payload fields Result does not carry.
+// payload fields Result does not carry.
 //
 // It is a read-back rather than an extra Result field on purpose: Result's shape is the PRD's
 // (text, breadcrumb, path, score, uid, chunk_index), and widening it so a test can assert on
 // tenant_id would put a field in every consumer's response to serve one assertion.
+//
+// uid alone does not identify a point: the point ID is uuid5(tenant_id + uid + chunk_index), so the
+// same uid legitimately exists under several tenants, and this collection is shared with more than
+// one writer under this repo — internal/ingest's TestIngestRealCorpus_FullRun (NFR-4) writes the
+// whole real corpus into this same collection under its own throwaway tenant and deletes it when it
+// finishes. Reading points back by "uid in (...)" with no tenant condition therefore also fetches
+// whatever that other tenant happens to hold at the moment, and this test would then blame the
+// search for points it never returned. That is not hypothetical: it is exactly what made this
+// assertion flaky under `go test ./...` running packages in parallel.
+//
+// Filtering the read-back to the expected tenant instead would fix the flake but make the tenant
+// check tautological — it could never fail, which this project treats as worse than no test (D-17).
+// So this asks a narrower, still-sound question: for every uid the search returned, does at least
+// one point carrying that uid exist under the expected tenant? A leaked point that only exists under
+// some other tenant fails this — our tenant has no point with that uid. A uid that merely happens to
+// be shared with another tenant (a homonym) passes — ours has it too. That distinguishes a leak from
+// a homonym, which the old blanket "every returned point must carry our tenant_id" could not.
+//
+// This test does not carry the burden of proving tenant isolation — that is
+// TestSearch_RealCorpus_TenantFilterIsServerSide in this file, and TestSearch_Integration_TenantIsolation
+// in internal/retrieval/integration_test.go, both of which control the fixtures on both sides of the
+// boundary. This one only checks that a real-corpus answer is scoped sensibly, given a shared
+// deployment this file does not control.
 func assertRealCorpusScope(t *testing.T, client *qdrant.Client, env realCorpusEnv, results []retrieval.Result) {
 	t.Helper()
 
@@ -196,36 +219,46 @@ func assertRealCorpusScope(t *testing.T, client *qdrant.Client, env realCorpusEn
 	points, err := client.Scroll(t.Context(), &qdrant.ScrollPoints{
 		CollectionName: env.collection,
 		Filter: &qdrant.Filter{
-			Must: []*qdrant.Condition{qdrant.NewMatchKeywords("uid", uids...)},
+			Must: []*qdrant.Condition{
+				qdrant.NewMatchKeywords("uid", uids...),
+				qdrant.NewMatchKeyword("tenant_id", env.tenant),
+			},
 		},
 		Limit:       qdrant.PtrOf(uint32(200)),
-		WithPayload: qdrant.NewWithPayloadInclude("uid", "tenant_id", "status", "visibility"),
+		WithPayload: qdrant.NewWithPayloadInclude("uid", "status", "visibility"),
 		WithVectors: qdrant.NewWithVectors(false),
 	})
 	if err != nil {
 		t.Fatalf("reading the returned points back: %v", err)
 	}
 	if len(points) == 0 {
-		t.Fatal("the read-back found none of the returned uids, so this check proves nothing")
+		t.Fatal("the read-back found none of the returned uids under the expected tenant, so this check proves nothing")
 	}
 
+	seenUnderTenant := make(map[string]bool, len(uids))
 	for _, p := range points {
 		payload := p.GetPayload()
-		if got := payload["tenant_id"].GetStringValue(); got != env.tenant {
-			t.Errorf("point %s came back from a %s search but carries tenant_id %q",
-				p.GetId(), env.tenant, got)
-		}
+		uid := payload["uid"].GetStringValue()
+		seenUnderTenant[uid] = true
+
 		if got := payload["status"].GetStringValue(); got == "archived" {
-			t.Errorf("point %s (uid %s) is archived and was returned by a default search",
-				p.GetId(), payload["uid"].GetStringValue())
+			t.Errorf("point %s (uid %s, tenant %s) is archived and was returned by a default search",
+				p.GetId(), uid, env.tenant)
 		}
 		if got := payload["visibility"].GetStringValue(); got == "private" {
-			t.Errorf("point %s (uid %s) is private and was returned by a default search",
-				p.GetId(), payload["uid"].GetStringValue())
+			t.Errorf("point %s (uid %s, tenant %s) is private and was returned by a default search",
+				p.GetId(), uid, env.tenant)
 		}
 	}
-	t.Logf("read back %d point(s) for the %d returned uid(s): all %s, none archived, none private",
-		len(points), len(uids), env.tenant)
+
+	for _, uid := range uids {
+		if !seenUnderTenant[uid] {
+			t.Errorf("uid %q was returned by a %s search but no point carrying it exists under tenant %q — "+
+				"the search returned a point that belongs to some other tenant", uid, env.tenant, env.tenant)
+		}
+	}
+	t.Logf("read back %d point(s) under tenant %s for the %d returned uid(s): all accounted for, none archived, none private",
+		len(points), env.tenant, len(uids))
 }
 
 func truncate(s string, n int) string {
