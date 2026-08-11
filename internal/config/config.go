@@ -177,18 +177,6 @@ func loadVaults(cfg *Config) error {
 		}
 	}
 
-	// Names first, and nothing else until they are all legal: vaultEnv on a name with a space in it
-	// would look up a variable nobody can set, and report a missing PATH instead of the real fault.
-	var nameErrs []error
-	for _, name := range cfg.VaultNames() {
-		if err := ValidateSlug("vault name", name); err != nil {
-			nameErrs = append(nameErrs, fmt.Errorf("config: %w", err))
-		}
-	}
-	if len(nameErrs) > 0 {
-		return errors.Join(nameErrs...)
-	}
-
 	for name, settings := range cfg.Vaults {
 		for _, f := range vaultFields {
 			if v, ok := os.LookupEnv(vaultEnv(name, f.suffix)); ok {
@@ -198,15 +186,24 @@ func loadVaults(cfg *Config) error {
 		cfg.Vaults[name] = settings
 	}
 
-	var errs []error
-	for _, name := range cfg.VaultNames() {
-		for _, area := range cfg.Vaults[name].AreaNames() {
-			if err := ValidateSlug("area", area); err != nil {
-				errs = append(errs, fmt.Errorf("config: vault %q: %w", name, err))
-			}
-		}
-	}
-	return errors.Join(append(errs, orphanedVaultSettings(cfg, fromFile)...)...)
+	// Slug validation is deliberately *not* here — it lives in RequireVaults, per command. Loading
+	// happens once in main() before any subcommand exists, so a malformed area on a vault this run
+	// never touches would take the whole CLI down with it, `--help` included, and two comments in
+	// cmd/cli say in so many words that the command tree assembles without a valid configuration.
+	// Refusing a bad name is right; refusing to print help because some other vault has a typo is
+	// the same category error Need/Require was built to avoid.
+	//
+	// The cost of moving it is real and named: Load is a chokepoint nobody can forget, RequireVaults
+	// is not. What stands between a malformed area and point_hash is now RequireVaults alone, and a
+	// command that reads Vaults without calling it has no second line of defence.
+	//
+	// It is worth being exact about that, because the comfortable version of this sentence is wrong.
+	// vault.deriveArea lowercases the on-disk folder before comparing, so it does catch an area that
+	// differs from the folder only in case — `Research` against `research/`. It catches nothing else:
+	// measured, `my area`, `nomê`, `nome_vault`, `-nome`, `nome-` and `a--b` all match a folder of
+	// that exact name and are written verbatim into the payload and the hash. Case is the only
+	// malformation with a backstop.
+	return errors.Join(orphanedVaultSettings(cfg, fromFile)...)
 }
 
 // orphanedVaultSettings reports every per-vault setting that belongs to no rostered vault.
@@ -267,7 +264,15 @@ func (c *Config) RequireVaults(names ...string) error {
 	}
 
 	var missing []string
+	var malformed []error
 	for _, name := range slices.Sorted(slices.Values(names)) {
+		// The name before anything derived from it: vaultEnv on a name with a space in it would name
+		// a variable nobody can set, so reporting a missing PATH here would send the operator after
+		// the wrong fault. A vault whose name is illegal has nothing else worth saying about it.
+		if err := ValidateSlug("vault name", name); err != nil {
+			malformed = append(malformed, fmt.Errorf("config: %w", err))
+			continue
+		}
 		settings, ok := c.Vaults[name]
 		if !ok {
 			missing = append(missing, fmt.Sprintf("%s (vault %q is not in it)", vaultsEnv, name))
@@ -278,8 +283,15 @@ func (c *Config) RequireVaults(names ...string) error {
 				missing = append(missing, vaultEnv(name, f.suffix))
 			}
 		}
+		for _, area := range settings.AreaNames() {
+			if err := ValidateSlug("area", area); err != nil {
+				malformed = append(malformed, fmt.Errorf("config: vault %q: %w", name, err))
+			}
+		}
 	}
-	return missingErr(missing)
+	// Joined, not returned at the first fault: a host with one missing path and one mistyped area
+	// should hear both now rather than fix one and rediscover the other on the next run.
+	return errors.Join(append(malformed, missingErr(missing))...)
 }
 
 // Need is the set of settings one command actually consumes.

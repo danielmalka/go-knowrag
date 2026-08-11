@@ -258,8 +258,13 @@ func TestLoad_RejectsNamesThatAreNotSlugs(t *testing.T) {
 			t.Setenv(vaultsEnv, name)
 
 			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() = %v, want no error: a malformed name is refused when a command asks "+
+					"for that vault, not when the binary starts", err)
+			}
+			err = cfg.RequireVaults(name)
 			if err == nil {
-				t.Fatalf("Load() with vault name %q = %+v, want an error", name, cfg)
+				t.Fatalf("RequireVaults(%q) = nil, want an error", name)
 			}
 			assertNamesValueAndFormat(t, err, name)
 		})
@@ -267,15 +272,47 @@ func TestLoad_RejectsNamesThatAreNotSlugs(t *testing.T) {
 		t.Run("area "+name, func(t *testing.T) {
 			clearEnv(t)
 			t.Setenv(vaultsEnv, "pessoal")
-			t.Setenv("KNOWRAG_VAULT_PESSOAL_PATH", "/vaults/Pessoal")
+			t.Setenv("KNOWRAG_VAULT_PESSOAL_PATH", "/vaults/pessoal")
 			t.Setenv("KNOWRAG_VAULT_PESSOAL_AREAS", "00-inbox,"+name)
 
 			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() = %v, want no error: see the vault subtest", err)
+			}
+			err = cfg.RequireVaults("pessoal")
 			if err == nil {
-				t.Fatalf("Load() with area %q = %+v, want an error", name, cfg)
+				t.Fatalf("RequireVaults with area %q = nil, want an error", name)
 			}
 			assertNamesValueAndFormat(t, err, name)
 		})
+	}
+}
+
+// TestLoad_MalformedVaultDoesNotBreakUnrelatedCommands is the operability half of the rule above,
+// and the reason the check moved out of Load at all.
+//
+// Load runs once in main() before any subcommand exists. While it validated every rostered vault,
+// one mistyped area took the whole binary down — including `--help`, and including commands that
+// touch no vault, which cmd/cli/ingest.go and cmd/cli/schema.go both state in comments must keep
+// working without a valid configuration. An operator with several vaults could lose the CLI over a
+// typo in one they were not using, with no way to print the syntax that would fix it.
+func TestLoad_MalformedVaultDoesNotBreakUnrelatedCommands(t *testing.T) {
+	clearEnv(t)
+	t.Setenv(vaultsEnv, "pessoal,trabalho")
+	t.Setenv("KNOWRAG_VAULT_PESSOAL_PATH", "/vaults/pessoal")
+	t.Setenv("KNOWRAG_VAULT_PESSOAL_AREAS", "00-inbox,research")
+	t.Setenv("KNOWRAG_VAULT_TRABALHO_PATH", "/vaults/trabalho")
+	t.Setenv("KNOWRAG_VAULT_TRABALHO_AREAS", "Infra") // the typo, in the vault we will not ask for
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() = %v, want no error", err)
+	}
+	if err := cfg.RequireVaults("pessoal"); err != nil {
+		t.Errorf("RequireVaults(\"pessoal\") = %v, want no error — the fault is in another vault", err)
+	}
+	if err := cfg.RequireVaults("trabalho"); err == nil {
+		t.Error("RequireVaults(\"trabalho\") = nil, want the error naming its malformed area")
 	}
 }
 

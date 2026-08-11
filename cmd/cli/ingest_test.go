@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -36,7 +37,7 @@ func TestSelectVaults(t *testing.T) {
 		if err != nil {
 			t.Fatalf("selectVaults(%q): %v", bothVaults, err)
 		}
-		if want := cfg.VaultNames(); !slicesEqual(got, want) {
+		if want := cfg.VaultNames(); !slices.Equal(got, want) {
 			t.Errorf("selectVaults(%q) = %v, want %v", bothVaults, got, want)
 		}
 	})
@@ -108,16 +109,43 @@ func TestSelectVaults_VaultNamedBoth_RefusesEveryRun(t *testing.T) {
 	}
 }
 
-func slicesEqual(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
+// TestRunIngest_MalformedArea_RefusedBeforeAnythingIsScanned is where the slug rule has to hold now
+// that it no longer runs in config.Load: RequireVaults is the last thing between a malformed name
+// and point_hash, and runIngest is what has to call it.
+//
+// The area here has a space, deliberately, and not an uppercase letter. Case is the one malformation
+// vault.deriveArea would catch on its own, by lowercasing the folder before comparing — so a test
+// written with `Research` would pass even if this check were deleted, and prove nothing. `my area`
+// matches a folder of that exact name and is written verbatim into the payload and the hash.
+//
+// Refused *before* scanning matters too: a run that scanned first would report note counts, then
+// fail, and the counts would read like progress.
+func TestRunIngest_MalformedArea_RefusedBeforeAnythingIsScanned(t *testing.T) {
+	cfg := &config.Config{
+		EmbedderEndpoint: tokenizeStub(t),
+		Vaults: map[string]config.VaultSettings{
+			"trabalho": {Path: writeVault(t, map[string]string{
+				"my area/uma.md": note("0198a7f2-4b31-7c42-9e15-3d8a92c47b03", "Uma"),
+			}), Areas: "my area"},
+		},
 	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
+
+	var out bytes.Buffer
+	err := runIngest(context.Background(), &out, cfg, ingestOptions{
+		vaultFlag: "trabalho",
+		dryRun:    true,
+		tenantID:  defaultTenantID,
+		chunkCfg:  chunk.Config{FloorTokens: defaultFloorTokens, CeilingTokens: defaultCeilingTokens},
+	})
+	if err == nil {
+		t.Fatalf("runIngest with area %q = nil, want an error; output was %q", "my area", out.String())
 	}
-	return true
+	if !strings.Contains(err.Error(), "my area") {
+		t.Errorf("error %q does not name the offending area", err)
+	}
+	if out.Len() != 0 {
+		t.Errorf("runIngest wrote %q before refusing; nothing should be reported for a run that never starts", out.String())
+	}
 }
 
 // TestIngestCmd_RegistersItsFlags proves the flags were actually registered rather than only
