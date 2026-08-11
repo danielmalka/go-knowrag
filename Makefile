@@ -5,8 +5,16 @@
 # once and both agree.
 KNOWRAG_PYTHON ?= python3
 
+# -race is on here and not only in a developer's habit, because this is the target CI runs. Every
+# concurrency defect this repo has shipped so far was found by a person choosing to type `-race`;
+# the detector is worth nothing on the runs nobody remembers to ask for. It costs a few seconds on
+# a suite that finishes in twelve.
+#
+# What it does not cover is worth naming next to it: the detector sees shared memory inside one
+# process. Two `knowrag ingest` runs against the same scope are two processes and one Qdrant, and
+# this flag will stay green through all of it (D-31).
 test:
-	go test ./...
+	go test -race ./...
 
 # The coverage number S07's acceptance criterion names (≥80% for internal/retrieval, error paths
 # included). It runs the same hermetic suite as `test` above and then prints the per-function
