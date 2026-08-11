@@ -264,6 +264,7 @@ func ingestOnce(t *testing.T, cfg *config.Config, tenant string) (ingest.Report,
 	embedder, err := embed.NewServiceEmbedder(embed.Profile{
 		Endpoint:      cfg.EmbedderEndpoint,
 		Timeout:       2 * time.Minute,
+		VerifyTimeout: 30 * time.Second,
 		BatchSize:     32,
 		MaxConcurrent: 2,
 		MaxRetries:    3,

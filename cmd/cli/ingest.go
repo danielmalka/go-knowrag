@@ -373,8 +373,15 @@ func ingestScans(
 // settings when a deployment does.
 func embedProfile(endpoint string) embed.Profile {
 	return embed.Profile{
-		Endpoint:      endpoint,
-		Timeout:       2 * time.Minute,
+		Endpoint: endpoint,
+		Timeout:  2 * time.Minute,
+		// The handshake happens once, at startup, with nothing waiting on it. Nothing here is urgent
+		// enough to justify a tighter bound: an ingestion is a 30-minute contract (NFR-4), so 30 s
+		// spent confirming beats starting a run against a backend nobody checked. A service that is
+		// merely still coming up does not consume this — it refuses the connection instantly, since
+		// it binds its socket only after the model is loaded — so what the budget covers is a wedged
+		// backend. The MCP search path is where this number has to be small, for its own reason.
+		VerifyTimeout: 30 * time.Second,
 		BatchSize:     32,
 		MaxConcurrent: 2,
 		MaxRetries:    3,

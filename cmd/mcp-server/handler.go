@@ -42,8 +42,12 @@ const (
 // search that still answered, and only past 10 s is it reported as an outage.
 //
 // It has one constraint, and moving it means rechecking that constraint: it must stay above the
-// embedder's own worst case (embedProfile in main.go: 2 attempts of 4 s plus 0,25 s of backoff =
-// 8,25 s). A deadline that can fire mid-retry silently shortens MaxRetries, so a blip the retry
+// embedder's own worst case, which is two legs and not one (embedProfile in main.go: a 1,5 s
+// verification, then 2 attempts of 4 s plus 0,25 s of backoff = 9,75 s). The verification leg joined
+// it with D-33, when the first search of every process became the one that confirms the backend, and
+// the number here did not move because 9,75 s still fits — TestSearchDeadline_ExceedsTheEmbedderBudget
+// is what checks that, and it counts both legs since it once counted only this one and stayed green
+// while the real total was 12,25 s. A deadline that can fire mid-retry silently shortens MaxRetries, so a blip the retry
 // would have absorbed is reported as an outage instead, and the error that comes back says only
 // "deadline exceeded" rather than carrying the last transport failure an operator needs to read.
 // Naming the right component is no longer at stake there — embed.outerCtxErr makes a deadline-killed

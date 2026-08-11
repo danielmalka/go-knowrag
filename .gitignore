@@ -15,3 +15,6 @@ internal/schema/applied_state.json.tmp-*
 /mcp-server
 /cli
 /knowrag
+
+# Worktrees criados por subagentes: repositórios git próprios, efêmeros, e nunca conteúdo deste.
+.claude/worktrees/

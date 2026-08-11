@@ -82,31 +82,37 @@ func TestVerifyEmbedder_DivergentBackend_RefusesToStart(t *testing.T) {
 	}
 }
 
-// TestVerifyEmbedder_BootBudget_OutlastsAModelLoad is the bound this check actually runs under, and
-// it is asserted at the wire because that is the only place it is visible. Handshake installs its
-// profile's Timeout on top of the context it is handed, so a caller that "gave boot 30 s" by wrapping
-// the context in a deadline gets min(30 s, profile) and no error saying which won.
+// TestVerifyEmbedder_BootBudget_IsNotTheSearchBudget is the bound this check actually runs under,
+// and it is asserted at the wire because that is the only place it is visible. Handshake installs its
+// profile's verification budget on top of the context it is handed, so a caller that "gave boot 30 s"
+// by wrapping the context in a deadline gets min(30 s, profile) and no error saying which won. That
+// is D-32: the ceiling this check was documented to have was one another file silently overrode.
 //
-// The floor is the failure it prevents: BGE-M3 takes ~11 s to load warm (ADR-001 §6.2), and a check
-// that gave up before that would classify the slow answer as an outage, warn, and skip itself —
-// silently, on precisely the cold start where this process and the service come up together, which
-// is the likeliest boot there is.
-func TestVerifyEmbedder_BootBudget_OutlastsAModelLoad(t *testing.T) {
+// It was called _OutlastsAModelLoad and asserted a floor of 11 s "because BGE-M3 takes that long to
+// load warm". That reason was wrong and the assertion was measuring nothing real: the service loads
+// the model before it binds its socket (scripts/embedder-service/server.py, main()), so a service
+// still coming up refuses instantly rather than answering slowly. No budget makes a loading service
+// distinguishable from an absent one. What remains true — and is what this now pins — is that boot
+// must not be bounded by a number chosen for how long an agent waits for a search.
+//
+// The floor is kept, at the search path's own verification budget rather than at an invented
+// duration, so it still catches a boot budget quietly shrunk to search scale.
+func TestVerifyEmbedder_BootBudget_IsNotTheSearchBudget(t *testing.T) {
 	tr := &stubTransport{info: embed.Expected()}
 	if err := verifyEmbedder(context.Background(), testConfig(), tr); err != nil {
 		t.Fatalf("a backend matching every pin was refused: %v", err)
 	}
 
-	if search := embedProfile(testConfig().EmbedderEndpoint).Timeout; tr.budget <= search {
+	search := embedProfile(testConfig().EmbedderEndpoint)
+	if tr.budget <= search.Timeout {
 		t.Errorf("the boot check ran on %v, the search path's per-attempt budget of %v or less: "+
-			"a number tuned for how long an agent waits for an answer is bounding startup", tr.budget, search)
+			"a number tuned for how long an agent waits for an answer is bounding startup",
+			tr.budget, search.Timeout)
 	}
-	// 11 s is the measured warm load, not a round number: a budget under it makes a booting service
-	// indistinguishable from a missing one.
-	if tr.budget < 11*time.Second {
-		t.Errorf("the boot check ran on %v, less than the ~11 s BGE-M3 takes to load: a backend that "+
-			"is merely still loading would come back as an outage and the verification would be skipped",
-			tr.budget)
+	if tr.budget <= search.VerifyTimeout {
+		t.Errorf("the boot check ran on %v, no more than the %v the search path allows itself for the "+
+			"same handshake: the two exist precisely because one happens inside a request someone is "+
+			"waiting on and the other does not", tr.budget, search.VerifyTimeout)
 	}
 }
 
@@ -125,12 +131,14 @@ func TestVerifyEmbedder_UnreachableBackend_StartsAnyway(t *testing.T) {
 	// The operator half: the check did not run, and the log has to say so. A server that silently
 	// skipped it is back to the state D-32 describes, only with a different reason.
 	//
-	// "never again" and the restart are in that list because they are what an operator would
-	// otherwise assume the other way round: a warning about a service being down reads as something
-	// that resolves itself when the service comes back, and this one does not.
+	// The recovery sentence is in that list for the reason its predecessor was: an operator reads a
+	// warning and decides what to do about it. This list asserted "never again" and "restart" while
+	// that was the truth; since D-33 the truth is that the search path checks for itself, and the
+	// operator's correct action is nothing. A stale instruction to restart is worse than none — it
+	// spends someone's attention on a step that changes no outcome.
 	for _, want := range []string{
 		"could not confirm", "starting unverified", "connection refused",
-		"never again", "restart", testConfig().EmbedderEndpoint,
+		"before it embeds anything", "No restart is needed", testConfig().EmbedderEndpoint,
 	} {
 		if !strings.Contains(logged.String(), want) {
 			t.Errorf("the startup warning omits %q:\n%s", want, logged.String())
@@ -141,36 +149,51 @@ func TestVerifyEmbedder_UnreachableBackend_StartsAnyway(t *testing.T) {
 	}
 }
 
-// TestVerifyEmbedder_SkippedCheck_IsNeverRetried states the residual this change leaves behind, so
-// that it is a decision on record rather than something a reader has to infer from the absence of
-// code. The check runs once: no retry inside the call, no goroutine, no re-verification on the first
-// search. An embedder that comes back on a different revision after a skipped boot check is never
-// caught, and the searches that follow look perfectly healthy.
+// TestVerifyEmbedder_SkippedCheck_DoesNotExemptTheSearchPath is D-33, from the side that pays for
+// it. It is the same scenario an earlier version of this test declared unfixable, and the assertion
+// is now the opposite one.
 //
-// Widening this — a lazy re-check on first search, a ticker — is the registered follow-up and not
-// this change. Whoever builds it will land here first, which is the point.
-func TestVerifyEmbedder_SkippedCheck_IsNeverRetried(t *testing.T) {
+// The sequence: the embedding service is being updated — stop, swap, start — and the MCP client
+// relaunches its server during the stop. The startup check cannot reach the backend and the server
+// starts anyway, which is correct (D-21). The backend then comes back on a *different* revision.
+//
+// What must not happen is the process serving that backend for the rest of its life on the strength
+// of a check that never ran. The embedder the searches actually go through is the subject here, and
+// it is obtained from newSearchEmbedder rather than rebuilt locally: a test that constructs its own
+// would keep passing after run() stopped building this one.
+func TestVerifyEmbedder_SkippedCheck_DoesNotExemptTheSearchPath(t *testing.T) {
 	captureLogs(t)
-	down := &stubTransport{err: errors.New("dial tcp 127.0.0.1:8080: connect: connection refused")}
+	cfg := testConfig()
+	backend := &stubTransport{err: errors.New("dial tcp 127.0.0.1:8080: connect: connection refused")}
 
-	if err := verifyEmbedder(context.Background(), testConfig(), down); err != nil {
+	if err := verifyEmbedder(context.Background(), cfg, backend); err != nil {
 		t.Fatalf("an unreachable embedder aborted startup: %v", err)
 	}
 	// One attempt, not two: bootProfile sets MaxRetries to 1 and Handshake makes exactly one request
-	// per call, so a second ask here means something re-verified.
-	if down.infoCalls != 1 {
-		t.Errorf("the skipped check was retried: the backend was asked %d times, want exactly 1", down.infoCalls)
+	// per call, so a second ask *here* would mean the boot check itself retried.
+	if backend.infoCalls != 1 {
+		t.Fatalf("the boot check was retried: the backend was asked %d times, want exactly 1", backend.infoCalls)
 	}
 
-	// The server serves searches afterwards without the handshake ever being asked again. The
-	// searcher is a fake, so what this pins is that nothing in this package's request path reaches
-	// for the handshake — which is what makes the skip total rather than deferred.
-	cs := connect(t, testConfig(), &fakeSearcher{results: sampleResults()})
-	if res := callRaw(t, cs, `{"query":"anything"}`); res.IsError {
-		t.Fatalf("the call failed: %s", resultText(t, res))
+	embedder, err := newSearchEmbedder(cfg, backend)
+	if err != nil {
+		t.Fatalf("newSearchEmbedder: %v", err)
 	}
-	if down.infoCalls != 1 {
-		t.Errorf("a search re-ran the handshake: the backend was asked %d times, want exactly 1", down.infoCalls)
+
+	// The service comes back, on another commit.
+	backend.err = nil
+	backend.info = embed.Expected()
+	backend.info.ModelRevision = "some-other-commit"
+
+	_, err = embedder.EmbedQuery(context.Background(), "anything")
+	if !errors.Is(err, embed.ErrHandshake) {
+		t.Fatalf("a search embedded through an unconfirmed backend that had changed revision: err = %v, "+
+			"want embed.ErrHandshake — a skipped boot check must not grant a free pass for the life "+
+			"of the process (D-33)", err)
+	}
+	if backend.infoCalls != 2 {
+		t.Errorf("the backend was asked %d times, want 2: one boot check that could not reach it, and "+
+			"one the search path ran for itself", backend.infoCalls)
 	}
 }
 

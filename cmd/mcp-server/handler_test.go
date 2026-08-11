@@ -578,8 +578,18 @@ func (hangingTransport) Embed(ctx context.Context, _ []string, _ embed.Kind) ([]
 	return nil, ctx.Err()
 }
 
+// Info answers correctly and instantly, and that is load-bearing rather than convenient.
+//
+// It used to return an error, which was harmless while nothing verified before embedding. Since
+// D-33 every embedder handshakes before its first embed, so an erroring Info makes the search fail
+// *there* — instantly, with a handshake error — and the hang below is never reached. The test would
+// still pass, for a reason its own name and comment do not describe, and the mid-retry deadline path
+// it exists to cover would quietly stop being exercised.
+//
+// Found in review of D-33, and it is the same defect this file's tests are about: a check that
+// still passes while no longer touching the thing it was written for.
 func (hangingTransport) Info(context.Context) (embed.BackendHandshakeInfo, error) {
-	return embed.BackendHandshakeInfo{}, errors.New("hangingTransport: no handshake")
+	return embed.Expected(), nil
 }
 
 type deadExecutor struct{}
@@ -604,9 +614,20 @@ func TestSearchKnowledge_EmbedderHangs_NamesTheEmbedderNotQdrant(t *testing.T) {
 	logged := captureLogs(t)
 	cs := connect(t, testConfig(), hangingEmbedder(t))
 
+	start := time.Now()
 	res := callRaw(t, cs, `{"query":"anything"}`)
+	elapsed := time.Since(start)
 	if !res.IsError {
 		t.Fatalf("an embedder that never answered produced a success result: %s", resultText(t, res))
+	}
+	// The call has to have actually waited out the deadline. Every assertion below passes just as
+	// well on an error raised instantly for some other reason — which is exactly what happened when
+	// D-33 put a handshake in front of the embedding and hangingTransport.Info was still returning an
+	// error: the search failed at the handshake, in microseconds, and this test kept its green tick
+	// while no longer touching the hang it is named after.
+	if elapsed < searchDeadline {
+		t.Fatalf("the search failed after %v, before the %v deadline could fire: nothing hung, so this "+
+			"test is no longer exercising the deadline-during-retry path it exists for", elapsed, searchDeadline)
 	}
 	msg := resultText(t, res)
 
@@ -626,16 +647,23 @@ func TestSearchKnowledge_EmbedderHangs_NamesTheEmbedderNotQdrant(t *testing.T) {
 	}
 }
 
-// TestSearchDeadline_ExceedsTheEmbedderBudget pins the ordering the two timeouts have to keep. A
+// TestSearchDeadline_ExceedsTheEmbedderBudget pins the ordering the timeouts have to keep. A
 // search deadline that could fire while ServiceEmbedder was still retrying would silently shorten
 // MaxRetries — a transient blip the retry absorbs would surface as an outage — and the error would
 // carry only "deadline exceeded" instead of the transport failure underneath it. A real constraint
-// between two numbers in two files, not a tautology about arithmetic.
+// between numbers in two files, not a tautology about arithmetic.
+//
+// The verification leg is counted here, and leaving it out was a real hole rather than an oversight
+// of style: D-33 put a handshake in front of the first embedding of every process, this test kept
+// comparing only the retry budget against the deadline, and it stayed green while the actual
+// first-call worst case had grown to 12,25 s against a 10 s bound. A budget test that omits one of
+// the legs is worse than none — it certifies the number it forgot to add.
 func TestSearchDeadline_ExceedsTheEmbedderBudget(t *testing.T) {
 	p := embedProfile("http://embedder.internal:8080")
 
-	// Every attempt runs its full timeout, and backoff doubles from 250 ms between them.
-	budget := time.Duration(p.MaxRetries) * p.Timeout
+	// The first call of a process pays both legs: one handshake, then the retry loop. Every attempt
+	// runs its full timeout, and backoff doubles from 250 ms between them.
+	budget := p.VerifyTimeout + time.Duration(p.MaxRetries)*p.Timeout
 	delay := 250 * time.Millisecond
 	for range p.MaxRetries - 1 {
 		budget += delay
@@ -643,9 +671,10 @@ func TestSearchDeadline_ExceedsTheEmbedderBudget(t *testing.T) {
 	}
 
 	if budget >= searchDeadline {
-		t.Errorf("the embedder can spend up to %v before giving up, but the search deadline is %v: "+
-			"the deadline would cut the retry loop short and MaxRetries would be a lie",
-			budget, searchDeadline)
+		t.Errorf("the first search of a process can spend up to %v before giving up (a %v handshake "+
+			"plus %d attempts of %v with backoff), but the search deadline is %v: the deadline would "+
+			"cut the retry loop short and MaxRetries would be a lie",
+			budget, p.VerifyTimeout, p.MaxRetries, p.Timeout, searchDeadline)
 	}
 }
 

@@ -33,6 +33,21 @@ type Profile struct {
 	// one try and no retry. Named as the story names it (S04 T5) rather than renamed here, where
 	// the mismatch with its own acceptance criterion would be worse than the awkward word.
 	MaxRetries int `yaml:"max_retries"`
+	// VerifyTimeout bounds the handshake, and it is a separate number from Timeout because the two
+	// answer to different budgets.
+	//
+	// Timeout is per embedding attempt and is sized against how long inference takes. The handshake
+	// does no inference — it reads static configuration off an already-loaded model — so on a healthy
+	// service it is the cheapest call this client makes. What it has to survive is the opposite of
+	// slow work: a backend that accepts the connection and then does not answer. A caller verifying
+	// at startup can wait that out; a caller verifying inside a request someone is waiting on cannot,
+	// and what it can afford is whatever its own deadline has left after the embedding it still owes.
+	//
+	// One field, two callers, two answers: cmd/mcp-server's boot check sets 30 s and its search path
+	// sets 1,5 s. Before this existed, Handshake used Timeout and the search path's first verification
+	// could spend 4 s of a 10 s deadline budgeted for an 8,25 s embedding leg — 12,25 s of work inside
+	// a 10 s bound (D-33, found by review).
+	VerifyTimeout time.Duration `yaml:"verify_timeout"`
 }
 
 // Validate rejects a profile that cannot describe a working client, at construction time rather
@@ -55,6 +70,12 @@ func (p Profile) Validate() error {
 	if p.MaxRetries <= 0 {
 		return fmt.Errorf("embed profile: MaxRetries = %d, must be at least 1 (it counts attempts, "+
 			"not extra attempts)", p.MaxRetries)
+	}
+	if p.VerifyTimeout <= 0 {
+		return fmt.Errorf("embed profile: VerifyTimeout = %v, must be positive; it bounds the "+
+			"handshake, which every embedder now runs before its first embedding, and a zero here "+
+			"would be an unbounded call inside whatever request happened to trigger it",
+			p.VerifyTimeout)
 	}
 	return nil
 }

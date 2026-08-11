@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/danielmalka/go-knowrag/internal/schema"
@@ -41,11 +42,38 @@ type Transport interface {
 //
 // It is safe for concurrent use, as both its callers need: S06a embeds batches while S07 serves
 // queries, and neither owns the other's client.
+//
+// It also refuses to embed anything through a backend it has not confirmed. See ensureVerified.
 type ServiceEmbedder struct {
 	profile   Profile
 	transport Transport
 	expected  BackendHandshakeInfo
 	backoff   time.Duration
+
+	// verified latches at the first successful Handshake and never clears. verifyGate serialises the
+	// attempts: whoever holds the single slot is handshaking, and everyone else waits.
+	//
+	// The pair rather than a sync.Once because Once latches failure too, and a failed handshake is
+	// exactly the state that must be retried: the case this exists for is a backend that was down
+	// when the process started and came back afterwards (D-33). Once would answer "already done" for
+	// the rest of the process's life, which is the bug, not the fix.
+	//
+	// A one-slot channel rather than a sync.Mutex because the wait has to be abandonable. A mutex
+	// cannot be acquired with a deadline, so a caller whose own context died went on queuing for a
+	// lock it no longer had any use for, and then walked out of the wait holding a dead context —
+	// which is how a cancelled call used to reach the fan-out and come back with zero vectors and no
+	// error. Selecting on the caller's context makes giving up the caller's own decision.
+	//
+	// What this does not do is share one attempt's verdict. On success it is moot: everyone queued
+	// behind the winner re-checks the latch and makes no call. On failure each caller still waiting
+	// runs its own handshake in turn, so a wedged backend is asked once per waiting caller rather
+	// than once — bounded now by each caller's patience rather than unbounded. Deduplicating the
+	// failed attempt needs an in-flight generation to distinguish "queued behind this attempt" from
+	// "arrived after it", and it has to refuse to share a verdict that came from the initiator's own
+	// cancellation rather than from the backend. That is more machinery than the latency it saves in
+	// a state where every one of those callers is failing anyway.
+	verified   atomic.Bool
+	verifyGate chan struct{}
 }
 
 var _ Embedder = (*ServiceEmbedder)(nil)
@@ -59,7 +87,13 @@ func NewServiceEmbedder(p Profile, t Transport) (*ServiceEmbedder, error) {
 	if t == nil {
 		return nil, errors.New("embed: transport is nil; use NewHTTPTransport(profile.Endpoint)")
 	}
-	return &ServiceEmbedder{profile: p, transport: t, expected: Expected(), backoff: defaultBackoff}, nil
+	return &ServiceEmbedder{
+		profile:    p,
+		transport:  t,
+		expected:   Expected(),
+		backoff:    defaultBackoff,
+		verifyGate: make(chan struct{}, 1),
+	}, nil
 }
 
 // ModelID reports the revision this build is pinned to, and reads nothing from the profile — there
@@ -96,6 +130,9 @@ func (e *ServiceEmbedder) embed(ctx context.Context, texts []string, kind Kind) 
 	if err := ctx.Err(); err != nil {
 		return nil, outerCtxErr(e.profile.Endpoint, err)
 	}
+	if err := e.ensureVerified(ctx); err != nil {
+		return nil, err
+	}
 
 	// Cancelled as soon as one sub-batch fails: the call is already doomed, and letting the other
 	// requests run would keep the GPU busy producing results nobody will ever see.
@@ -119,6 +156,24 @@ func (e *ServiceEmbedder) embed(ctx context.Context, texts []string, kind Kind) 
 			case sem <- struct{}{}:
 				defer func() { <-sem }()
 			case <-runCtx.Done():
+				// Recording the reason is the whole point of this branch existing rather than a
+				// bare return. A sub-batch that gives up here writes nothing into its slice of
+				// out, and out was allocated full of zero Embeddings — so a silent return left
+				// firstErr nil and handed the caller a vector of zeros as a *successful* result.
+				// A zero query vector searches the collection and comes back with plausible
+				// nonsense, which is the one failure nothing downstream can detect.
+				//
+				// It is guarded on the caller's context rather than runCtx's because the other way
+				// this branch fires is a sibling sub-batch that already failed and cancelled: that
+				// path sets firstErr before it cancels, so there is nothing to record and its more
+				// specific error must not be overwritten.
+				if cErr := ctx.Err(); cErr != nil {
+					mu.Lock()
+					if firstErr == nil {
+						firstErr = outerCtxErr(e.profile.Endpoint, cErr)
+					}
+					mu.Unlock()
+				}
 				return
 			}
 
@@ -138,6 +193,65 @@ func (e *ServiceEmbedder) embed(ctx context.Context, texts []string, kind Kind) 
 		return nil, firstErr
 	}
 	return out, nil
+}
+
+// ensureVerified makes "the backend was confirmed" a precondition of embedding rather than a
+// courtesy the caller is trusted to have performed.
+//
+// Handshake's contract already said it must be called once before the first embedding, and both
+// callers do call it — but a contract enforced by documentation only holds while every path keeps
+// it. cmd/mcp-server's did not, in the specific way that made D-32 possible, and the fix for D-32
+// left one window open behind it (D-33): the startup check is allowed to be *skipped* when the
+// backend is unreachable, because refusing to boot through an outage is the thing D-21 exists to
+// prevent. A skipped check used to mean unverified for the life of the process, and the sequence
+// that produces it is ordinary — restarting the embedding service is stop, swap, start, and an MCP
+// client relaunches its server whenever it likes, including during the stop.
+//
+// So the guarantee moves here, where every caller gets it: nothing is embedded through a backend
+// this embedder has not confirmed, and if the confirmation has not happened yet it happens now.
+//
+// Three consequences worth stating, because each is a choice:
+//
+//   - A caller that already handshook pays nothing. Handshake sets the same latch, so cmd/cli's
+//     explicit call at startup — whose return value it needs anyway, for point_hash — leaves this
+//     as one atomic load per batch.
+//   - A failed verification does not latch, so the next call tries again. That is the whole point:
+//     the backend that was down at boot is expected to come back.
+//   - The handshake is bounded by profile.VerifyTimeout, not by profile.Timeout, and it happens
+//     inside the caller's call. A caller whose own deadline is tight sets a tight one; a caller
+//     verifying at startup sets a generous one. Either way a failure here is reported as an outage
+//     and the next call tries again, which is the right answer while the answer is unknown.
+//
+// It is deliberately not a fourth thing: it does not re-verify periodically. A backend that swapped
+// revisions *after* a successful handshake is not covered here and never was — that is the same
+// window every long-lived client of a mutable service has, and closing it needs a mechanism (a
+// generation token on the wire) that neither side has today.
+func (e *ServiceEmbedder) ensureVerified(ctx context.Context) error {
+	if e.verified.Load() {
+		return nil
+	}
+
+	// The wait is abandonable: a caller whose deadline has already passed has no use for a slot it
+	// would only walk out of with a dead context, and nothing after this point would have caught it.
+	select {
+	case e.verifyGate <- struct{}{}:
+		defer func() { <-e.verifyGate }()
+	case <-ctx.Done():
+		return outerCtxErr(e.profile.Endpoint, ctx.Err())
+	}
+
+	// Re-checked once inside: everything queued behind the caller that just succeeded would
+	// otherwise handshake again, one after another, for no answer that is not already known.
+	if e.verified.Load() {
+		return nil
+	}
+
+	if _, err := e.Handshake(ctx); err != nil {
+		return fmt.Errorf("%w: nothing was embedded — this backend has not been confirmed to serve "+
+			"the configuration the index was built with, and embedding through an unconfirmed one is "+
+			"how a wrong vector space stays invisible", err)
+	}
+	return nil
 }
 
 // embedSubBatch performs one request-with-retries and writes its validated results into dst.

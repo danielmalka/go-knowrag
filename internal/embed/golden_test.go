@@ -68,7 +68,7 @@ func liveEmbedder(t testing.TB) *ServiceEmbedder {
 		t.Fatalf("NewHTTPTransport: %v", err)
 	}
 	e, err := NewServiceEmbedder(Profile{
-		Endpoint: endpoint, Timeout: 30 * time.Second, BatchSize: 32,
+		Endpoint: endpoint, Timeout: 30 * time.Second, VerifyTimeout: 30 * time.Second, BatchSize: 32,
 		// The service serializes inference behind a lock (one CUDA model is not concurrency-safe),
 		// so more than one request in flight buys queueing, not throughput.
 		MaxConcurrent: 1, MaxRetries: 3,

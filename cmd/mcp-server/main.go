@@ -76,7 +76,7 @@ func run() error {
 		return err
 	}
 
-	embedder, err := embed.NewServiceEmbedder(embedProfile(cfg.EmbedderEndpoint), transport)
+	embedder, err := newSearchEmbedder(cfg, transport)
 	if err != nil {
 		return err
 	}
@@ -87,22 +87,58 @@ func run() error {
 	return newServer(cfg, searcher).Run(ctx, &mcp.StdioTransport{})
 }
 
-// bootHandshakeTimeout is the whole budget of the startup check, and it is the profile's Timeout
-// rather than a deadline on the context because that is the only place it would survive: Handshake
-// installs profile.Timeout on top of whatever context it is handed (internal/embed/handshake.go),
-// so the effective bound is the smaller of the two and no outer deadline can widen it.
+// newSearchEmbedder builds the embedder every search goes through. It is a function only so that a
+// test can assert against the object run() actually serves with, rather than against one it built
+// itself from the same two lines — which would pass just as happily after run() stopped building
+// this one.
 //
-// It therefore cannot be embedProfile's 4 s. That number is derived from searchDeadline and from how
-// long a query waits behind a batch on the GPU, and a backend that is merely still loading answers
-// well past it: BGE-M3 takes ~11 s warm (ADR-001 §6.2, quoted in embed.ServiceEmbedder's own doc).
-// Boot and a cold service coming up together is the *likeliest* moment for this process to start, and
-// under a 4 s bound the slow answer comes back as ErrBackend — classified as an outage, warned about,
-// and skipped. The check would exist and never run.
+// It is a second ServiceEmbedder over the same transport, distinct from the one verifyEmbedder
+// makes, and the two are separate because their budgets are: 30 s of boot is the wrong bound for a
+// query someone is waiting on, and 1,5 s of query is the wrong bound for a check nobody is waiting
+// on that may have to outlast a wedged backend (bootHandshakeTimeout). The
+// cost of that split is one extra /info round trip against a warm local service on the first search
+// after a verified boot — the embedder confirms for itself rather than inheriting a verdict from an
+// object it has no reference to (D-33). Measured in milliseconds, once per process.
+func newSearchEmbedder(cfg Config, transport embed.Transport) (*embed.ServiceEmbedder, error) {
+	return embed.NewServiceEmbedder(embedProfile(cfg.EmbedderEndpoint), transport)
+}
+
+// bootHandshakeTimeout is the whole budget of the startup check, and it lives in the profile
+// (Profile.VerifyTimeout) rather than in a deadline on the context because that is the only place it
+// would survive: Handshake installs its profile's verification budget on top of whatever context it
+// is handed (internal/embed/handshake.go), so the effective bound is the smaller of the two and no
+// outer deadline can widen it.
 //
-// 30 s is that load plus most of two more. Its cost is stated rather than hidden: a backend that
-// black-holes the connection instead of refusing it stalls boot for 30 s. That is the rare case —
-// a service not listening yet refuses instantly — and a slow boot is visible, while a skipped
-// verification is exactly the silence D-32 is about.
+// It is not the search path's number, and that separation is the whole of D-32's fix: a budget
+// derived from how long an agent waits for an answer has no business bounding startup.
+//
+// What it buys is a service that accepts the connection and then does not answer. There are three
+// such states and none of them is a model load: a burst that fills the accept queue (server.py never
+// raises request_queue_size off the stdlib default of 5), the GIL under contention, and MemoryHigh=4G
+// in the unit throttling the process through reclaim without killing it. "Caught mid-shutdown" is
+// deliberately not in that list, though an earlier draft of this comment said it: server.py installs
+// no SIGTERM handler and has no drain, so the process dies with its socket rather than lingering with
+// one open. Nothing else, and the correction matters because this
+// comment used to claim otherwise. It said a service still loading its weights "answers well past"
+// 4 s, and that a short bound would misread the slow answer as an outage. There is no slow answer:
+// scripts/embedder-service/server.py loads the model and only then binds the socket (its main() calls
+// load_model before ThreadingHTTPServer), so a service that is still coming up refuses the connection
+// instantly. No timeout distinguishes it from a service that is not there, and none needs to — both
+// are correctly reported as unreachable, at once, and the search path confirms for itself later
+// (D-33). Found in review on 2026-08-11, one day after the comment shipped.
+//
+// 30 s therefore is not "a model load plus margin"; it is a generous bound on a case with no measured
+// duration, chosen because a slow boot is visible while a skipped verification is exactly the silence
+// D-32 is about. Reviewed on 2026-08-11 and kept rather than tuned, with the reason for keeping it
+// stated as the weak thing it is: nothing in this stack argues for 30 over 5 or over 120. Under a
+// real wedge a longer budget only delays the same outcome — start unverified, warn, and let the
+// search path confirm for itself (D-21, D-33) — so the number decides how long a wedged backend
+// stalls process start and nothing else. It would deserve an actual measurement if MCP relaunch
+// latency ever became something anyone waits on.
+//
+// It stops being generous-for-free if a proxy ever sits in front of the service and accepts
+// connections on its behalf while it loads — that would restore the slow answer this comment used to
+// assume, and it is the event that brings this number back to the table.
 //
 // A var rather than a const only so a test can shrink it; nothing at run time writes it.
 var bootHandshakeTimeout = 30 * time.Second
@@ -110,18 +146,26 @@ var bootHandshakeTimeout = 30 * time.Second
 // bootProfile is how the startup check talks to the embedding service. It is not embedProfile: see
 // bootHandshakeTimeout for why the search path's per-attempt budget cannot bound boot.
 //
-// MaxRetries is 1 because the two failures it could cover are answered differently and only one is
-// worth waiting for. A service that is not listening yet refuses instantly, spends none of the
-// budget, and is a case where starting anyway is already the right outcome (D-21) — retrying would
-// delay boot for a verdict the search path reports per call anyway. A service that is loading is
-// slow rather than absent, and one long attempt is what covers that.
+// MaxRetries is 1 because the failures it could cover are answered elsewhere. A service that is not
+// listening — which includes one still loading, since it binds only after the load — refuses
+// instantly, spends none of the budget, and is a case where starting anyway is already the right
+// outcome (D-21); retrying would delay boot for a verdict the search path reports per call anyway.
+// What is left is the backend that accepts and does not answer, and one long attempt covers that
+// better than several short ones against a service that is not talking.
+//
+// This sentence used to end "a service that is loading is slow rather than absent", which was the
+// same false premise bootHandshakeTimeout carried and is corrected there.
 //
 // BatchSize and MaxConcurrent are 1 only because Profile.Validate rejects zero: the handshake sends
 // no texts and makes exactly one request.
 func bootProfile(endpoint string) embed.Profile {
 	return embed.Profile{
-		Endpoint:      endpoint,
+		Endpoint: endpoint,
+		// Timeout is unused on this path — the boot check embeds nothing — but Profile.Validate
+		// requires it, and a second copy of the boot budget is the value least likely to surprise
+		// whoever adds an embed call here one day.
 		Timeout:       bootHandshakeTimeout,
+		VerifyTimeout: bootHandshakeTimeout,
 		BatchSize:     1,
 		MaxConcurrent: 1,
 		MaxRetries:    1,
@@ -141,7 +185,9 @@ func bootProfile(endpoint string) embed.Profile {
 //     starts through one and explains itself per search (classifyUnavailable, unavailableMessage)
 //     instead of dying at boot with the client left to guess. Refusing here would put that back. So
 //     the check is skipped, the operator gets a warning saying it was skipped and why, and the next
-//     search says the rest.
+//     search says the rest. Skipped here is not skipped forever: the search embedder verifies for
+//     itself before its first embedding (embed.ServiceEmbedder, D-33), so a backend that comes back
+//     on a different revision is caught by the first search that reaches it rather than never.
 //   - The backend answered and its config diverges from this build's pins. Nothing is down; the
 //     system is assembled wrong, and starting would mean serving confidently wrong answers for as
 //     long as nobody happens to notice recall got worse. Refuse, naming the field.
@@ -190,11 +236,13 @@ func verifyEmbedder(ctx context.Context, cfg Config, transport embed.Transport) 
 			"error", scrubCredential(cfg, err.Error()),
 			"consequence", "this process cannot tell whether the backend serves the model the index "+
 				"was built with; a search that runs before it recovers reports the outage per call",
-			// The part an operator would otherwise assume the other way round. This check runs once,
-			// at boot, and nothing retries it: a service that comes back on a different revision is
-			// then never caught, and the searches that follow look perfectly healthy.
-			"not_retried", "the handshake is checked once at startup and never again; restart "+
-				"mcp-server once the embedding service is up to verify it")
+			// Said explicitly because the useful thing here is what the operator does *not* have to
+			// do. This warning used to end with "restart mcp-server once the embedding service is
+			// up", which was the honest instruction while a skipped check stayed skipped for the
+			// life of the process (D-33). It no longer does.
+			"retried", "the search path confirms the backend itself before it embeds anything, so a "+
+				"service that comes back is checked on the first search that reaches it — and refused "+
+				"there, by name, if it comes back on a different configuration. No restart is needed")
 		return nil
 	default:
 		return fmt.Errorf("embedder handshake: %w — refusing to start: a server that embeds queries "+
@@ -212,6 +260,29 @@ func verifyEmbedder(ctx context.Context, cfg Config, transport embed.Transport) 
 // deadline that could fire while this leg was still retrying would silently shorten MaxRetries,
 // turning a blip the retry absorbs into a reported outage and dropping the last transport failure
 // from the error.
+//
+// Since D-33 the first search of every process also pays a handshake, because an embedder that has
+// not confirmed its backend confirms it before embedding anything — and this one has not, being a
+// different object from the one the boot check verified (newSearchEmbedder). That leg has to fit
+// inside the same 10 s, which is what VerifyTimeout is for and why it is 1,5 s here: 1,5 + 8,25 =
+// 9,75 s, still under the deadline, with the ordering pinned by TestSearchDeadline_ExceedsTheEmbedderBudget.
+//
+// An earlier version of this comment defended a 4 s verification that made the total 12,25 s, on
+// the grounds that the deadline would cut it and the resulting KNOWLEDGE BASE UNAVAILABLE would be
+// true anyway. Review showed the defence had a hole with the shape this file keeps producing: it
+// only covers the case where the handshake FAILS. A handshake that succeeds near its cap leaves the
+// embedding leg short of its own budget, and then a transient blip that the retry would have
+// absorbed surfaces as an outage — the exact failure the ordering exists to prevent, arriving by a
+// door the argument never looked at.
+//
+// What 1,5 s costs is smaller than the first draft of this comment claimed, and the correction is
+// worth keeping because the claim was the same false one bootHandshakeTimeout used to make. It said
+// a service still loading its model could not answer inside 1,5 s and so a recovery would report an
+// outage instead of waiting. A loading service does not answer slowly — it is not listening yet
+// (scripts/embedder-service/server.py binds after the load), so that call fails instantly at any
+// budget. What 1,5 s actually gives up is the wedged backend: a service holding the connection open
+// without answering is written off here in 1,5 s, where boot would wait 30 s for it. For a call
+// someone is waiting on, written off and retried on the next search is the right answer.
 //
 // The per-attempt number is not derived from a healthy idle service, and that is the point. Idle,
 // a query embed measures ~50 ms (ADR-001 §6.2 measured a p99 of 71 ms on its own run; the number
@@ -258,6 +329,7 @@ func embedProfile(endpoint string) embed.Profile {
 	return embed.Profile{
 		Endpoint:      endpoint,
 		Timeout:       4 * time.Second,
+		VerifyTimeout: 1500 * time.Millisecond,
 		BatchSize:     1,
 		MaxConcurrent: 1,
 		MaxRetries:    2,
