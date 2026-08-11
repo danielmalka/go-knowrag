@@ -35,6 +35,20 @@ ExecStart=/bin/sh -c 'exec "$KNOWRAG_PYTHON" "$KNOWRAG_REPO/scripts/embedder-ser
 Restart=always
 RestartSec=5
 
+# The two numbers exist because this service is the largest single consumer on the machine and the
+# machine is a WSL2 guest, where "out of memory" is not a Linux OOM kill: the guest still reported
+# 5 GB available when the VM died. What the guest holds, Windows cannot reclaim, and an unbounded
+# cgroup holds everything it ever read — measured at 6.2 GB current against 2.5 GB of actual RSS,
+# the difference being page cache of the weights that nothing was asking it to give back.
+#
+# MemoryHigh is the one that does the work: above it the kernel reclaims, and page cache is what it
+# reclaims first, which is exactly the part that was never needed. It throttles, it does not kill.
+# MemoryMax is the backstop, set above the measured load peak so it never fires in normal operation.
+# If it ever does, Restart=always brings the service back and the VM stays alive — which is the
+# whole point. A dead embedder is a failed ingestion; a dead VM is a lost session.
+MemoryHigh=4G
+MemoryMax=7G
+
 # The server refuses to start when the model stops normalising its vectors or returns an empty sparse
 # half, so a failed start is a real signal and belongs in the journal.
 StandardOutput=journal
