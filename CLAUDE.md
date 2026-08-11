@@ -48,3 +48,35 @@ já estava pago havia dois dias, e dois estavam parcialmente desatualizados.
 Antes de trabalhar num item deste arquivo, **confirme contra o código de hoje que o problema ainda
 existe**. Vale principalmente para a frase que define a gravidade: ela costuma soar como conclusão do
 parágrafo anterior e ser, na verdade, uma afirmação própria que ninguém verificou.
+
+## Quando um comentário afirma um número, o número mora neste arquivo?
+
+Esta é a pergunta que mais achou defeito neste repositório, e ela é específica de propósito.
+"Revise os comentários" ninguém segue. Esta dá para responder em dez segundos, olhando uma linha.
+
+Se o número está aqui — `const`, literal, campo de struct — o comentário é verificável na hora. Se
+ele é **decidido em outro arquivo**, o comentário está afirmando o que outro arquivo faz, e é aí que
+mora o defeito: o outro arquivo muda e ninguém volta aqui. Em 2026-08-11 isso apareceu **cinco vezes
+numa tarde**, e nenhuma era bug de lógica — todas compilavam, passavam em lint e em `-race`, e três
+passavam nos próprios testes:
+
+- um teto de 10 s que o `Handshake` sobrescrevia por dentro com 4 s, deixando a verificação de boot
+  desligada no caso comum;
+- um teste de orçamento que somava uma das duas pernas e ficava verde enquanto o total real
+  ultrapassava o deadline;
+- um teste que conferia o número escolhido sem conferir se ele é usado;
+- um teto justificado por "o serviço responde devagar enquanto carrega o modelo" — o serviço faz
+  bind **depois** de carregar, então não responde devagar, recusa na hora (`server.py`);
+- e, no texto escrito para consertar o anterior, "ou pego no meio do desligamento" — não existe
+  meio-desligamento, o `server.py` não instala handler de SIGTERM.
+
+Duas consequências práticas:
+
+1. **Comentário que descreve mecanismo de outro pacote envelhece em silêncio.** Escreva o nome do
+   arquivo junto da afirmação, para que a próxima pessoa saiba onde conferir.
+2. **Um teste de orçamento que esquece uma perna certifica o número que esqueceu de somar.** Se a
+   asserção envolve tempo, some todas as pernas do caminho real e prove com um plante que ela
+   reprova quando alguma cresce.
+
+E a leitura que fecha o ciclo: numa rodada de plante de defeito, **a lista que importa é a dos testes
+que não ficaram vermelhos**. É nela que o teste vazio se esconde, e é a que ninguém lê.
