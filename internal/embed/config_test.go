@@ -43,6 +43,7 @@ timeout: 30s
 batch_size: 32
 max_concurrent: 2
 max_retries: 3
+verify_timeout: 20s
 `
 	got, err := ParseProfile([]byte(yaml))
 	if err != nil {
@@ -51,6 +52,7 @@ max_retries: 3
 	want := Profile{
 		Endpoint:      "http://127.0.0.1:8080",
 		Timeout:       30 * time.Second,
+		VerifyTimeout: 20 * time.Second,
 		BatchSize:     32,
 		MaxConcurrent: 2,
 		MaxRetries:    3,
@@ -64,6 +66,7 @@ func TestProfile_Validate(t *testing.T) {
 	valid := Profile{
 		Endpoint:      "http://127.0.0.1:8080",
 		Timeout:       30 * time.Second,
+		VerifyTimeout: 20 * time.Second,
 		BatchSize:     32,
 		MaxConcurrent: 2,
 		MaxRetries:    3,
@@ -78,6 +81,7 @@ func TestProfile_Validate(t *testing.T) {
 		"BatchSize":     func(p *Profile) { p.BatchSize = 0 },
 		"MaxConcurrent": func(p *Profile) { p.MaxConcurrent = 0 },
 		"MaxRetries":    func(p *Profile) { p.MaxRetries = 0 },
+		"VerifyTimeout": func(p *Profile) { p.VerifyTimeout = 0 },
 	}
 	for field, break_ := range cases {
 		t.Run(field, func(t *testing.T) {

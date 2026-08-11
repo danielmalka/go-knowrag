@@ -21,8 +21,9 @@ type stubTransport struct {
 	info  func(ctx context.Context) (BackendHandshakeInfo, error)
 	// Guarded: EmbedDocuments fans sub-batches out across goroutines, so a stub that records
 	// anything has to be as concurrency-safe as the real transport must be.
-	mu    sync.Mutex
-	kinds []Kind // every kind this transport was asked for, in call order
+	mu        sync.Mutex
+	kinds     []Kind // every kind this transport was asked for, in call order
+	infoCalls int    // how many times the handshake reached the wire
 }
 
 func (s *stubTransport) Embed(ctx context.Context, texts []string, kind Kind) ([]Embedding, error) {
@@ -35,11 +36,28 @@ func (s *stubTransport) Embed(ctx context.Context, texts []string, kind Kind) ([
 	return s.embed(ctx, texts)
 }
 
+// Info answers with a backend that matches this build's pins unless a test says otherwise, and
+// records the calls.
+//
+// The default used to be an error, which was fine while nothing but a handshake test called Info.
+// Since D-33 every embed verifies first, so an erroring default would turn every test in this file
+// into a test of the unverified path — the loudest possible way to test one thing by accident. A
+// test that wants an unconfirmable or a divergent backend sets info explicitly, and the recorded
+// count is what lets the latch tests prove "once, and not again".
 func (s *stubTransport) Info(ctx context.Context) (BackendHandshakeInfo, error) {
+	s.mu.Lock()
+	s.infoCalls++
+	s.mu.Unlock()
 	if s.info == nil {
-		return BackendHandshakeInfo{}, errors.New("stubTransport: no info configured")
+		return Expected(), nil
 	}
 	return s.info(ctx)
+}
+
+func (s *stubTransport) infoCallCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.infoCalls
 }
 
 // echoEmbed returns a valid embedding derived from each text, so a test can prove output i came
@@ -56,6 +74,7 @@ func testProfile() Profile {
 	return Profile{
 		Endpoint:      "http://127.0.0.1:8080",
 		Timeout:       time.Second,
+		VerifyTimeout: time.Second,
 		BatchSize:     10,
 		MaxConcurrent: 4,
 		MaxRetries:    3,
@@ -90,7 +109,7 @@ func TestNewServiceEmbedder_RejectsBadInput(t *testing.T) {
 func TestServiceEmbedder_ModelID_ReturnsPinnedSchemaConstant(t *testing.T) {
 	profiles := []Profile{
 		testProfile(),
-		{Endpoint: "http://elsewhere:9999", Timeout: time.Hour, BatchSize: 1, MaxConcurrent: 1, MaxRetries: 1},
+		{Endpoint: "http://elsewhere:9999", Timeout: time.Hour, VerifyTimeout: time.Hour, BatchSize: 1, MaxConcurrent: 1, MaxRetries: 1},
 	}
 	for _, p := range profiles {
 		e, err := NewServiceEmbedder(p, &stubTransport{})

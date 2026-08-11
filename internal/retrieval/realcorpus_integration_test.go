@@ -98,6 +98,7 @@ func realCorpusSearcher(t *testing.T, env realCorpusEnv, client *qdrant.Client) 
 	embedder, err := embed.NewServiceEmbedder(embed.Profile{
 		Endpoint:      env.embedder,
 		Timeout:       30 * time.Second,
+		VerifyTimeout: 30 * time.Second,
 		BatchSize:     1,
 		MaxConcurrent: 1,
 		MaxRetries:    2,

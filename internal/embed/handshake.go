@@ -89,9 +89,15 @@ func Expected() BackendHandshakeInfo {
 // Normalization, Pooling, Precision, SparseParams — match their pins. It fails, naming the field,
 // when the backend does not report it, when this build has no pin for it, and when the two differ.
 //
-// It must be called once, before the first EmbedDocuments/EmbedQuery, by whatever process
+// It should be called once, before the first EmbedDocuments/EmbedQuery, by whatever process
 // constructs the embedder; a non-nil result must abort startup. ModelID() is self-attested and
 // proves nothing about the backend — this is the only thing that does.
+//
+// "Should" and not "must", since D-33: a success here latches, and an embedder whose latch is unset
+// runs this itself before it embeds anything (ensureVerified). Calling it explicitly is still the
+// better shape — it fails at startup instead of inside the first request, and cmd/cli needs the
+// returned report for point_hash regardless — but forgetting it no longer means embedding through a
+// backend nobody confirmed.
 //
 // The returned BackendHandshakeInfo is the backend's own report, and it — not the pins — is what
 // S06a hashes into point_hash and writes to the embedding_model payload field.
@@ -99,11 +105,31 @@ func Expected() BackendHandshakeInfo {
 // Handshake is a method here rather than a member of the Embedder interface because only a
 // network-backed embedder has anything to confirm; FakeEmbedder has no backend to diverge from.
 func (e *ServiceEmbedder) Handshake(ctx context.Context) (BackendHandshakeInfo, error) {
-	ctx, cancel := context.WithTimeout(ctx, e.profile.Timeout)
+	// VerifyTimeout, not Timeout. The distinction is the whole reason that field exists: this call
+	// is bounded by what the caller can afford to spend confirming, which is not the same number as
+	// what it can afford to spend embedding (Profile.VerifyTimeout).
+	// Bound in a separate variable rather than shadowing ctx: the error path below has to be able to
+	// ask the CALLER's context whether it was the one that ended, and a shadowed ctx cannot answer
+	// that — it is cancelled by this method's own budget as well.
+	callCtx, cancel := context.WithTimeout(ctx, e.profile.VerifyTimeout)
 	defer cancel()
 
-	info, err := e.transport.Info(ctx)
+	info, err := e.transport.Info(callCtx)
 	if err != nil {
+		// The caller stopped, rather than the backend failing to answer. This package draws that
+		// line everywhere else (outerCtxErr) — a client that disconnected or a process shutting down
+		// is not an outage, and reporting it as one turns every cancelled request into a false
+		// report that the embedding service is down.
+		//
+		// It has to be checked against the caller's context and not callCtx, which is cancelled by
+		// this method's own budget too: VerifyTimeout expiring genuinely IS "the backend did not
+		// answer", and outerCtxErr keeps that an ErrBackend while letting a cancellation through.
+		//
+		// The check is new with D-33, and it was harmless to omit before only because nothing called
+		// Handshake inside a request. Now the first search of every process does.
+		if cErr := ctx.Err(); cErr != nil {
+			return BackendHandshakeInfo{}, outerCtxErr(e.profile.Endpoint, cErr)
+		}
 		return BackendHandshakeInfo{}, fmt.Errorf(
 			"%w: could not read the backend's effective config from %s: %w",
 			ErrBackend, e.profile.Endpoint, err)
@@ -111,6 +137,10 @@ func (e *ServiceEmbedder) Handshake(ctx context.Context) (BackendHandshakeInfo, 
 	if err := validateHandshake(info, e.expected); err != nil {
 		return BackendHandshakeInfo{}, err
 	}
+	// The latch, set only here: this is the one place in the package that has actually compared a
+	// backend's report against the pins. Everything else that wants to know whether that happened
+	// reads e.verified rather than deciding for itself (D-33).
+	e.verified.Store(true)
 	return info, nil
 }
 

@@ -157,10 +157,16 @@ Backend **fora do ar** é outra coisa e não impede a subida: o servidor sobe, a
 conseguiu conferir, e cada busca responde dizendo que a base está indisponível. Derrubar o servidor
 por causa de uma queda deixaria o cliente adivinhando.
 
-> **A verificação acontece uma vez, na subida, e não se repete.** Se o backend estava fora naquele
-> momento, a conferência foi pulada e continua pulada enquanto o processo viver — um embedder que
-> volte depois, com configuração diferente, não é detectado. O conserto é reiniciar o servidor MCP
-> depois que o serviço de embedding estiver de pé. O log diz isso quando pula.
+Uma conferência pulada não vira consentimento permanente. A garantia mora no embedder, não em quem o
+constrói: **nada é embedado através de um backend que aquele embedder ainda não conferiu**. Se a
+checagem da subida foi pulada porque o serviço estava fora, a primeira busca que chegar faz a
+conferência antes de embedar — e recusa, nomeando o campo, se o serviço tiver voltado com outra
+configuração. Não é preciso reiniciar nada. Depois de uma conferência bem-sucedida ela não se repete;
+o custo em regime é uma leitura atômica por chamada.
+
+> **O que continua não coberto:** um backend que troque de revisão *depois* de uma conferência
+> bem-sucedida, sem reiniciar nada dos dois lados. Fechar isso exige um token de geração no protocolo,
+> que nenhum dos lados tem hoje — e é a mesma janela de qualquer cliente longevo de um serviço mutável.
 
 ## Design, em quatro escolhas
 
