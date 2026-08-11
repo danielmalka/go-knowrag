@@ -11,15 +11,21 @@ trecho de origem.
 Não é "aponte para qualquer pasta e funciona": os enums de frontmatter (`type`, `status`,
 `visibility`) são fechados no contrato, e pasta de primeiro nível fora da lista de áreas configurada
 é erro explícito, não `area` vazia. Um fork aponta para suas próprias pastas e declara seus próprios
-vaults e áreas em configuração, sem editar Go.
+vaults e áreas em configuração, sem editar Go — mas os **nomes das coleções** ainda não: eles são
+literais compilados em `internal/schema/manifest.go`, e trocá-los é editar Go.
 
-> **Status: pipeline funcionando ponta a ponta.** Ingestão, busca híbrida e o servidor MCP estão
-> implementados e rodando contra um corpus real. O que falta são os modos de ingestão (`S06b`), a CLI
-> de operador (`S09`) e as stories de garantia e deploy (`S10`–`S12`).
+> **Status: pipeline funcionando ponta a ponta, com os dois gates de performance passando.**
+> Ingestão, busca híbrida e o servidor MCP estão implementados e rodando contra um corpus real.
 >
-> Medido numa instalação real: 730 notas viram 3.647 chunks indexados; ingestão completa em ~13 min;
-> busca de query em ~70 ms (p99). Um gate de performance **não** passa — reingestão incremental leva
-> ~7 min contra um orçamento de 60 s, com a causa medida e a correção identificada.
+> Medido numa instalação real em 2026-08-11: 735 notas viram 3.690 pontos indexados; ingestão
+> completa em **6m50s** contra um orçamento de 30 min, e reingestão de um corpus inalterado em
+> **30,9 s** contra um orçamento de 60 s. Esse segundo número já foi 403 s: a causa não era o
+> chunking, como se supunha, e sim uma interação entre o algoritmo de Nagle e o delayed-ACK do Linux
+> numa conexão reusada com o serviço de embedding — resolvida com um `TCP_NODELAY` do lado Python.
+> Busca de query em ~70 ms (p99).
+>
+> Falta a CLI de operador (`S09`), parte dos modos de ingestão (`S06b` — o lock de execução
+> concorrente já entrou; `--only` e `--prune` não) e as stories de garantia e deploy (`S10`–`S12`).
 
 > **Motivação: organização própria.** O projeto está totalmente disponível para inspiração e forks, fiquem à vontade para fazer suas cópias e alterar o que for preciso, pois ele está totalmente voltado para minha própria organização pessoal.
 > Disponibilizado para compreensão de uso de RAG e para portifolio próprio.
@@ -39,9 +45,10 @@ recuperação — trazer os poucos trechos certos, no momento da pergunta.
 
 **Ingestão idempotente.** Lê as notas, faz chunking com fronteira em `##` (H2) e embute o breadcrumb
 `H1 → H2` no texto embedado, para o trecho carregar seu próprio contexto. Rodar duas vezes converge
-para o mesmo índice sobre as notas que existem: sem duplicatas e sem contagem crescente. O que
-sobrou de uma nota apagada é **detectado e reportado em toda ingestão**, e removido só sob comando
-explícito (`--prune`) — até lá, ela continua pesquisável.
+para o mesmo índice sobre as notas que existem: sem duplicatas e sem contagem crescente. A cauda de
+uma nota que **encolheu** é removida sozinha, em toda ingestão, logo depois do upsert confirmado.
+Os pontos de uma nota **apagada** não: nada compara o que está indexado com o que foi varrido, então
+eles ficam no índice sem detecção e sem aviso, e continuam saindo na busca.
 
 **Busca híbrida.** Cada trecho é indexado com vetor denso *e* esparso no mesmo passo. A consulta roda
 as duas buscas e funde os resultados por *Reciprocal Rank Fusion* — o denso pega paráfrase e sinônimo,
@@ -56,11 +63,17 @@ o protocolo é padrão, então qualquer agente que fale MCP consegue consumir. O
 entanto, não é uma porta aberta: cada instância nasce com a coleção e o tenant **fixados na própria
 configuração**, e quem pode consultar o quê é decisão de deploy.
 
-**Avaliação entregue junto, não depois.** Um golden set mede Recall@5 e uma suíte adversarial testa
-vazamento entre tenants — os dois como gates, não relatórios que alguém lê quando lembra. São dois
-gates distintos, e a separação é proposital: o **hermético**, sobre fixture sintético versionado,
-roda no CI e **bloqueia merge**; a avaliação sobre a base e o deploy reais roda em runner privado e
-**bloqueia release**. Assim o CI não precisa de acesso ao corpus.
+**Avaliação: o desenho existe, a entrega não.** O plano é um golden set medindo Recall@5 e uma suíte
+adversarial de vazamento entre tenants, os dois como gates e não como relatório que alguém lê quando
+lembra — o **hermético**, sobre fixture sintético versionado, bloqueando merge no CI; o que roda
+contra a base e o deploy reais, em runner privado, bloqueando release. Assim o CI nunca precisaria de
+acesso ao corpus.
+
+Nada disso está construído. `internal/eval/` tem só um `doc.go`, e os dois jobs correspondentes no
+`.github/workflows/ci.yml` estão `if: false` com um `echo` no lugar do comando (`S10`, `S11`). **O
+que bloqueia merge hoje é o lint e a suíte unitária, esta com `-race`.** O único teste de isolamento
+entre tenants que existe está atrás da tag `integration` (`internal/retrieval/integration_test.go`):
+roda à mão no runner privado, nunca no CI e nunca contra uma PR.
 
 ## Como funciona
 
@@ -94,9 +107,11 @@ O desenho é lógico, não de deploy: **a ingestão em lote roda numa máquina c
 escreve no Qdrant atravessando a rede; o índice, o embedding da consulta e o MCP server ficam **no
 servidor**. É dessa divisão que saem duas das decisões de arquitetura do projeto.
 
-Os dois entrypoints são **finos por regra**: toda a lógica de busca vive num único pacote, e um teste
-de arquitetura no CI falha se qualquer código de busca aparecer fora dele. Não existe a versão da
-busca do MCP e a versão da CLI, que divergem em seis meses.
+Os dois entrypoints são **finos por convenção**: toda a lógica de busca vive num único pacote, para
+não existirem a versão da busca do MCP e a versão da CLI, que divergem em seis meses. O teste de
+arquitetura no CI (`internal/archtest/boundary_test.go`) trava uma fronteira vizinha, e só ela:
+**nenhum pacote fora de `internal/store` importa o cliente do Qdrant**. Código de busca escrito fora
+do pacote de retrieval é pego por revisão, não por teste.
 
 ## Funcionalidades
 
@@ -105,13 +120,13 @@ busca do MCP e a versão da CLI, que divergem em seis meses.
 | **Chunking com contexto** | Fronteira em `##`, breadcrumb `H1 → H2` embutido, clamp de tamanho em tokens, com piso e teto a calibrar contra o corpus real |
 | **Busca híbrida nativa** | Denso (1024-dim) + esparso, fundidos por RRF no próprio Qdrant |
 | **Ingestão incremental** | Só reprocessa o que mudou, comparando uma fingerprint por ponto |
-| **Detecção de órfãos** | Toda ingestão reporta pontos de notas apagadas ou encolhidas, mesmo sem removê-los |
+| **Poda da cauda** | A cauda de uma nota que encolheu é removida em toda ingestão, depois do upsert confirmado. Ponto de nota **apagada** não é detectado nem reportado — fica no índice |
 | **Convergência sob falha** | Interromper a ingestão no meio nunca tira uma nota da busca — o pior caso é um ponto extra, que a rodada seguinte limpa |
-| **Isolamento verificado** | Suíte adversarial pass/fail, sem meio-termo, no CI sobre fixture sintético e contra o deploy real antes do release |
+| **Isolamento por integridade de código** | Nenhuma consulta sai do pacote de retrieval sem `tenant_id`. A suíte adversarial que verificaria isso como gate está especificada e não existe |
 | **Conteúdo marcado como não confiável** | Resultados chegam ao agente delimitados como dado, não instrução, com os delimitadores escapados no texto recuperado |
-| **CLI de operação** | Ingestão, reindex, prune, avaliação e debug de busca |
+| **CLI de operação** | Dois comandos: `schema apply` e `ingest`. Reindex, prune, avaliação e debug de busca não existem |
 | **Metadados ricos** | Tipo, status, tags, visibilidade, caminho, datas e área derivada da estrutura de pastas, gravados no payload de cada trecho |
-| **Filtros de busca** | Área, tipo, vault e tags. `status: archived` fica fora por default, e `visibility: private` não sai por caminho de consumo nenhum — as duas são políticas do pacote de busca, não filtros de quem chama |
+| **Filtros de busca** | A ferramenta MCP expõe `area` e `type` (mais `query` e `top_k`). `vault` e `tags` existem só na API Go: nenhum caminho entregue chega neles. `status: archived` fica fora por default, e `visibility: private` não sai por caminho de consumo nenhum — as duas são políticas do pacote de busca, não filtros de quem chama |
 
 ## Stack
 
@@ -122,12 +137,30 @@ busca do MCP e a versão da CLI, que divergem em seis meses.
 | Embeddings | BGE-M3 (licença MIT), denso + esparso no mesmo passo |
 | Protocolo | Model Context Protocol, SDK oficial em Go, transporte stdio |
 
-O modelo de embedding é fixado por revisão imutável, e a especificação exige que a revisão seja
-**confirmada pelo backend no startup** — não declarada pelo cliente. A intenção é que um container
-servindo o modelo errado falhe de imediato, em vez de degradar a qualidade da busca em silêncio por
-semanas. É comportamento especificado, não medido: a decisão de *como* servir o modelo (sidecar HTTP
-ou ONNX no próprio processo) segue em medição, e parte dos campos do handshake ainda não tem valor
-pinado.
+O modelo de embedding é fixado por revisão imutável, e a revisão é **confirmada pelo backend** — não
+declarada pelo cliente. Um serviço rodando o modelo errado precisa falhar de imediato, em vez de
+degradar a qualidade da busca em silêncio por semanas.
+
+Isso está implementado e rodando. Os sete campos da config efetiva têm valor pinado
+(`internal/embed/handshake.go`) — revisão do modelo, revisão do tokenizer, dimensão, normalização,
+pooling, precisão e os parâmetros esparsos — e a ingestão aborta nomeando o campo que divergir. A
+forma de servir o modelo também foi decidida e medida: sidecar HTTP, um runtime só, no host de
+ingestão.
+
+Os dois lados confirmam. A ingestão confere antes da primeira escrita; o servidor MCP confere na
+subida e **recusa subir** se o backend responder com uma configuração diferente da que o índice foi
+construído — porque embedar query num espaço vetorial diferente do que está armazenado não devolve
+erro, devolve resultado plausível e errado, que é a única falha que quem chama não tem como
+desconfiar.
+
+Backend **fora do ar** é outra coisa e não impede a subida: o servidor sobe, avisa no log que não
+conseguiu conferir, e cada busca responde dizendo que a base está indisponível. Derrubar o servidor
+por causa de uma queda deixaria o cliente adivinhando.
+
+> **A verificação acontece uma vez, na subida, e não se repete.** Se o backend estava fora naquele
+> momento, a conferência foi pulada e continua pulada enquanto o processo viver — um embedder que
+> volte depois, com configuração diferente, não é detectado. O conserto é reiniciar o servidor MCP
+> depois que o serviço de embedding estiver de pé. O log diz isso quando pula.
 
 ## Design, em quatro escolhas
 
@@ -153,6 +186,16 @@ individualmente contra quatro condições, e qualquer estado parcial converge na
 Três processos: o serviço de embedding (Python, precisa da GPU), o Qdrant (container), e os binários
 Go. O serviço de embedding é **residente** — carregar o modelo leva ~11 s, e um processo que carrega
 por consulta transformaria uma busca de 70 ms em uma de onze segundos.
+
+Duas exigências do host de ingestão que abortam a rodada inteira se faltarem, e que não são
+processos:
+
+- **`git` no PATH.** O `updated` de cada nota sai de um `git log` por vault; sem o binário, o scan
+  falha e nenhuma nota é indexada. Uma raiz que não é repositório git é caso previsto e cai para o
+  mtime — não ter o `git` instalado, não.
+- **O diretório de cache do usuário num sistema de arquivos onde `flock` exclui.** É onde mora o
+  lock de ingestão; 9p, NFS e FUSE são **recusados com erro**, porque ali o lock não excluiria nada e
+  daria a impressão de proteger. No WSL isso pega quem tem o `HOME` sob `/mnt/c`, que é 9p.
 
 ### 1. Qdrant
 
@@ -200,9 +243,19 @@ confiar no arquivo: `kill -9` no PID do serviço e checar que `/health` volta a 
 ```bash
 go build -o ~/bin/knowrag ./cmd/cli
 knowrag schema apply                 # idempotente: rodar de novo não escreve nada
-knowrag ingest --vault both --dry-run  # conta chunks sem gastar GPU nem rede
+knowrag ingest --vault both --dry-run  # conta chunks sem gastar GPU nem escrever no Qdrant
 knowrag ingest --vault both
 ```
+
+`--dry-run` não é offline: o clamp conta tokens reais do BGE-M3 e se recusa a aproximar, então ele
+exige `EMBEDDER_ENDPOINT` e faz um `POST /tokenize` por chunk. O que ele economiza é a GPU e a
+escrita — uma contagem tirada de um contador aproximado reportaria um número de chunks que a rodada
+real não produz.
+
+`schema apply` também mantém um registro do que já foi aplicado, em
+`internal/schema/applied_state.json`, **resolvido a partir do diretório de trabalho**. Rodando o
+binário de fora do repositório, aponte `--state-file` para esse arquivo: sem registro, a deriva de
+revisão do modelo de embedding é a única deriva que deixa de ser detectada, em silêncio.
 
 ### 4. Servidor MCP
 
@@ -248,12 +301,37 @@ minúscular um nome por baixo do operador moveria todos os hashes — e como o I
 `vault`, os pontos antigos seriam **sobrescritos**, não órfãos. Seria uma reindexação completa
 reportada como execução limpa.
 
+**Um vault chamado `both` recusa toda ingestão, não só a ambígua.** `both` é slug legal e é também a
+palavra de `--vault` para "todos os vaults"; com ele no roster, não há como selecionar aquele vault
+sozinho nem como dizer "todos". `knowrag ingest` recusa a rodada até o nome mudar — inclusive as
+rodadas que pedem um vault qualquer por nome, porque a colisão é checada antes de o flag ser lido.
+
 No arquivo YAML os vaults ficam num mapa aninhado sob `vaults:`, com as mesmas chaves em
 `snake_case` (`path`, `areas`, `exclude_folders`, `exclude_root_files`).
 
 As áreas e as exclusões vêm de configuração, não do código: re-incluir uma pasta excluída é uma
 linha de config. Pasta de 1º nível que não está nem em `AREAS` nem na lista de exclusão é **erro** —
 excluído é decisão declarada, desconhecido é erro.
+
+### Flags de `knowrag ingest`
+
+| Flag | Default | Para quê |
+|---|---|---|
+| `--vault` | `both` | um nome de `KNOWRAG_VAULTS`, ou `both` para todos |
+| `--dry-run` | desligado | varre e faz chunking, e para: nem embeda nem escreve |
+| `--tenant` | `interno` | o `tenant_id` sob o qual todo ponto é escrito |
+| `--floor-tokens` | `256` | junta seções irmãs consecutivas abaixo desse tamanho |
+| `--ceiling-tokens` | `1024` | quebra a seção acima desse tamanho |
+
+**Os três últimos entram no `point_hash`, e `--tenant` entra também no ID do ponto.** Mudar qualquer
+um deles não ajusta a próxima rodada: faz o índice inteiro deixar de bater e ser reescrito. Os
+valores de piso e teto são o ponto de partida do contrato, não um ótimo medido — a calibração contra
+o corpus real ainda não aconteceu.
+
+**`MCP_TENANT_ID` tem de ser exatamente o `--tenant` com que a coleção foi ingerida.** Divergentes,
+a busca filtra por um tenant que não tem ponto nenhum: zero resultados, sem erro, sem aviso. Do lado
+da ingestão o valor tem default (`interno`) e do lado do MCP é obrigatório — então é a variável do
+servidor que precisa ser escrita à mão para casar com um `--tenant` que talvez ninguém tenha digitado.
 
 ### Servidor MCP (`knowrag-mcp`)
 
@@ -297,17 +375,13 @@ GPU e rede para indexar texto que ainda vai mudar.
 texto do chunk, os metadados, a config do pipeline e a config confirmada do embedder. Uma nota cujos
 pontos batem é pulada sem escrever nada, então a segunda execução sobre um vault inalterado não
 reembeda — apenas verifica. A consequência prática é que **você não precisa saber o que mudou**:
-rode o comando e ele descobre.
+rode o comando e ele descobre. Verificar 735 notas inalteradas custou 30,9 s na instalação medida: o
+estado indexado do tenant é lido de uma vez, num snapshot só, e não por uma consulta por nota.
 
 **O caminho normal é rodar quando fizer sentido para você** — depois de uma sessão de escrita, antes
 de uma pesquisa importante, ou por um agendador seu (`cron`, `systemd timer`, Task Scheduler)
 chamando o mesmo binário. O projeto não instala agendador nenhum, de propósito: quem sabe a cadência
 certa é quem escreve as notas.
-
-> **Limitação conhecida desta versão.** Verificar um corpus inalterado ainda leva minutos, não
-> segundos, porque cada nota é verificada individualmente. Para um agendador diário isso é
-> irrelevante; para rodar à mão esperando resposta, incomoda. A causa está medida e a correção
-> identificada.
 
 **Duas ingestões simultâneas não se atropelam mais.** Antes de ler o vault, `knowrag ingest` toma um
 lock local do sistema operacional (`flock`) identificado por endpoint do Qdrant + collection +

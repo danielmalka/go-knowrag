@@ -72,6 +72,10 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	if err := verifyEmbedder(ctx, cfg, transport); err != nil {
+		return err
+	}
+
 	embedder, err := embed.NewServiceEmbedder(embedProfile(cfg.EmbedderEndpoint), transport)
 	if err != nil {
 		return err
@@ -81,6 +85,122 @@ func run() error {
 
 	logger.Info("mcp-server starting", "config", cfg, "version", serverVersion)
 	return newServer(cfg, searcher).Run(ctx, &mcp.StdioTransport{})
+}
+
+// bootHandshakeTimeout is the whole budget of the startup check, and it is the profile's Timeout
+// rather than a deadline on the context because that is the only place it would survive: Handshake
+// installs profile.Timeout on top of whatever context it is handed (internal/embed/handshake.go),
+// so the effective bound is the smaller of the two and no outer deadline can widen it.
+//
+// It therefore cannot be embedProfile's 4 s. That number is derived from searchDeadline and from how
+// long a query waits behind a batch on the GPU, and a backend that is merely still loading answers
+// well past it: BGE-M3 takes ~11 s warm (ADR-001 §6.2, quoted in embed.ServiceEmbedder's own doc).
+// Boot and a cold service coming up together is the *likeliest* moment for this process to start, and
+// under a 4 s bound the slow answer comes back as ErrBackend — classified as an outage, warned about,
+// and skipped. The check would exist and never run.
+//
+// 30 s is that load plus most of two more. Its cost is stated rather than hidden: a backend that
+// black-holes the connection instead of refusing it stalls boot for 30 s. That is the rare case —
+// a service not listening yet refuses instantly — and a slow boot is visible, while a skipped
+// verification is exactly the silence D-32 is about.
+//
+// A var rather than a const only so a test can shrink it; nothing at run time writes it.
+var bootHandshakeTimeout = 30 * time.Second
+
+// bootProfile is how the startup check talks to the embedding service. It is not embedProfile: see
+// bootHandshakeTimeout for why the search path's per-attempt budget cannot bound boot.
+//
+// MaxRetries is 1 because the two failures it could cover are answered differently and only one is
+// worth waiting for. A service that is not listening yet refuses instantly, spends none of the
+// budget, and is a case where starting anyway is already the right outcome (D-21) — retrying would
+// delay boot for a verdict the search path reports per call anyway. A service that is loading is
+// slow rather than absent, and one long attempt is what covers that.
+//
+// BatchSize and MaxConcurrent are 1 only because Profile.Validate rejects zero: the handshake sends
+// no texts and makes exactly one request.
+func bootProfile(endpoint string) embed.Profile {
+	return embed.Profile{
+		Endpoint:      endpoint,
+		Timeout:       bootHandshakeTimeout,
+		BatchSize:     1,
+		MaxConcurrent: 1,
+		MaxRetries:    1,
+	}
+}
+
+// verifyEmbedder confirms once, at startup, that the service this process will embed queries with is
+// the one the index was built with (embed.Handshake, PRD-contrato §2.4). cmd/cli does the same
+// before its first write; this path did not, and it is the path where the damage is silent (D-32):
+// an embedder serving a different revision, pooling or precision puts query vectors in a different
+// space from the stored ones, so recall collapses while every call still returns a clean result full
+// of plausible-looking chunks.
+//
+// The two ways the check can fail are not the same failure and must not share an outcome:
+//
+//   - No usable answer came back. That is an outage, and D-21 was paid precisely so this server
+//     starts through one and explains itself per search (classifyUnavailable, unavailableMessage)
+//     instead of dying at boot with the client left to guess. Refusing here would put that back. So
+//     the check is skipped, the operator gets a warning saying it was skipped and why, and the next
+//     search says the rest.
+//   - The backend answered and its config diverges from this build's pins. Nothing is down; the
+//     system is assembled wrong, and starting would mean serving confidently wrong answers for as
+//     long as nobody happens to notice recall got worse. Refuse, naming the field.
+//
+// classifyUnavailable is what separates the two, reused rather than re-derived: a second notion of
+// "the knowledge layer did not answer" living here would be free to drift from the one the search
+// path reports, and then boot and search would disagree about whether the same failure is an outage.
+//
+// The first branch is wider than an outage, and the warning says so rather than claiming more than
+// it knows. embed wraps every transport-level failure as ErrBackend, so an HTTP 500, a page of HTML
+// from the wrong port, or a /handshake schema that changed all land there too — the backend answered,
+// just not with anything this build can read. Telling those apart would be an error taxonomy for a
+// distinction with no different action behind it: a service that cannot serve /handshake will not
+// serve /embed either, so the next search reports it. What the warning must not do is assert nothing
+// answered when something did.
+//
+// One wire failure lands on the other side, and the asymmetry is deliberate rather than an oversight:
+// a body that decodes cleanly to `{}` never reaches the transport's error path, so it arrives as a
+// report with every field at its zero value and is refused, naming the first one. embed's policy is
+// that an unreported field is a divergence and not consent (ADR-001 §4), and a service that answers
+// about its own configuration with nothing is not a service to embed a query with.
+//
+// It builds its own embedder over the caller's transport instead of taking one, because the boot
+// budget lives in the profile (bootProfile) and handing this function a ServiceEmbedder would let a
+// caller silently bound the check with a number chosen for searching.
+//
+// The report is discarded, which is the one difference from the ingestion. There, Handshake's return
+// value feeds point_hash and is written to every point; here nothing consumes it — this call is made
+// for its verdict alone.
+func verifyEmbedder(ctx context.Context, cfg Config, transport embed.Transport) error {
+	embedder, err := embed.NewServiceEmbedder(bootProfile(cfg.EmbedderEndpoint), transport)
+	if err != nil {
+		return err
+	}
+
+	_, err = embedder.Handshake(ctx)
+	switch {
+	case err == nil:
+		return nil
+	case classifyUnavailable(cfg, err) != nil:
+		// Scrubbed like every other error that reaches a log here. Nothing on this path is known to
+		// carry the Qdrant credential; the check costs one comparison and keeps "an error is scrubbed
+		// on its way to a log" true by construction rather than by remembering which paths can.
+		slog.Warn("the embedder handshake could not confirm the backend: starting unverified",
+			"embedder_endpoint", cfg.EmbedderEndpoint,
+			"error", scrubCredential(cfg, err.Error()),
+			"consequence", "this process cannot tell whether the backend serves the model the index "+
+				"was built with; a search that runs before it recovers reports the outage per call",
+			// The part an operator would otherwise assume the other way round. This check runs once,
+			// at boot, and nothing retries it: a service that comes back on a different revision is
+			// then never caught, and the searches that follow look perfectly healthy.
+			"not_retried", "the handshake is checked once at startup and never again; restart "+
+				"mcp-server once the embedding service is up to verify it")
+		return nil
+	default:
+		return fmt.Errorf("embedder handshake: %w — refusing to start: a server that embeds queries "+
+			"with a configuration the index was not built with searches a different vector space and "+
+			"answers from it, with a result nobody downstream can tell from a good one", err)
+	}
 }
 
 // embedProfile is how this process talks to the embedding service. A query is a single short text,

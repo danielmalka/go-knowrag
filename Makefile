@@ -30,7 +30,7 @@ cover:
 # runbook (PRD-stories-fundacao.md §3 S01). Gate: blocking — a red run blocks the release.
 #
 # The timeout has to sit above NFR-4's own gate, and `go test`'s default 10 min does not: a full
-# ingestion is a 30-minute contract that measured 7m52s, so the default kills the run at 10 min and
+# ingestion is a 30-minute contract that measured 6m50s, so the default kills the run at 10 min and
 # reports a panic instead of a verdict. The margin exists so the gate can fail as an assertion —
 # "took 31m, want ≤30m" — which is the only form of that failure anyone can act on.
 #
