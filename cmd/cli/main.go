@@ -18,9 +18,14 @@ import (
 // exitLockHeld is what a run refused by the ingestion lock exits with. Every other failure exits 1;
 // this one has its own code because it is not the same event: a scheduler that fires while the
 // previous ingestion is still running got an orderly refusal, not a broken system, and telling the
-// two apart is the difference between a retry and a page. 2 is left free — a usage error is what
-// most tools spend it on.
+// two apart is the difference between a retry and a page.
 const exitLockHeld = 3
+
+// exitUsage is what a run refused for how it was invoked exits with — an unconfirmed --prune, or a
+// flag combination this build cannot honour (cmd/cli/ingest.go, errUsage). It is separate from 1 for
+// the same reason exitLockHeld is: retrying it verbatim will fail identically, so a caller that sees
+// it has to change the command line rather than wait. 2 is what most tools spend on a usage error.
+const exitUsage = 2
 
 func main() {
 	cfg, err := config.Load()
@@ -57,6 +62,9 @@ func main() {
 		fmt.Fprintln(os.Stderr, "knowrag:", err)
 		if errors.Is(err, lock.ErrHeld) {
 			os.Exit(exitLockHeld)
+		}
+		if errors.Is(err, errUsage) {
+			os.Exit(exitUsage)
 		}
 		os.Exit(1)
 	}

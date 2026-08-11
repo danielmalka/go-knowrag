@@ -64,6 +64,10 @@ type fakeStore struct {
 
 	scrollErr error
 	deleteErr error
+	// deleteErrAfter fails every delete from the Nth onward (1-based, 0 = never), which is what a
+	// prune that dies partway through looks like — deleteErr alone fails the first one and proves
+	// nothing about the partial count.
+	deleteErrAfter int
 
 	// upsertHook decides how many of the batch's points actually land and what the store reports.
 	// The write happens *inside* the call, so a partial upsert is injected where a real one would
@@ -118,6 +122,9 @@ func (f *fakeStore) DeleteByFilter(_ context.Context, tenantID string, uid uuid.
 	if f.deleteErr != nil {
 		return f.deleteErr
 	}
+	if f.deleteErrAfter > 0 && len(f.deletes) >= f.deleteErrAfter {
+		return fmt.Errorf("fake store: refusing delete %d", len(f.deletes))
+	}
 	for idx := range f.points[scope(tenantID, uid)] {
 		if idx >= from {
 			delete(f.points[scope(tenantID, uid)], idx)
@@ -147,6 +154,54 @@ func (f *fakeStore) seed(tenantID string, uid uuid.UUID, records ...PointRecord)
 	for _, r := range records {
 		f.points[key][r.ChunkIndex] = r
 	}
+}
+
+// bulkStore is a fakeStore that also answers the whole-tenant snapshot, which is what puts a run on
+// the prefetch path (prefetch.go) and therefore what makes the orphan scan run at all.
+//
+// It is a wrapper rather than a method on fakeStore because every other test in this package uses
+// fakeStore and expects the per-note read: giving fakeStore a ScrollTenant would silently move all
+// of them onto the snapshot path, changing what their `scroll` journal entries count.
+type bulkStore struct {
+	*fakeStore
+	// scrollTenantErr makes the snapshot unavailable, the case that has to read as "nobody looked"
+	// rather than "no orphans".
+	scrollTenantErr error
+}
+
+func (b bulkStore) ScrollTenant(_ context.Context, tenantID string) (map[uuid.UUID][]PointRecord, error) {
+	b.journal.record("scroll-tenant")
+	if b.scrollTenantErr != nil {
+		return nil, b.scrollTenantErr
+	}
+
+	out := map[uuid.UUID][]PointRecord{}
+	for key, byIndex := range b.points {
+		tenant, rawUID, ok := strings.Cut(key, "|")
+		if !ok || tenant != tenantID {
+			continue
+		}
+		uid, err := uuid.Parse(rawUID)
+		if err != nil {
+			return nil, fmt.Errorf("fake store: key %q does not hold a uid: %w", key, err)
+		}
+		out[uid] = slices.Collect(maps.Values(byIndex))
+	}
+	return out, nil
+}
+
+// orphanRecords is a stored point set for a note that is no longer on disk. It is built by hand
+// rather than through ExpectedPoints because the scan reads exactly two payload fields, and a
+// fixture that went through the chunker would tie these tests to a note the vault no longer has.
+func orphanRecords(vaultName, path string, points int) []PointRecord {
+	out := make([]PointRecord, points)
+	for i := range out {
+		out[i] = PointRecord{
+			ChunkIndex: i,
+			Fields:     map[string]any{fieldVault: vaultName, fieldPath: path},
+		}
+	}
+	return out
 }
 
 // spyEmbedder counts calls, records the texts it was asked for, and can be made to fail for one

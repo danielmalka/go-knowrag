@@ -32,6 +32,9 @@ type fakePointAPI struct {
 	pages     [][]*qdrant.RetrievedPoint
 	offsets   []*qdrant.PointId
 	scrollErr error
+	// scrollErrOnCall makes only the Nth scroll fail (1-based, 0 = never), which is the shape a page
+	// that dies mid-pagination has and a blanket scrollErr cannot express.
+	scrollErrOnCall int
 }
 
 func (f *fakePointAPI) Upsert(_ context.Context, r *qdrant.UpsertPoints) (*qdrant.UpdateResult, error) {
@@ -54,6 +57,9 @@ func (f *fakePointAPI) ScrollAndOffset(_ context.Context, r *qdrant.ScrollPoints
 	f.scrolls = append(f.scrolls, r)
 	if f.scrollErr != nil {
 		return nil, nil, f.scrollErr
+	}
+	if f.scrollErrOnCall == len(f.scrolls) {
+		return nil, nil, errors.New("qdrant dropped the connection mid-scroll")
 	}
 	i := len(f.scrolls) - 1
 	if i >= len(f.pages) {
@@ -420,4 +426,47 @@ func retrieved(t *testing.T, index int, hash string) *qdrant.RetrievedPoint {
 			"oversize":    false,
 		}),
 	}
+}
+
+// TestClient_ScrollTenant_PageFailsMidway_DiscardsEverything is a deletion safety property, not a
+// tidiness one.
+//
+// ingest.BulkScroller promises that a nil error means the whole tenant, and ingest.ScanOrphans reads
+// every uid *missing* from that map as a note deleted from disk — so returning the first page with a
+// nil error after the second one failed would hand --prune a list of live notes to delete. The first
+// page here holds a real point precisely so the test can prove it is thrown away rather than
+// returned as a smaller truth.
+func TestClient_ScrollTenant_PageFailsMidway_DiscardsEverything(t *testing.T) {
+	api := &fakePointAPI{
+		pages: [][]*qdrant.RetrievedPoint{
+			{retrievedWithUID(t, 0, "hash-0", testUID(t))},
+			{retrievedWithUID(t, 1, "hash-1", testUID(t))},
+		},
+		offsets:         []*qdrant.PointId{qdrant.NewIDNum(7), nil},
+		scrollErrOnCall: 2,
+	}
+	c := newTestClient(t, api)
+
+	got, err := c.ScrollTenant(t.Context(), testTenant)
+	if err == nil {
+		t.Fatalf("ScrollTenant with a failed second page = %v, nil; a partial snapshot returned as "+
+			"complete makes every uid it is missing look like a deleted note", got)
+	}
+	if got != nil {
+		t.Errorf("ScrollTenant returned %v alongside its error; the accumulated pages have to be "+
+			"discarded, because a caller that ignores the error would prune against them", got)
+	}
+	if len(api.scrolls) != 2 {
+		t.Errorf("%d scroll(s) issued, want 2 — the read has to stop at the failure, not carry on",
+			len(api.scrolls))
+	}
+}
+
+// retrievedWithUID is retrieved() plus the uid ScrollTenant recovers from the payload, which is the
+// one read that does not already know which uid it asked for.
+func retrievedWithUID(t *testing.T, index int, hash string, uid uuid.UUID) *qdrant.RetrievedPoint {
+	t.Helper()
+	p := retrieved(t, index, hash)
+	p.Payload["uid"] = qdrant.NewValueString(uid.String())
+	return p
 }

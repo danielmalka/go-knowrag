@@ -134,7 +134,7 @@ func TestRunIngest_MalformedArea_RefusedBeforeAnythingIsScanned(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	err := runIngest(context.Background(), &out, cfg, ingestOptions{
+	err := runIngest(context.Background(), &out, io.Discard, cfg, ingestOptions{
 		vaultFlag: "trabalho",
 		dryRun:    true,
 		tenantID:  defaultTenantID,
@@ -177,7 +177,7 @@ func TestRunIngest_TwoVaults_EachScannedWithItsOwnSettings(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	err := runIngest(context.Background(), &out, cfg, ingestOptions{
+	err := runIngest(context.Background(), &out, io.Discard, cfg, ingestOptions{
 		vaultFlag: bothVaults,
 		dryRun:    true,
 		tenantID:  defaultTenantID,
@@ -202,7 +202,9 @@ func TestRunIngest_TwoVaults_EachScannedWithItsOwnSettings(t *testing.T) {
 func TestIngestCmd_RegistersItsFlags(t *testing.T) {
 	cmd := newIngestCmd(&config.Config{})
 
-	for _, name := range []string{"vault", "dry-run", "tenant", "floor-tokens", "ceiling-tokens"} {
+	for _, name := range []string{
+		"vault", "dry-run", "tenant", "floor-tokens", "ceiling-tokens", "prune", "yes", "json",
+	} {
 		if cmd.Flags().Lookup(name) == nil {
 			t.Errorf("ingest does not register --%s", name)
 		}
@@ -323,7 +325,7 @@ func TestRunIngest_DryRun_ReportsCountsAndNeedsNoQdrant(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	err := runIngest(context.Background(), &out, cfg, ingestOptions{
+	err := runIngest(context.Background(), &out, io.Discard, cfg, ingestOptions{
 		vaultFlag: "trabalho",
 		dryRun:    true,
 		tenantID:  defaultTenantID,
@@ -375,7 +377,7 @@ func TestRunIngest_MissingSettings_NamesOnlyWhatTheRunNeeds(t *testing.T) {
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			cfg := &config.Config{Vaults: baseVaults}
-			err := runIngest(context.Background(), io.Discard, cfg, ingestOptions{
+			err := runIngest(context.Background(), io.Discard, io.Discard, cfg, ingestOptions{
 				vaultFlag: tc.vaultFlag,
 				dryRun:    tc.dryRun,
 			})
@@ -402,7 +404,7 @@ func TestRunIngest_MissingSettings_NamesOnlyWhatTheRunNeeds(t *testing.T) {
 func TestRunIngest_EmptyRoster_FailsAsConfigurationNotAnEmptyRun(t *testing.T) {
 	cfg := &config.Config{EmbedderEndpoint: tokenizeStub(t)}
 
-	err := runIngest(context.Background(), io.Discard, cfg, ingestOptions{
+	err := runIngest(context.Background(), io.Discard, io.Discard, cfg, ingestOptions{
 		vaultFlag: bothVaults,
 		dryRun:    true,
 	})
@@ -424,7 +426,7 @@ func TestRunIngest_UnreadableVault_FailsBeforeTouchingAnything(t *testing.T) {
 		},
 	}
 
-	err := runIngest(context.Background(), io.Discard, cfg, ingestOptions{
+	err := runIngest(context.Background(), io.Discard, io.Discard, cfg, ingestOptions{
 		vaultFlag: "trabalho",
 		dryRun:    true,
 		chunkCfg:  chunk.Config{FloorTokens: defaultFloorTokens, CeilingTokens: defaultCeilingTokens},
@@ -487,7 +489,7 @@ func TestRunIngest_LockHeld_RefusedBeforeAnythingIsScanned(t *testing.T) {
 	holdLock(t, cfg, defaultTenantID)
 
 	var out bytes.Buffer
-	err := runIngest(t.Context(), &out, cfg, ingestOptions{
+	err := runIngest(t.Context(), &out, io.Discard, cfg, ingestOptions{
 		vaultFlag: "trabalho",
 		tenantID:  defaultTenantID,
 		chunkCfg:  chunk.Config{FloorTokens: defaultFloorTokens, CeilingTokens: defaultCeilingTokens},
@@ -529,7 +531,7 @@ func TestRunIngest_SuccessfulRun_ReleasesTheLock(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	err := runIngest(t.Context(), &out, cfg, ingestOptions{
+	err := runIngest(t.Context(), &out, io.Discard, cfg, ingestOptions{
 		vaultFlag: "trabalho",
 		tenantID:  defaultTenantID,
 		chunkCfg:  chunk.Config{FloorTokens: defaultFloorTokens, CeilingTokens: defaultCeilingTokens},
@@ -569,7 +571,7 @@ func TestRunIngest_DryRun_ProceedsWhileTheLockIsHeld(t *testing.T) {
 	holdLock(t, cfg, defaultTenantID)
 
 	var out bytes.Buffer
-	err := runIngest(t.Context(), &out, cfg, ingestOptions{
+	err := runIngest(t.Context(), &out, io.Discard, cfg, ingestOptions{
 		vaultFlag: "trabalho",
 		dryRun:    true,
 		tenantID:  defaultTenantID,
@@ -580,5 +582,102 @@ func TestRunIngest_DryRun_ProceedsWhileTheLockIsHeld(t *testing.T) {
 	}
 	if want := "1 note(s), 1 chunk(s) to embed"; !strings.Contains(out.String(), want) {
 		t.Errorf("dry-run output %q does not contain %q", out.String(), want)
+	}
+}
+
+// emptyVaultCfg is a config a full non-dry run can complete against with no equipment: one vault
+// holding an area folder and no notes, so the run goes through the handshake, the lock and the
+// orchestration and finds nothing to embed. Qdrant is the dead endpoint, which is reachable enough
+// to build a client and key a lock on, and never answers — so the orphan snapshot always fails here.
+func emptyVaultCfg(t *testing.T) *config.Config {
+	t.Helper()
+	root := writeVault(t, nil)
+	if err := os.MkdirAll(filepath.Join(root, "00-inbox"), 0o750); err != nil {
+		t.Fatalf("creating the empty area folder: %v", err)
+	}
+	return &config.Config{
+		QdrantEndpoint:    deadQdrant,
+		QdrantAPIKey:      "not-a-real-key",
+		DefaultCollection: "knowrag_test",
+		EmbedderEndpoint:  tokenizeStub(t),
+		Vaults:            map[string]config.VaultSettings{"trabalho": {Path: root, Areas: "00-inbox"}},
+	}
+}
+
+// TestRunIngest_JSON_StdoutCarriesOnlyTheReport is the machine-output contract and nothing else:
+// stdout parses, stderr carries the human line. No --prune, deliberately — a destructive flag in
+// this fixture would tie the stream assertions to the prune's outcome, and the refusal has its own
+// test below.
+//
+// The snapshot still fails against the dead endpoint, which is worth having: the report has to be
+// valid JSON on a degraded run, and `orphans_scanned` is how a consumer learns the run could not
+// look.
+func TestRunIngest_JSON_StdoutCarriesOnlyTheReport(t *testing.T) {
+	lockedCache(t)
+	cfg := emptyVaultCfg(t)
+
+	var out, errOut bytes.Buffer
+	err := runIngest(t.Context(), &out, &errOut, cfg, ingestOptions{
+		vaultFlag: "trabalho",
+		tenantID:  defaultTenantID,
+		json:      true,
+		chunkCfg:  chunk.Config{FloorTokens: defaultFloorTokens, CeilingTokens: defaultCeilingTokens},
+	})
+	if err != nil {
+		t.Fatalf("runIngest --json over a vault with no notes: %v — stdout %q, stderr %q",
+			err, &out, &errOut)
+	}
+
+	var report map[string]any
+	if err := json.Unmarshal(out.Bytes(), &report); err != nil {
+		t.Fatalf("stdout does not parse as JSON: %v\nstdout was:\n%s", err, out.String())
+	}
+	if got := report["mode"]; got != "incremental" {
+		t.Errorf("report mode is %v, want %q — a stored report that does not say which mode "+
+			"produced it cannot be compared to another", got, "incremental")
+	}
+	if got := report["orphans_scanned"]; got != false {
+		t.Errorf("orphans_scanned is %v on a run whose snapshot failed, want false", got)
+	}
+	// The D-25 instrument is still printed, on the stream a parser is not reading. Both halves are
+	// asserted: dropping it entirely would pass a test that only checked stdout.
+	if !strings.Contains(errOut.String(), "tokenizer:") {
+		t.Errorf("stderr %q does not carry the tokenizer summary", errOut.String())
+	}
+	if strings.Contains(out.String(), "tokenizer:") {
+		t.Errorf("stdout %q carries a human line; --json output has to be parseable on its own",
+			out.String())
+	}
+}
+
+// TestRunIngest_PruneWithoutSnapshot_PrintsTheReportThenFails is the ordering, which is the one
+// property the unit test of pruneOrphans cannot see: ingestScans prints before it returns the
+// failure, so an operator whose prune was refused still gets the run report for the notes it did
+// process. An implementation that returned the error first would pass any assertion written only
+// about the error.
+func TestRunIngest_PruneWithoutSnapshot_PrintsTheReportThenFails(t *testing.T) {
+	lockedCache(t)
+	cfg := emptyVaultCfg(t)
+
+	var out, errOut bytes.Buffer
+	err := runIngest(t.Context(), &out, &errOut, cfg, ingestOptions{
+		vaultFlag: "trabalho",
+		tenantID:  defaultTenantID,
+		prune:     true,
+		yes:       true,
+		chunkCfg:  chunk.Config{FloorTokens: defaultFloorTokens, CeilingTokens: defaultCeilingTokens},
+	})
+	if err == nil {
+		t.Fatalf("runIngest --prune --yes against an unreadable index = nil; the run asked to delete "+
+			"notes it could not identify and has to say so. stdout was %q", &out)
+	}
+	if !strings.Contains(err.Error(), "refusing to prune") {
+		t.Errorf("error %q is not the prune refusal; the run failed for some other reason", err)
+	}
+	for _, want := range []string{"0 note(s)", "not scanned"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("stdout %q does not contain %q: the report has to be printed before the "+
+				"failure is returned, not swallowed by it", out.String(), want)
+		}
 	}
 }

@@ -1,0 +1,43 @@
+{
+  "mode": "incremental",
+  "notes": 5,
+  "counts": {
+    "embedded": 1,
+    "failed": 1,
+    "pruned": 1,
+    "skipped": 1,
+    "upsert_confirmed": 1
+  },
+  "points_written": 5,
+  "points_pruned": 5,
+  "orphans_scanned": true,
+  "orphans": [
+    {
+      "uid": "0198a7f2-4b31-7c42-9e15-3d8a92c47b06",
+      "vault": "pessoal",
+      "path": "areas/deleted.md",
+      "points": 2
+    },
+    {
+      "uid": "0198a7f2-4b31-7c42-9e15-3d8a92c47b07",
+      "vault": "pessoal",
+      "path": "areas/gone.md",
+      "points": 3
+    }
+  ],
+  "indexed_not_scanned": [
+    {
+      "uid": "0198a7f2-4b31-7c42-9e15-3d8a92c47b08",
+      "vault": "pessoal",
+      "path": "areas/excluded.md",
+      "points": 1
+    }
+  ],
+  "errors": [
+    {
+      "path": "areas/broken.md",
+      "uid": "0198a7f2-4b31-7c42-9e15-3d8a92c47b05",
+      "message": "chunking: frontmatter has no title"
+    }
+  ]
+}

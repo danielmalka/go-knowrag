@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -137,6 +138,45 @@ func TestIngestCLI_DifferentScopes_EachProceeds(t *testing.T) {
 	}
 }
 
+// TestIngestCLI_PruneWithoutYes_ExitsUsageWithoutDoingAnything is the non-interactive half of the
+// prune gate, proven where it actually matters: in a process, against the exit code main returns.
+//
+// The exit code is the whole point. A scheduler that reads 1 cannot tell "the command line was
+// wrong" from "the ingestion broke", and the two want opposite responses — fix the invocation, or
+// retry. exitUsage says which, and nothing reachable in-process asserts it, because os.Exit lives in
+// main.
+//
+// The embedder is the "did nothing" witness: a run that got past this refusal would handshake before
+// it embedded and embed before it wrote, so an untouched embedder is a run that never started.
+func TestIngestCLI_PruneWithoutYes_ExitsUsageWithoutDoingAnything(t *testing.T) {
+	cache := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cache)
+	bin := buildCLI(t)
+
+	refused, contacted := refusingEmbedder(t)
+	proc := startIngest(t, bin, ingestEnv{
+		cache: cache, embedder: refused, vaultPath: processVault(t),
+		collection: processCollection, tenant: processTenantA,
+		args: []string{"--prune"},
+	})
+
+	code, stdout, stderr := waitExit(t, proc, refusalBudget)
+	if code != exitUsage {
+		t.Errorf("`ingest --prune` on a piped stdin exited %d, want %d (the usage code)\nstdout: %s\nstderr: %s",
+			code, exitUsage, stdout, stderr)
+	}
+	if !bytes.Contains(stderr.Bytes(), []byte("--yes")) {
+		t.Errorf("stderr %q does not tell the operator how to authorize the prune", stderr)
+	}
+	if contacted.Load() {
+		t.Error("the refused process contacted its embedder: it did work before giving up")
+	}
+	// The prompt is the failure mode this refusal exists to prevent, and it would land here.
+	if stdout.Len() != 0 {
+		t.Errorf("the refused process wrote %q to stdout; it must not ask a question nobody can answer", stdout)
+	}
+}
+
 // buildCLI compiles the command under test once, into a directory the test owns. The binary is what
 // these tests are about — the exit code lives in main, and no in-process call reaches it.
 func buildCLI(t *testing.T) string {
@@ -165,6 +205,8 @@ type ingestEnv struct {
 	vaultPath  string
 	collection string
 	tenant     string
+	// args are appended to `ingest --vault fixture --tenant <tenant>`.
+	args []string
 }
 
 // startIngest launches `knowrag ingest` and returns it running.
@@ -176,9 +218,15 @@ type ingestEnv struct {
 func startIngest(t *testing.T, bin string, env ingestEnv) *exec.Cmd {
 	t.Helper()
 
+	args := append([]string{"ingest", "--vault", "fixture", "--tenant", env.tenant}, env.args...)
 	// #nosec G204 -- bin is the binary this test just built, and every argument is a literal or a
 	// path this test created.
-	cmd := exec.Command(bin, "ingest", "--vault", "fixture", "--tenant", env.tenant)
+	cmd := exec.Command(bin, args...)
+	// An empty reader rather than the default: os/exec gives a child with no Stdin an open
+	// /dev/null, which is a character device and therefore reads as a terminal to the --prune
+	// confirmation (cmd/cli/ingest.go, isTerminal). A reader makes os/exec hand over a pipe, which is
+	// what a cron job actually has.
+	cmd.Stdin = strings.NewReader("")
 	cmd.Env = []string{
 		"HOME=" + os.Getenv("HOME"),
 		"PATH=" + os.Getenv("PATH"),
