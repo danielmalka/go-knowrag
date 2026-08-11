@@ -71,3 +71,60 @@ func (s *Searcher) Search(ctx context.Context, q Query) ([]Result, error) {
 	}
 	return formatResults(points)
 }
+
+// FilterMatchesAnything reports whether the filter this Query builds matches at least one point.
+//
+// It answers the one question an empty result cannot: whether the search came back empty because
+// the index holds nothing on the subject, or because the filter it carried matches nothing at all.
+// The two answers are identical on the wire and mean opposite things.
+//
+// It reuses buildFilter, which is what keeps the half that must not drift from drifting: the tenant
+// condition and the archived/private MustNot guards are built by the same code the search's filter
+// is, so this can never report a filter alive under a scope or a visibility rule the search never
+// ran under. A second, hand-assembled filter would agree with the search only until someone edited
+// one of them.
+//
+// The facets are the caller's, and callers are expected to narrow. This asks about whatever the
+// Query it is handed still names: pass the search's own Query and it probes the search's whole
+// filter; pass one that names only the facet the message is about and it probes that one. That is
+// not a sloppier version of the search — a caller whose message blames `area` probes `area` alone,
+// because area+type can be dead between them while the area is full, and the honest message then is
+// not the one about a dead area (see cmd/mcp-server's explainEmptyArea).
+//
+// The consequence of the guards is that false means "nothing *visible* matches": an area whose
+// notes are all archived or all private is perfectly well indexed and still answers false, so a
+// caller wording a message from this may claim only that much.
+//
+// Validate is deliberately not called. Text, TopK and Offset rank and bound an answer, and this
+// asks for no answer: one point is enough to prove the filter is alive, and no embedding is
+// computed at all. The two fields the filter cannot be built without are checked instead, and they
+// are the two Validate checks first.
+func (s *Searcher) FilterMatchesAnything(ctx context.Context, q Query) (bool, error) {
+	if s == nil || s.executor == nil {
+		return false, errors.New("retrieval: Searcher has no executor")
+	}
+	switch {
+	case q.Collection == "":
+		return false, ErrEmptyCollection
+	case q.TenantID == "":
+		return false, ErrEmptyTenant
+	}
+
+	points, err := s.executor.ExecuteQuery(ctx, SearchRequest{
+		Collection: q.Collection,
+		// No prefetch leg and no fusion, so internal/store leaves the query itself unset and Qdrant
+		// reads the filter alone — the Query API's own filtered read, not a quirk: in the pinned
+		// client (go-client v1.19.0, internal/proto/points.proto:1114) a missing query is documented
+		// to return points ordered by ID. That is what makes this cost a fraction of the search it
+		// follows.
+		Filter: buildFilter(q),
+		Limit:  1,
+		// One field because nothing here reads the point: an empty projection would mean the whole
+		// payload, and the payload is where the chunk text is.
+		PayloadFields: []string{fieldUID},
+	})
+	if err != nil {
+		return false, fmt.Errorf("retrieval: probing the filter on %s: %w", q.Collection, err)
+	}
+	return len(points) > 0, nil
+}

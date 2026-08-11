@@ -70,10 +70,16 @@ type SearchKnowledgeInput struct {
 //
 // It is an interface so the handler tests never need a Qdrant, an embedder, or S07 wiring; main.go
 // supplies the real *retrieval.Searcher. It is deliberately the whole dependency: there is no
-// second method through which a search could be assembled here, which is NFR-8 ("zero search logic
-// in cmd/mcp-server") expressed as a type rather than as a rule someone has to remember.
+// method here through which a search could be assembled, which is NFR-8 ("zero search logic in
+// cmd/mcp-server") expressed as a type rather than as a rule someone has to remember.
+//
+// FilterMatchesAnything does not weaken that. It is handed a retrieval.Query and builds nothing of
+// its own — the filter is assembled once, in internal/retrieval. This package chooses which facets
+// the Query it hands over still carries (see explainEmptyArea) and never learns what a filter looks
+// like.
 type Searcher interface {
 	Search(ctx context.Context, q retrieval.Query) ([]retrieval.Result, error)
+	FilterMatchesAnything(ctx context.Context, q retrieval.Query) (bool, error)
 }
 
 // newServer builds the stdio MCP server with its single tool already registered.
@@ -159,6 +165,12 @@ func searchKnowledgeHandler(cfg Config, searcher Searcher) mcp.ToolHandlerFor[Se
 		if err != nil {
 			return nil, nil, logAndWrap(cfg, start, len(results), fmt.Errorf("assembling the response failed: %w", err))
 		}
+		if len(results) == 0 && in.Area != "" {
+			// Only here, and only for `area`. On the happy path it costs nothing, and `type` cannot
+			// drift: ParseNoteType checks it against a compiled enum, while MCP_AREAS is a list an
+			// operator maintains by hand on a host that never sees the vaults (D-28).
+			text = explainEmptyArea(ctx, cfg, searcher, q, text)
+		}
 
 		slog.Info("search_knowledge call",
 			"tenant", cfg.TenantID,
@@ -170,11 +182,80 @@ func searchKnowledgeHandler(cfg Config, searcher Searcher) mcp.ToolHandlerFor[Se
 	}
 }
 
+// explainEmptyArea says which of the two things an empty result means, for the one filter that can
+// be configured wrong: an area that is in MCP_AREAS and in nothing else clears validateFilters,
+// matches zero points, and comes back looking exactly like a subject the vault never covered.
+//
+// It deliberately probes a narrower question than the search asked, and that narrowing is what
+// makes the message honest. The search may have carried `type` as well, and a compound filter can
+// be dead while the area behind it is full: an area with plenty in it and nothing of type
+// `lesson` in it empties that pair alone. Blaming the area for that would tell the model to drop
+// a filter that was not the problem and send the operator to fix an MCP_AREAS entry that is
+// correct. So the probe keeps only what deadAreaFilter's wording is about: the area, the tenant
+// scope, and the archived/private guards the search itself ran under.
+//
+// It runs on the context the search ran on, so the probe spends what is left of searchDeadline
+// rather than opening a second budget on a call the caller is already waiting out.
+//
+// A probe that fails changes nothing: the search itself succeeded, and turning a working search
+// into an error because the diagnosis of an empty result did not come back would cost the caller
+// the answer it already has. The failure goes to the log, where the operator is.
+func explainEmptyArea(ctx context.Context, cfg Config, searcher Searcher, q retrieval.Query, plain string) string {
+	// The probe names the fields it keeps rather than the ones it drops. Clearing a list of facets
+	// would make this a hand-maintained twin of buildFilter (internal/retrieval), with nothing
+	// linking the two: the day a fifth optional facet joins Query and buildFilter, whoever forgets
+	// this line ships a probe that silently carries it, and the compound-filter bug above comes
+	// straight back.
+	//
+	// The two ways of getting the list wrong are not symmetric, and that asymmetry is the whole
+	// argument. Forget to clear a new facet and the probe is narrower than the message claims: a
+	// live area is called dead, the model is told to drop a filter that was fine, and the operator
+	// is sent to fix a correct MCP_AREAS entry — a false statement. Forget to keep a new scoping
+	// field and the probe is wider: it reports the area alive and the caller falls back to the
+	// plain empty answer — a diagnosis lost, not a falsehood told. One direction fails closed, the
+	// other fails open, and not saying something false is this function's entire job.
+	//
+	// Text and TopK stay zero on purpose: FilterMatchesAnything does not call Validate and reads
+	// neither, so copying them across would only suggest they matter here.
+	//
+	// Fields kept, never conditions named: what an optional facet becomes in a filter stays
+	// internal/retrieval's business, and this package still assembles nothing (NFR-8).
+	probe := retrieval.Query{
+		Collection:      q.Collection,
+		TenantID:        q.TenantID,
+		Area:            q.Area,
+		IncludeArchived: q.IncludeArchived,
+		IncludePrivate:  q.IncludePrivate,
+	}
+
+	alive, err := searcher.FilterMatchesAnything(ctx, probe)
+	switch {
+	case err != nil:
+		slog.Warn("the empty-result area probe failed",
+			"tenant", cfg.TenantID,
+			"collection", cfg.Collection,
+			"area", q.Area,
+			"error", scrubCredential(cfg, err.Error()))
+		return plain
+	case alive:
+		return plain
+	}
+	// "nothing visible", like the message: the probe carries the search's archived/private guards,
+	// so an area whose notes are all archived is well indexed and still lands here.
+	slog.Warn("an advertised area matches nothing visible in the index",
+		"tenant", cfg.TenantID,
+		"collection", cfg.Collection,
+		"area", q.Area)
+	return fmt.Sprintf(deadAreaFilter, q.Area)
+}
+
 // validateFilters rejects an area or type that is not a canonical value.
 //
 // Passing an unregistered value through would not be a security hole — the filter would simply
 // match nothing — but "no results" is the worst possible answer to give an agent, because it reads
-// as "the knowledge base has nothing about this" rather than "you misspelled a filter".
+// as "the knowledge base has nothing about this" rather than "you misspelled a filter". The same
+// hazard for a value that *is* registered here and nowhere else is explainEmptyArea's, and it can
+// only be caught after the search, because only the index knows.
 func validateFilters(cfg Config, in SearchKnowledgeInput) error {
 	if in.Area != "" && !slices.Contains(canonicalAreas(cfg), in.Area) {
 		return fmt.Errorf("unknown area %q: valid values are %s", in.Area, strings.Join(canonicalAreas(cfg), ", "))

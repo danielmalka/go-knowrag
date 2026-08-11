@@ -3,6 +3,8 @@ package retrieval
 import (
 	"context"
 	"errors"
+	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/danielmalka/go-knowrag/internal/embed"
@@ -184,6 +186,164 @@ func TestSearch_UnwiredSearcher(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			if _, err := s.Search(t.Context(), validQuery()); err == nil {
 				t.Error("Search returned no error from an unwired Searcher")
+			}
+		})
+	}
+}
+
+// TestFilterMatchesAnything_ProbesUnderTheSearchsGuards is the whole contract in one test, driven
+// the way the real caller drives it: a search under every facet, then a probe under the one facet
+// the caller is going to blame.
+//
+// The two halves are asserted against each other on purpose. What must be identical to the search
+// is the scope and the visibility guards — they come out of buildFilter either way, so no probe can
+// report a filter alive under rules the search never ran under, and "nothing visible" stays the
+// most the caller may claim. What must *not* be identical is the facets: a full-equality assertion
+// here would be demanding the bug back, since a dead area+type pair reported as a dead area sends
+// the model to drop the wrong filter and the operator to fix a correct MCP_AREAS entry.
+func TestFilterMatchesAnything_ProbesUnderTheSearchsGuards(t *testing.T) {
+	s, e, x := newSpySearcher()
+	q := validQuery()
+	q.Area, q.Type, q.Vault, q.Tags = "infra", "lesson", "trabalho", []string{"golang"}
+
+	// What cmd/mcp-server's explainEmptyArea does: the search's Query with the facets its message
+	// says nothing about cleared.
+	narrowed := q
+	narrowed.Type, narrowed.Vault, narrowed.Tags = "", "", nil
+
+	if _, err := s.Search(t.Context(), q); err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if _, err := s.FilterMatchesAnything(t.Context(), narrowed); err != nil {
+		t.Fatalf("FilterMatchesAnything: %v", err)
+	}
+	if x.calls != 2 {
+		t.Fatalf("the executor was called %d time(s), want the search and the probe", x.calls)
+	}
+	search, probe := x.requests[0], x.requests[1]
+
+	// Kept, and kept identical to the search: the tenant condition and both guards.
+	if !hasCondition(probe.Filter.Must, fieldTenantID, q.TenantID) {
+		t.Error("the probe filter carries no tenant condition")
+	}
+	if !reflect.DeepEqual(probe.Filter.MustNot, search.Filter.MustNot) {
+		t.Errorf("the probe runs under guards %+v, the search ran under %+v",
+			probe.Filter.MustNot, search.Filter.MustNot)
+	}
+	if !hasCondition(probe.Filter.MustNot, fieldStatus, schema.StatusArchived().String()) ||
+		!hasCondition(probe.Filter.MustNot, fieldVisibility, schema.VisibilityPrivate().String()) {
+		t.Errorf("the guards are not the archived/private pair, so this proves nothing: %+v",
+			probe.Filter.MustNot)
+	}
+	if probe.Collection != q.Collection {
+		t.Errorf("the probe ran against %q, want %q", probe.Collection, q.Collection)
+	}
+
+	// Kept because the narrowed Query still names it.
+	if !hasCondition(probe.Filter.Must, fieldArea, q.Area) {
+		t.Error("the probe filter dropped the one facet the caller kept")
+	}
+	// Dropped because it no longer does — and present on the search, so the difference is real.
+	for _, field := range []string{fieldType, fieldVault, fieldTags} {
+		for _, c := range probe.Filter.Must {
+			if c.Field == field {
+				t.Errorf("the probe filter carries a %s condition the Query no longer names: %+v", field, c)
+			}
+		}
+		if !slices.ContainsFunc(search.Filter.Must, func(c Condition) bool { return c.Field == field }) {
+			t.Errorf("the search filter carries no %s condition, so dropping it proves nothing", field)
+		}
+	}
+
+	// The rest is what makes it cheap: no embedding, no prefetch leg to fuse, one point, and a
+	// projection that leaves the chunk text on the server.
+	if e.calls != 1 {
+		t.Errorf("the embedder was called %d time(s); the probe embeds nothing", e.calls)
+	}
+	if len(probe.Prefetch) != 0 || probe.FusionRRF {
+		t.Errorf("the probe carries %d prefetch leg(s) and FusionRRF=%v, want a plain filtered read",
+			len(probe.Prefetch), probe.FusionRRF)
+	}
+	if probe.Limit != 1 {
+		t.Errorf("the probe asks for %d points, want 1", probe.Limit)
+	}
+	if len(probe.PayloadFields) == 0 || slices.Contains(probe.PayloadFields, fieldText) {
+		t.Errorf("the probe payload projection is %v, want a minimal one without the chunk text",
+			probe.PayloadFields)
+	}
+}
+
+func TestFilterMatchesAnything_AnswersFromWhatCameBack(t *testing.T) {
+	for name, tc := range map[string]struct {
+		points []ScoredPoint
+		want   bool
+	}{
+		"one point matches":  {[]ScoredPoint{scoredPoint("p1", 0.9)}, true},
+		"the filter is dead": {nil, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e, x := &spyEmbedder{}, &spyExecutor{points: tc.points}
+			s := NewSearcher(e, x, DefaultConfig())
+
+			got, err := s.FilterMatchesAnything(t.Context(), validQuery())
+			if err != nil {
+				t.Fatalf("FilterMatchesAnything: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("FilterMatchesAnything = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFilterMatchesAnything_RejectsWhatItCannotProbe keeps a failed probe distinguishable from a
+// dead filter: an empty tenant would otherwise build a filter matching nothing and report it as an
+// area that does not exist.
+func TestFilterMatchesAnything_RejectsWhatItCannotProbe(t *testing.T) {
+	sentinel := errors.New("qdrant unreachable")
+	for name, tc := range map[string]struct {
+		mutate func(*Query)
+		exec   *spyExecutor
+		want   error
+		// wantCalls is asserted rather than implied: the two rejections above must cost no round
+		// trip at all, and a fixture that happens to be unconfigured proves nothing about that.
+		wantCalls int
+	}{
+		"no tenant":     {func(q *Query) { q.TenantID = "" }, &spyExecutor{}, ErrEmptyTenant, 0},
+		"no collection": {func(q *Query) { q.Collection = "" }, &spyExecutor{}, ErrEmptyCollection, 0},
+		"executor down": {func(*Query) {}, &spyExecutor{err: sentinel}, sentinel, 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := NewSearcher(&spyEmbedder{}, tc.exec, DefaultConfig())
+			q := validQuery()
+			tc.mutate(&q)
+
+			got, err := s.FilterMatchesAnything(t.Context(), q)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("FilterMatchesAnything = (%v, %v), want %v", got, err, tc.want)
+			}
+			if got {
+				t.Error("a failed probe reported that the filter matches something")
+			}
+			if tc.exec.calls != tc.wantCalls {
+				t.Errorf("the executor was called %d time(s), want %d", tc.exec.calls, tc.wantCalls)
+			}
+		})
+	}
+}
+
+// TestFilterMatchesAnything_UnwiredSearcher is TestSearch_UnwiredSearcher for the probe. The
+// embedder is absent from the table on purpose: the probe embeds nothing, so a Searcher with no
+// embedder is a Searcher that can still probe.
+func TestFilterMatchesAnything_UnwiredSearcher(t *testing.T) {
+	for name, s := range map[string]*Searcher{
+		"nil searcher":  nil,
+		"no executor":   NewSearcher(&spyEmbedder{}, nil, DefaultConfig()),
+		"nothing wired": NewSearcher(nil, nil, DefaultConfig()),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := s.FilterMatchesAnything(t.Context(), validQuery()); err == nil {
+				t.Error("FilterMatchesAnything returned no error from an unwired Searcher")
 			}
 		})
 	}

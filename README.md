@@ -274,12 +274,14 @@ escrever errado, ou ser convencido a trocar por um trecho de nota hostil.
 ter sido montada a partir de vários vaults, então a lista que ela anuncia é declarada de novo, à
 parte, na configuração do servidor.
 
-> **Essa lista é manutenção manual, e envelhecer nela falha em silêncio.** Nada compara `MCP_AREAS`
-> com o que existe de fato no índice. Uma área acrescentada a um vault e esquecida aqui simplesmente
-> não é oferecida ao cliente; uma área listada aqui que não existe no índice é aceita como filtro,
-> casa zero pontos e volta como **resultado vazio comum** — indistinguível de "não há notas sobre
-> isso". Ao acrescentar ou renomear uma área em qualquer vault, atualize esta variável na mesma
-> passada.
+> **Essa lista é manutenção manual, mas envelhecer nela não falha mais em silêncio.** Nada compara
+> `MCP_AREAS` com o índice na partida — um servidor que checasse isso no boot não subiria com o
+> Qdrant fora do ar. Uma área acrescentada a um vault e esquecida aqui continua não sendo oferecida
+> ao cliente. Uma área listada aqui é aceita como filtro; se a busca volta vazia, o servidor testa a
+> área sozinha — sem o `type` que a busca possa ter carregado junto, porque só a área é o que ele vai
+> acusar — e, quando ela não casa nada visível no índice, responde dizendo que o vazio veio do filtro
+> e não do assunto, e nomeia esta variável para o operador. Ao acrescentar ou renomear uma área em
+> qualquer vault, atualize `MCP_AREAS` na mesma passada.
 
 ## Quando a ingestão acontece
 
