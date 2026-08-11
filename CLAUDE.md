@@ -24,3 +24,27 @@ um débito.
 
 O `.gitignore` protege essa pasta. Ele não protege nada que nasça fora dela — por isso a regra
 acima, sobre o que é público, é a que exige atenção na hora de escrever.
+
+## As pastas excluídas da ingestão são decisão fechada
+
+O dono decidiu em 2026-08-11, com a medição na mesa, manter fora do índice as pastas que a
+configuração já exclui. **A validade do frontmatter nunca foi o motivo** — as pastas em questão
+estavam medidas e prontas para entrar, e a escolha foi de conteúdo: material operacional não deve
+competir, na busca, com as notas que o dono escreveu.
+
+Não proponha incluí-las alegando que "agora o frontmatter está válido". Uma delas, além disso, guarda
+templates cujos campos são placeholders por definição: eles são inválidos *porque* estão corretos, e
+"consertá-los" destruiria a função. Detalhes e números em `docs/debitos-tecnicos.md`, D-10.
+
+Reabre se o dono mudar de ideia sobre o conteúdo. Não reabre por remedição.
+
+## O registro de débitos envelhece, e isso já custou trabalho
+
+`docs/debitos-tecnicos.md` descreve o mundo de quando cada item foi escrito. Pagar uma dívida no
+código não atualiza o texto, e ninguém relê o arquivo inteiro. Em 2026-08-11, de seis itens
+atacados, **quatro descreviam uma realidade que já não existia** — um nunca tinha sido verdade, um
+já estava pago havia dois dias, e dois estavam parcialmente desatualizados.
+
+Antes de trabalhar num item deste arquivo, **confirme contra o código de hoje que o problema ainda
+existe**. Vale principalmente para a frase que define a gravidade: ela costuma soar como conclusão do
+parágrafo anterior e ser, na verdade, uma afirmação própria que ninguém verificou.
