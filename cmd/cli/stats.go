@@ -51,7 +51,7 @@ func newStatsCmd(read statsReader) *cobra.Command {
 			// exactly like an ingestion that never happened. `search` refuses the same value for
 			// the same reason (internal/clicmd/search.go).
 			//
-			// Refused rather than trimmed. Trimming would accept `--tenant " malka "` and search a
+			// Refused rather than trimmed. Trimming would accept `--tenant " tenant-a "` and search a
 			// value the operator did not type, which is the silent normalisation config.errNotSlug
 			// exists to avoid — and the same value is written into point_hash on the write path.
 			if tenantID != "" && strings.TrimSpace(tenantID) == "" {

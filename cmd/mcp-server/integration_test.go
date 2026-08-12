@@ -40,7 +40,7 @@ type qdrantAPI interface {
 const (
 	qdrantImage        = "qdrant/qdrant:v1.19.0"
 	integrationAPIKey  = "integration-test-key"
-	integrationTenant  = "malka"
+	integrationTenant  = "tenant-a"
 	integrationAddress = "127.0.0.1:6334"
 )
 

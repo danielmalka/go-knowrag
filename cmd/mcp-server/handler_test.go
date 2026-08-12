@@ -166,9 +166,9 @@ func assertScopeUnreachable(t *testing.T, args string) {
 	// caller named. This holds both when the call is refused (nothing runs) and if a future SDK
 	// version drops unknown keys instead (the handler assigns from Config).
 	for i, q := range fake.queries {
-		if q.TenantID != "malka" || q.Collection != "interno" {
+		if q.TenantID != "tenant-a" || q.Collection != "interno" {
 			t.Errorf("search %d reached the retrieval layer with scope {tenant %q, collection %q}, "+
-				"want {malka, interno}", i, q.TenantID, q.Collection)
+				"want {tenant-a, interno}", i, q.TenantID, q.Collection)
 		}
 	}
 	if text := resultText(t, res); strings.Contains(text, "clientes-x") {
@@ -193,8 +193,8 @@ func assertScopeUnreachable(t *testing.T, args string) {
 	if fake.calls() != 1 {
 		t.Errorf("searcher calls = %d after one legitimate call, want 1", fake.calls())
 	}
-	if q := fake.lastQuery(); q.TenantID != "malka" || q.Collection != "interno" {
-		t.Errorf("control query scope = {tenant %q, collection %q}, want {malka, interno}", q.TenantID, q.Collection)
+	if q := fake.lastQuery(); q.TenantID != "tenant-a" || q.Collection != "interno" {
+		t.Errorf("control query scope = {tenant %q, collection %q}, want {tenant-a, interno}", q.TenantID, q.Collection)
 	}
 }
 
@@ -216,8 +216,8 @@ func TestSearchKnowledge_PromptInjectionInQueryText_FilterUnchanged(t *testing.T
 		t.Fatalf("searcher called %d times, want 1", fake.calls())
 	}
 	q := fake.lastQuery()
-	if q.TenantID != "malka" || q.Collection != "interno" {
-		t.Errorf("query scope = {tenant %q, collection %q}, want {malka, interno}", q.TenantID, q.Collection)
+	if q.TenantID != "tenant-a" || q.Collection != "interno" {
+		t.Errorf("query scope = {tenant %q, collection %q}, want {tenant-a, interno}", q.TenantID, q.Collection)
 	}
 	if q.Text != injection {
 		t.Errorf("query text = %q, want it passed through verbatim as search text", q.Text)
@@ -316,7 +316,7 @@ func TestSearchKnowledge_LogsCallMetadata_NeverChunkText(t *testing.T) {
 	}
 
 	logged := buf.String()
-	for _, want := range []string{`"tenant":"malka"`, `"latency_ms"`, `"result_count":1`} {
+	for _, want := range []string{`"tenant":"tenant-a"`, `"latency_ms"`, `"result_count":1`} {
 		if !strings.Contains(logged, want) {
 			t.Errorf("the log record is missing %s:\n%s", want, logged)
 		}
@@ -344,7 +344,7 @@ func TestSearchKnowledge_ErrorPathAlsoLogs(t *testing.T) {
 	}
 
 	logged := buf.String()
-	for _, want := range []string{`"tenant":"malka"`, `"latency_ms"`, `"result_count":0`} {
+	for _, want := range []string{`"tenant":"tenant-a"`, `"latency_ms"`, `"result_count":0`} {
 		if !strings.Contains(logged, want) {
 			t.Errorf("the failure record is missing %s:\n%s", want, logged)
 		}

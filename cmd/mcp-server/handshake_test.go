@@ -342,7 +342,7 @@ func TestRun_DivergentBackend_NeverServes(t *testing.T) {
 	t.Cleanup(backend.Close)
 
 	t.Setenv(envCollection, "interno")
-	t.Setenv(envTenantID, "malka")
+	t.Setenv(envTenantID, "tenant-a")
 	t.Setenv(envQdrantEndpoint, "127.0.0.1:6334")
 	t.Setenv(envQdrantAPIKey, "runtime-read-key")
 	t.Setenv(envEmbedderEndpoint, backend.URL)
