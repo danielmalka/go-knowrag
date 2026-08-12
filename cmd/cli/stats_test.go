@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -49,9 +50,18 @@ func TestStatsCmd_PrintsBothCountsPerCollection(t *testing.T) {
 		t.Fatalf("stats: %v", err)
 	}
 
-	for _, want := range []string{"interno", "3200", "780", "clientes", "base_paga", "12"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("the output does not carry %q:\n%s", want, out)
+	// Each number is asserted **on its own collection's line**. Searching the whole output for the
+	// numbers is what this test used to do, and it passes with every count attached to the wrong
+	// collection — which is the one way these figures can be wrong and still look plausible.
+	for name, want := range sampleCounts() {
+		line := lineFor(t, out, name)
+		// Each number against its own label, not loose in the line: `points: 780 uids: 3200` carries
+		// both figures and says the opposite of the truth.
+		if !strings.Contains(line, fmt.Sprintf("points: %d", want.Points)) {
+			t.Errorf("the line for %s does not report %d points: %q", name, want.Points, line)
+		}
+		if !strings.Contains(line, fmt.Sprintf("uids: %d", want.UIDs)) {
+			t.Errorf("the line for %s does not report %d uids: %q", name, want.UIDs, line)
 		}
 	}
 	// A collection that holds nothing is still reported, and reported as zero. Skipping it would
@@ -59,6 +69,56 @@ func TestStatsCmd_PrintsBothCountsPerCollection(t *testing.T) {
 	// indistinguishable from "not provisioned at all".
 	if lines := strings.Count(strings.TrimSpace(out), "\n") + 1; lines != len(sampleCounts()) {
 		t.Errorf("the output has %d line(s) for %d collections:\n%s", lines, len(sampleCounts()), out)
+	}
+}
+
+// lineFor returns the one output line naming collection, and fails if there is not exactly one.
+// Two lines for one collection would let the assertions above pass against a report that says two
+// different things.
+func lineFor(t *testing.T, out, collection string) string {
+	t.Helper()
+
+	var found []string
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), collection) {
+			found = append(found, line)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("%d line(s) report %s, want exactly 1:\n%s", len(found), collection, out)
+	}
+	return found[0]
+}
+
+// TestStatsCmd_BlankTenant_IsRefused covers the value that is neither of the two things --tenant can
+// mean. It is not absent, so it is not "every tenant", and it matches no point — so a healthy
+// collection reports zero and zero, which reads as an ingestion that never happened.
+func TestStatsCmd_BlankTenant_IsRefused(t *testing.T) {
+	out, tenants, err := runStats(t, sampleCounts(), nil, "--tenant", "   ")
+	if err == nil {
+		t.Fatal("--tenant '   ' was accepted, and its zeros read as an empty index")
+	}
+	if got := clicmd.CategoryOf(err); got != clicmd.CategoryUsage {
+		t.Errorf("CategoryOf(%v) = %q, want %q — the command line is what has to change", err, got, clicmd.CategoryUsage)
+	}
+	if len(tenants) != 0 {
+		t.Errorf("the reader was called %v for a tenant the command should have refused", tenants)
+	}
+	if strings.TrimSpace(out) != "" {
+		t.Errorf("the refusal printed counts anyway:\n%s", out)
+	}
+}
+
+// TestStatsCmd_AbsentTenantStillMeansEveryTenant is the other half, and the one the guard above
+// could break: refusing whitespace must not turn the omitted flag into a refusal too. Counting
+// every tenant is what `stats` with no flag is for.
+func TestStatsCmd_AbsentTenantStillMeansEveryTenant(t *testing.T) {
+	_, tenants, err := runStats(t, sampleCounts(), nil)
+	if err != nil {
+		t.Fatalf("stats with no --tenant: %v", err)
+	}
+	if len(tenants) != 1 || tenants[0] != "" {
+		t.Errorf("the reader was asked for %v, want exactly one unscoped read", tenants)
 	}
 }
 

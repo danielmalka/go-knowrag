@@ -20,8 +20,8 @@ func TestModes_RefuseExplicitlyUntilTheHarnessExists(t *testing.T) {
 		story string
 		flag  string
 	}{
-		"golden":    {run: RunGolden, story: "S10", flag: "--golden"},
-		"isolation": {run: RunIsolation, story: "S11", flag: "--isolation"},
+		"golden":    {run: GoldenGate, story: "S10", flag: "--golden"},
+		"isolation": {run: IsolationGate, story: "S11", flag: "--isolation"},
 	}
 
 	for name, tc := range tests {
@@ -50,8 +50,8 @@ func TestModes_RefuseExplicitlyUntilTheHarnessExists(t *testing.T) {
 // with the same error value, so the message is the only thing that says which gate is missing, and
 // a reader who ran --isolation must not be sent to read S10's story.
 func TestModes_RefusalsAreDistinguishable(t *testing.T) {
-	golden, gerr := RunGolden(context.Background(), Options{})
-	isolation, ierr := RunIsolation(context.Background(), Options{})
+	golden, gerr := GoldenGate(context.Background(), Options{})
+	isolation, ierr := IsolationGate(context.Background(), Options{})
 
 	if gerr.Error() == ierr.Error() {
 		t.Errorf("both modes refuse with the same sentence, so neither says which gate is missing: %v", gerr)

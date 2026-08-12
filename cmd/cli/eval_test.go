@@ -120,15 +120,19 @@ func TestEvalCmd_FailedGate_IsAnAssertionNotABrokenBackend(t *testing.T) {
 	}
 }
 
-// TestEvalCmd_MissingHarness_IsNotAnAssertion is the distinction the whole not-implemented path
+// TestEvalCmd_MissingHarness_IsABackendFailure is the distinction the whole not-implemented path
 // exists for. A gate with no harness measured nothing, so reporting it in the same category as a
 // gate that ran and failed would put "the golden set regressed" and "the golden set does not exist
 // yet" on the same exit code.
-func TestEvalCmd_MissingHarness_IsNotAnAssertion(t *testing.T) {
+//
+// It asserts the category the failure *has*, not only the one it must not have. This test used to
+// say `!= CategoryAssertion`, which is satisfied by every wrong answer as well as the right one: a
+// category invented later, or a usage error, would have kept it green while the exit code moved.
+func TestEvalCmd_MissingHarness_IsABackendFailure(t *testing.T) {
 	for _, mode := range []string{"--golden", "--isolation"} {
 		// The real entry points, not a fake: what is under test is the category the command gives
 		// the error internal/eval actually returns today.
-		cmd := newEvalCmd(&config.Config{}, evalModes{golden: eval.RunGolden, isolation: eval.RunIsolation})
+		cmd := newEvalCmd(&config.Config{}, evalModes{golden: eval.GoldenGate, isolation: eval.IsolationGate})
 		var out, errOut bytes.Buffer
 		cmd.SetOut(&out)
 		cmd.SetErr(&errOut)
@@ -141,9 +145,10 @@ func TestEvalCmd_MissingHarness_IsNotAnAssertion(t *testing.T) {
 		if !errors.Is(err, eval.ErrNotImplemented) {
 			t.Errorf("eval %s lost the sentinel on its way through cobra: %v", mode, err)
 		}
-		if got := clicmd.CategoryOf(err); got == clicmd.CategoryAssertion {
-			t.Errorf("eval %s reports a missing harness as a failed gate, which claims a "+
-				"measurement nobody made", mode)
+		if got := clicmd.CategoryOf(err); got != clicmd.CategoryBackend {
+			t.Errorf("eval %s reports a missing harness as %q, want %q. Assertion would claim a "+
+				"measurement nobody made; usage would tell the operator to fix a command line that "+
+				"is already correct", mode, got, clicmd.CategoryBackend)
 		}
 	}
 }
@@ -224,6 +229,15 @@ const (
 // grepping for eval.ErrNotImplemented's message. Nothing at run time relates the two: change the
 // error and the script stops recognising it, both jobs go red, and the first reading of that will
 // be "the gate broke" — which is the opposite of what happened.
+//
+// The comparison is equality, and the length floor below is not belt-and-braces. This test used to
+// ask whether the error *contains* the sentinel, which is the weaker half of a contract whose other
+// half — the comment in the script — already said "must equal". Containment passes for the empty
+// string against any error, and `grep -qF ""` matches every line, so a sentinel emptied by an edit
+// would leave this green while the gate swallowed compile errors, missing modules and panics as
+// "harness pending" and exited 0. A one-character sentinel is the same defect with one more
+// keystroke. Equality closes the first door and the floor closes the second, which is the one
+// equality cannot: it holds just as well between two useless values.
 func TestCIWorkflow_PendingSentinelMatchesTheErrorItLooksFor(t *testing.T) {
 	script := readRepoFile(t, evalGateScript)
 
@@ -235,9 +249,19 @@ func TestCIWorkflow_PendingSentinelMatchesTheErrorItLooksFor(t *testing.T) {
 	rest := script[i+len(assignment):]
 	sentinel := rest[:strings.Index(rest, `"`)]
 
-	if !strings.Contains(eval.ErrNotImplemented.Error(), sentinel) {
-		t.Errorf("the CI gate greps for %q, which is not part of eval.ErrNotImplemented (%q) — the "+
-			"pending harness would be reported as a broken gate", sentinel, eval.ErrNotImplemented)
+	// Long enough to identify something. Nothing computes this bound; it is a floor under "a string
+	// short enough to appear in an unrelated failure", and the failures it has to stay out of are
+	// Go toolchain messages.
+	const minSentinel = 8
+	if len(sentinel) < minSentinel {
+		t.Fatalf("the CI gate greps for %q, %d character(s) — a sentinel that short matches failures "+
+			"it knows nothing about, and the gate would report them as a pending harness and exit 0",
+			sentinel, len(sentinel))
+	}
+	if sentinel != eval.ErrNotImplemented.Error() {
+		t.Errorf("the CI gate greps for %q; eval.ErrNotImplemented is %q. They have to be the same "+
+			"string — the script's own comment says so, and a mismatch reports either a pending "+
+			"harness as a broken gate or a broken gate as pending", sentinel, eval.ErrNotImplemented)
 	}
 }
 

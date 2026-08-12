@@ -120,6 +120,32 @@ func TestStats_PointWithoutUID_IsAnErrorNamingIt(t *testing.T) {
 	}
 }
 
+// TestStats_EmptyPageWithAnOffset_IsAnErrorNotAPartialCount closes the one gap between what this
+// read promises and what its loop did. The doc comment says the pass cannot truncate in silence; a
+// page that comes back empty while still handing over an offset used to stop the loop and return
+// the count so far as if it were the total.
+//
+// It is not a shape Qdrant is documented to produce, and that is why it needs a test rather than a
+// comment: "the server will not do this" is a claim about code that does not live here, and the cost
+// of being wrong is a number that looks right.
+func TestStats_EmptyPageWithAnOffset_IsAnErrorNotAPartialCount(t *testing.T) {
+	api := &fakePointAPI{
+		pages: [][]*qdrant.RetrievedPoint{
+			{statsPoint("p1", "uid-a"), statsPoint("p2", "uid-b")},
+			{}, // empty, and the offset below says there is more after it
+		},
+		offsets: []*qdrant.PointId{qdrant.NewIDUUID("p2"), qdrant.NewIDUUID("p2")},
+	}
+
+	got, err := newTestClient(t, api).Stats(context.Background(), testTenant)
+	if err == nil {
+		t.Fatalf("Stats returned %+v and no error for a scroll that stopped early", got)
+	}
+	if got != (Stats{}) {
+		t.Errorf("Stats = %+v alongside an error; the partial count must not be readable as a total", got)
+	}
+}
+
 // TestStats_ScrollFailure_IsReportedNotCountedAsZero is the same rule the orphan scan follows: not
 // having finished looking must never render as having found nothing.
 func TestStats_ScrollFailure_IsReportedNotCountedAsZero(t *testing.T) {

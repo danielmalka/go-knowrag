@@ -10,8 +10,9 @@ import (
 //
 // It is a sentinel rather than a message because two callers have to recognise it without matching
 // prose: cmd/cli maps it to an exit code, and the CI jobs that run these gates recognise a
-// still-missing harness by it (.github/workflows/ci.yml, guarded by TestCIWorkflow_GatesOnTheRealSentinel
-// in cmd/cli so the string in the YAML cannot drift away from this one).
+// still-missing harness by it. That second caller is a shell script, scripts/ci/eval-gate.sh, which
+// carries this message as a literal because it cannot import a Go value; the two are held equal by
+// TestCIWorkflow_PendingSentinelMatchesTheErrorItLooksFor in cmd/cli, which reads that script.
 //
 // What it must never be is a zero-valued Outcome and a nil error. An evaluation that did not run is
 // not an evaluation that passed — the same rule the ingestion report follows when it refuses to
@@ -57,14 +58,23 @@ type Outcome struct {
 	Summary string
 }
 
-// The two modes. One function each rather than one function with a mode argument, so that a caller
+// The two gates. One function each rather than one function with a mode argument, so that a caller
 // cannot pass a mode that does not exist and so each keeps its own signature as S10 and S11 grow
 // them apart.
-func RunGolden(_ context.Context, _ Options) (Outcome, error) {
+//
+// They are named for the gate rather than for the run, and that is to leave S10 and S11 the names
+// their own documents already spend. S10's task document specifies
+// `RunGolden(ctx, Searcher, []GoldenQuestion, RunConfig) ([]QuestionResult, error)` in this package
+// — a harness that measures and reports per question. Had this stub been called RunGolden, S10's
+// first commit would have had to delete it before it could add its own, and the collision would
+// have surfaced as a build failure in somebody else's story. Two names, two jobs: `*Gate` is the
+// CLI-facing seam that answers "did it pass", `Run*` is the harness that does the measuring, and
+// the gate calls the harness.
+func GoldenGate(_ context.Context, _ Options) (Outcome, error) {
 	return Outcome{}, notImplemented("golden", "S10", "the golden set and the recall harness")
 }
 
-func RunIsolation(_ context.Context, _ Options) (Outcome, error) {
+func IsolationGate(_ context.Context, _ Options) (Outcome, error) {
 	return Outcome{}, notImplemented("isolation", "S11", "the multi-tenant isolation suite")
 }
 

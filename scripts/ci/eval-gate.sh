@@ -24,10 +24,22 @@ set -uo pipefail
 
 mode="${1:?usage: eval-gate.sh golden|isolation}"
 
-# Must equal eval.ErrNotImplemented.Error() (internal/eval/eval.go). Nothing at run time checks
-# that, because this is a shell script and that is a Go value; what checks it is
-# TestCIWorkflow_PendingSentinelMatchesTheErrorItLooksFor in cmd/cli, which reads this file.
+# Must equal eval.ErrNotImplemented.Error() (internal/eval/eval.go). Nothing at run time can check
+# that equality — this is a shell script and that is a Go value — so
+# TestCIWorkflow_PendingSentinelMatchesTheErrorItLooksFor in cmd/cli reads this line and compares
+# the two.
 not_implemented="eval: not implemented"
+
+# The one part this script can check about its own sentinel, and it checks it because the failure is
+# silent in the worst direction: `grep -qF ""` matches every line, so an emptied sentinel turns the
+# pending branch below into "any failure at all is a pending harness, exit 0" — compile errors,
+# missing modules and panics included. The Go test above is the real guard; this is what still holds
+# if somebody edits this file without running it.
+if [ "${#not_implemented}" -lt 8 ]; then
+  printf 'eval-gate: the pending sentinel is %d character(s) — too short to identify anything\n' \
+    "${#not_implemented}" >&2
+  exit 1
+fi
 
 output=$(go run ./cmd/cli eval "--${mode}" --json 2>&1)
 status=$?

@@ -259,10 +259,128 @@ func TestExitCodeFor_ARefusedCommandLineIsAUsageError(t *testing.T) {
 	}
 }
 
+// commandPackages are the two directories every `knowrag` subcommand is built in.
+var commandPackages = []string{"cmd/cli", "internal/clicmd"}
+
+// TestEveryRunE_SilencesUsageFirst is the invariant exitCodeFor rests on, checked mechanically
+// instead of remembered.
+//
+// The mapping reads SilenceUsage to tell "cobra refused this command line" from "the command ran
+// and failed", and that only works while every RunE sets the flag before it can fail. Nothing in
+// cobra enforces it and nothing at run time notices it missing: a new subcommand that forgets is a
+// subcommand whose every failure — an unreachable Qdrant included — exits on the usage code, which
+// tells a scheduler to stop retrying an outage.
+//
+// It reads source rather than behaviour because the alternative is running each command for real,
+// and the ones worth checking are exactly the ones that open sockets. Requiring it as the *first*
+// statement is stricter than the invariant needs and is what makes it checkable at all: "before
+// anything that can fail" is not a property a parser can decide.
+func TestEveryRunE_SilencesUsageFirst(t *testing.T) {
+	root := moduleRoot(t)
+
+	found := 0
+	for _, pkg := range commandPackages {
+		for _, r := range runEBodies(t, filepath.Join(root, pkg)) {
+			found++
+			if !silencesUsageFirst(r.body) {
+				t.Errorf("%s: this RunE does not set `cmd.SilenceUsage = true` as its first "+
+					"statement. Without it every failure of this command exits on the usage code, "+
+					"because exitCodeFor cannot tell it from a command line cobra refused", r.where)
+			}
+		}
+	}
+	// Non-vacuity, and it is an assertion rather than a comment for the reason the credential scan
+	// above states: a walker with a wrong root or a matcher that stopped matching passes silently
+	// and forever. There are five commands with a RunE in this tree; the floor is below that so
+	// adding one is not a failure, and far enough above zero to catch a walk that found nothing.
+	if found < 5 {
+		t.Fatalf("the walk found %d RunE function(s) in %v — there are more than that, so this test "+
+			"is passing because it is looking at nothing", found, commandPackages)
+	}
+}
+
+// runE is one `RunE:` field found in a command literal, with enough location to fix it.
+type runE struct {
+	where string
+	body  *ast.FuncLit
+}
+
+func runEBodies(t *testing.T, dir string) []runE {
+	t.Helper()
+
+	fset := token.NewFileSet()
+	pkgFiles, err := filepath.Glob(filepath.Join(dir, "*.go"))
+	if err != nil {
+		t.Fatalf("globbing %s: %v", dir, err)
+	}
+
+	var out []runE
+	for _, path := range pkgFiles {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		file, perr := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+		if perr != nil {
+			t.Fatalf("parsing %s: %v", path, perr)
+		}
+		ast.Inspect(file, func(n ast.Node) bool {
+			kv, ok := n.(*ast.KeyValueExpr)
+			if !ok {
+				return true
+			}
+			key, ok := kv.Key.(*ast.Ident)
+			if !ok || key.Name != "RunE" {
+				return true
+			}
+			lit, ok := kv.Value.(*ast.FuncLit)
+			if !ok {
+				// A RunE assigned from a named function is not wrong, but this walker cannot follow
+				// it — and a check that quietly skips what it cannot read is the vacuum this test
+				// exists to avoid.
+				t.Errorf("%s: RunE is not a function literal, so this test cannot read it",
+					fset.Position(kv.Pos()))
+				return true
+			}
+			out = append(out, runE{where: fset.Position(kv.Pos()).String(), body: lit})
+			return true
+		})
+	}
+	return out
+}
+
+// silencesUsageFirst reports whether the literal's first statement is `<param>.SilenceUsage = true`,
+// where <param> is whatever the body named cobra's command argument.
+func silencesUsageFirst(lit *ast.FuncLit) bool {
+	if len(lit.Body.List) == 0 || len(lit.Type.Params.List) == 0 ||
+		len(lit.Type.Params.List[0].Names) == 0 {
+		return false
+	}
+	param := lit.Type.Params.List[0].Names[0].Name
+
+	assign, ok := lit.Body.List[0].(*ast.AssignStmt)
+	if !ok || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
+		return false
+	}
+	sel, ok := assign.Lhs[0].(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "SilenceUsage" {
+		return false
+	}
+	recv, ok := sel.X.(*ast.Ident)
+	if !ok || recv.Name != param {
+		return false
+	}
+	value, ok := assign.Rhs[0].(*ast.Ident)
+	return ok && value.Name == "true"
+}
+
 // TestExitCodeFor_AFailureInsideACommandKeepsItsCategory is the other direction, and the reason the
 // case above cannot simply be "cobra returned an error". A command that got as far as running and
 // then failed answers for its own category; only a command line cobra never accepted is a usage
 // error.
+//
+// The command it runs against is synthetic and carries SilenceUsage already set, which is the half
+// this test cannot prove on its own: that the real commands set it is
+// TestEveryRunE_SilencesUsageFirst's job, and this one would be an empty assertion without it.
 func TestExitCodeFor_AFailureInsideACommandKeepsItsCategory(t *testing.T) {
 	// SilenceUsage set, exactly as every RunE in this tree sets it before doing anything else.
 	ran := &cobra.Command{Use: "ran"}

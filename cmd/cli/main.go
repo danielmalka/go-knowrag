@@ -97,6 +97,15 @@ func main() {
 // RunE in this tree sets SilenceUsage as its first statement, so the flag is still false exactly
 // when cobra refused the command line before reaching one, and that is the signal: cobra printing a
 // usage block and this exiting on the usage code are the same event, decided by the same field.
+//
+// "Every RunE sets it" is correctness that lives in one line of every command — the shape this
+// series has paid for four times. It cannot be moved to a single place: a PersistentPreRunE runs
+// *before* ValidateRequiredFlags and ValidateFlagGroups in cobra v1.10.2's execute(), so setting the
+// flag there would mark a refused flag group as a command that ran, and setting it on the command
+// struct at construction would suppress the usage block for the parse errors that should print one.
+// So the call site stays, and TestEveryRunE_SilencesUsageFirst (cmd/cli/main_test.go) walks the
+// source of both command packages and fails on the first RunE that forgets — which is the same
+// answer, mechanically checked, rather than remembered.
 func exitCodeFor(cmd *cobra.Command, err error) int {
 	switch {
 	// The three sentinels come first because they predate the categories and carry codes no
@@ -137,7 +146,15 @@ func newRootCmd(cfg *config.Config) *cobra.Command {
 		Args: cobra.NoArgs,
 		// Runnable with no subcommand given, so a bare invocation prints usage instead of an
 		// empty Usage block.
-		RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() },
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			// Set here for the same reason every other RunE sets it first, and it is not cosmetic
+			// even though this body only prints help: exitCodeFor reads this flag to tell a command
+			// line cobra refused from a command that ran and failed. Left unset, a Help() that fails
+			// on a closed pipe would be reported as a usage error — and, worse, the invariant the
+			// mapping rests on would have an exception, which is how the next one gets added.
+			cmd.SilenceUsage = true
+			return cmd.Help()
+		},
 	}
 	root.AddCommand(newSchemaCmd(cfg))
 	root.AddCommand(newIngestCmd(cfg))
@@ -148,7 +165,7 @@ func newRootCmd(cfg *config.Config) *cobra.Command {
 	// The two gates, pointed at internal/eval's entry points. Both refuse with eval.ErrNotImplemented
 	// until S10 and S11 build the harnesses behind them; what is fixed here is the call shape and the
 	// exit code, so neither story has to invent one.
-	root.AddCommand(newEvalCmd(cfg, evalModes{golden: eval.RunGolden, isolation: eval.RunIsolation}))
+	root.AddCommand(newEvalCmd(cfg, evalModes{golden: eval.GoldenGate, isolation: eval.IsolationGate}))
 	// Cobra prints its own message for a bad flag or unknown subcommand; the extra copy Execute
 	// would return here is noise.
 	root.SilenceErrors = true

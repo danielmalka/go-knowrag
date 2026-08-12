@@ -6,6 +6,7 @@ import (
 	"io"
 	"maps"
 	"slices"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -43,6 +44,21 @@ func newStatsCmd(read statsReader) *cobra.Command {
 			// Same reason as every other command here: with --json stdout is the envelope, and a
 			// usage block printed onto it is a document no parser can read.
 			cmd.SilenceUsage = true
+
+			// A tenant of whitespace is neither of the two things --tenant can mean. It is not
+			// absent, so it does not mean "every tenant", and it is not a tenant, so it matches no
+			// point: the run reports zero points and zero uids over a healthy corpus, which reads
+			// exactly like an ingestion that never happened. `search` refuses the same value for
+			// the same reason (internal/clicmd/search.go).
+			//
+			// Refused rather than trimmed. Trimming would accept `--tenant " malka "` and search a
+			// value the operator did not type, which is the silent normalisation config.errNotSlug
+			// exists to avoid — and the same value is written into point_hash on the write path.
+			if tenantID != "" && strings.TrimSpace(tenantID) == "" {
+				return clicmd.Usage("--tenant is whitespace: it matches no point, so the counts " +
+					"would come back zero over a healthy collection. Pass a tenant, or drop the " +
+					"flag to count every tenant")
+			}
 
 			out := cmd.OutOrStdout()
 			counts, err := read(cmd.Context(), tenantID)

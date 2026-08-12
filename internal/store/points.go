@@ -247,8 +247,21 @@ func (c *Client) Stats(ctx context.Context, tenantID string) (Stats, error) {
 			uids[uid] = struct{}{}
 			points++
 		}
-		if next == nil || len(page) == 0 {
+		if next == nil {
 			return Stats{Points: points, UIDs: len(uids)}, nil
+		}
+		// An empty page that still hands back an offset is the one shape this loop cannot honour:
+		// continuing would re-issue the same request forever, and stopping would return a count of
+		// part of the collection as the count of all of it. The comment above promises this read
+		// cannot truncate in silence, so it is an error rather than the second of those.
+		//
+		// Not reachable through Qdrant's documented behaviour — the offset comes back nil when there
+		// is nothing after the page. It is checked because "not reachable" is a claim about a server
+		// this code does not contain, and the cost of being wrong is a wrong number that looks right.
+		if len(page) == 0 {
+			return Stats{}, fmt.Errorf(
+				"counting %s: the scroll returned an empty page and an offset to continue from, so "+
+					"this count would be of part of the collection reported as all of it", c.collection)
 		}
 		offset = next
 	}
