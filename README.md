@@ -73,6 +73,14 @@ determinístico, o intervalo de Wilson a 95% e o relatório, e o job hermético 
 `knowrag eval --golden` de verdade contra o fixture sintético em `testdata/eval/hermetic/` a cada
 push — sem Qdrant, sem embedder e sem GPU. Um recall abaixo do limiar reprova o job.
 
+**Duas coisas, checadas em dois passos do mesmo job.** O *limiar* é um piso — recall ≥
+`--min-recall` — e não uma igualdade, porque é isso que um gate de recall significa. O *fixture* é
+checado à parte, porque o piso não o enxerga: apagar as perguntas deliberadamente sem resposta
+levaria o recall a 1.0, o que passa o piso. Quem exige 6/8 exatos, e confere o número contra o
+`ci.yml`, é `TestHermeticGoldenGate_FixtureCorpus_AchievesExpectedRecall` — rodado pelo próprio job,
+não só pela suíte unitária, para que um check verde chamado `eval-golden-hermetic` signifique o que
+o nome diz sem depender de outro job existir.
+
 O que falta é **o número que importa** e a outra suíte. O golden set real e o baseline contra a base
 real são S10 T14–T16, e rodam fora do CI público; a suíte de isolamento é S11, e o job dela ainda
 reporta *pendente* em vez de medir. **Hoje bloqueiam merge: lint, a suíte unitária com `-race` e o
@@ -421,7 +429,7 @@ qualidade de busca deste deploy. Número saído dali não entra em baseline nenh
 
 **O golden tem harness e o isolamento não.** `--golden` mede; o job hermético do CI roda
 `knowrag eval --golden --corpus testdata/eval/hermetic/corpus.yaml` a cada push e reprova de
-verdade. `--isolation` ainda recusa dizendo que S11 a constrói, e o job dela reporta *pendente*. Os
+verdade. O job checa duas coisas em passos separados: o fixture (6/8 exatos) e o limiar; ver acima. `--isolation` ainda recusa dizendo que S11 a constrói, e o job dela reporta *pendente*. Os
 dois passam por `scripts/ci/eval-gate.sh`, que só aceita "pendente" dos modos que ainda não têm
 harness — golden saiu dessa lista quando ganhou o dele.
 

@@ -357,18 +357,44 @@ func TestEvalCmd_JSON_CarriesBothTheReportAndTheVerdict(t *testing.T) {
 	}
 }
 
-// TestEvalCmd_JSON_IsolationReportsANullScore is S11's requirement seen from the wire. Its suite has
-// no number by design, and a missing key would read to a consumer as a field it forgot to ask for
-// rather than as a gate that has nothing to average.
-func TestEvalCmd_JSON_IsolationReportsANullScore(t *testing.T) {
-	r := &recordingModes{outcome: eval.Outcome{Passed: true, Summary: "8 cases, all passed"}}
+// TestEvalCmd_JSON_ScoreIsAbsentNotZero is the distinction a gate script would read wrong, asserted
+// on the bytes the command actually writes.
+//
+// `"score": null` means the gate has no number by design — S11's isolation suite, which must never
+// be reportable as a percentage. `"score": 0` means it measured and got zero, which for the golden
+// gate is total retrieval failure. A consumer that saw one where the other was meant would either
+// page somebody over a healthy isolation run or ignore a recall of zero.
+//
+// Both directions, because either alone is satisfied by an encoder that always emits the other. It
+// replaces a version of this claim that lived in internal/eval and could not fail at run time —
+// see the note there.
+func TestEvalCmd_JSON_ScoreIsAbsentNotZero(t *testing.T) {
+	zero := 0.0
 
-	out, err := runEval(t, r, "--isolation", "--json")
-	if err != nil {
-		t.Fatalf("eval --isolation --json: %v", err)
+	cases := map[string]struct {
+		mode         string
+		outcome      eval.Outcome
+		want, absent string
+	}{
+		"isolation has no number":        {"--isolation", eval.Outcome{Passed: true, Summary: "8 cases, all passed"}, `"score":null`, `"score":0`},
+		"golden measured and got zero":   {"--golden", eval.Outcome{Passed: false, Score: &zero, Summary: "recall 0.0000"}, `"score":0`, `"score":null`},
+		"golden measured something else": {"--golden", eval.Outcome{Passed: true, Score: score(0.75), Summary: "recall 0.7500"}, `"score":0.75`, `"score":null`},
 	}
-	if !strings.Contains(out, `"score":null`) {
-		t.Errorf("the isolation envelope does not state the absent score:\n%s", out)
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			r := &recordingModes{outcome: tc.outcome}
+			out, _ := runEval(t, r, tc.mode, "--json")
+
+			if !strings.Contains(out, tc.want) {
+				t.Errorf("the envelope does not carry %s:\n%s", tc.want, out)
+			}
+			// The absent half is what makes this a distinction rather than a spelling check: an
+			// encoder emitting `null` for everything satisfies the first assertion alone.
+			if strings.Contains(out, tc.absent) {
+				t.Errorf("the envelope carries %s, which a consumer reads as the other case:\n%s", tc.absent, out)
+			}
+		})
 	}
 }
 

@@ -96,24 +96,15 @@ func TestModes_RefusalsAreDistinguishable(t *testing.T) {
 	}
 }
 
-// TestOutcome_ScoreIsAbsentNotZero pins the one field shape S10 and S11 must not collapse.
+// The "score is absent, not zero" claim used to be asserted here, by building two Outcome values by
+// hand and checking that a Go pointer can be nil. That test could not fail at run time: it called
+// nothing, and the only thing that would have broken it was a type change that stops this package
+// compiling. "The defect is not representable" and "this test is worth running" are different
+// claims, and only the first one was true of it.
 //
-// S11's task document requires its report to carry no numeric score anywhere: a tenant-isolation
-// suite that could be reported as 90% passing is one somebody can argue down. A float64 would make
-// "no score" indistinguishable from "scored zero", which is the worst possible reading of an
-// isolation run. The pointer is what keeps the absence sayable.
-func TestOutcome_ScoreIsAbsentNotZero(t *testing.T) {
-	zero := 0.0
-	scored := Outcome{Score: &zero}
-	unscored := Outcome{}
-
-	if unscored.Score != nil {
-		t.Error("an Outcome with no score carries one")
-	}
-	if scored.Score == nil || *scored.Score != 0 {
-		t.Error("a score of zero is not representable, so a gate that scored zero reports as unscored")
-	}
-}
+// The claim that is worth running is the round trip, because `"score": 0` and `"score": null` are
+// what a gate script actually reads, and it lives where those bytes are produced:
+// TestEvalCmd_JSON_ScoreIsAbsentNotZero in cmd/cli/eval_test.go.
 
 // goldenGateFixture is a golden set committed to a throwaway repository, which is what GoldenGate
 // needs to resolve provenance. It returns the path and the questions in it.
