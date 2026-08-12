@@ -63,17 +63,22 @@ o protocolo é padrão, então qualquer agente que fale MCP consegue consumir. O
 entanto, não é uma porta aberta: cada instância nasce com a coleção e o tenant **fixados na própria
 configuração**, e quem pode consultar o quê é decisão de deploy.
 
-**Avaliação: o desenho existe, a entrega não.** O plano é um golden set medindo Recall@5 e uma suíte
-adversarial de vazamento entre tenants, os dois como gates e não como relatório que alguém lê quando
-lembra — o **hermético**, sobre fixture sintético versionado, bloqueando merge no CI; o que roda
-contra a base e o deploy reais, em runner privado, bloqueando release. Assim o CI nunca precisaria de
-acesso ao corpus.
+**Avaliação: metade entregue.** O plano é um golden set medindo Recall@5 e uma suíte adversarial de
+vazamento entre tenants, os dois como gates e não como relatório que alguém lê quando lembra — o
+**hermético**, sobre fixture sintético versionado, bloqueando merge no CI; o que roda contra a base e
+o deploy reais, em runner privado, bloqueando release. Assim o CI nunca precisa de acesso ao corpus.
 
-Nada disso está construído. `internal/eval/` tem só um `doc.go`, e os dois jobs correspondentes no
-`.github/workflows/ci.yml` estão `if: false` com um `echo` no lugar do comando (`S10`, `S11`). **O
-que bloqueia merge hoje é o lint e a suíte unitária, esta com `-race`.** O único teste de isolamento
-entre tenants que existe está atrás da tag `integration` (`internal/retrieval/integration_test.go`):
-roda à mão no runner privado, nunca no CI e nunca contra uma PR.
+O lado do **recall está construído e ligado**: `internal/eval/` tem o loader do golden set, o runner
+determinístico, o intervalo de Wilson a 95% e o relatório, e o job hermético do CI roda
+`knowrag eval --golden` de verdade contra o fixture sintético em `testdata/eval/hermetic/` a cada
+push — sem Qdrant, sem embedder e sem GPU. Um recall abaixo do limiar reprova o job.
+
+O que falta é **o número que importa** e a outra suíte. O golden set real e o baseline contra a base
+real são S10 T14–T16, e rodam fora do CI público; a suíte de isolamento é S11, e o job dela ainda
+reporta *pendente* em vez de medir. **Hoje bloqueiam merge: lint, a suíte unitária com `-race` e o
+gate hermético de recall.** O único teste de isolamento entre tenants que existe está atrás da tag
+`integration` (`internal/retrieval/integration_test.go`): roda à mão no runner privado, nunca no CI e
+nunca contra uma PR.
 
 ## Como funciona
 
@@ -391,15 +396,34 @@ observabilidade. Não tem flag além de `--tenant` e `--json`.
 ### `knowrag eval`
 
 ```bash
-knowrag eval --golden      # recall contra o golden set
-knowrag eval --isolation   # a suíte de isolamento entre tenants
+knowrag eval --golden                      # recall contra o golden set
+knowrag eval --golden --min-recall 0.80    # reprova (exit 4) abaixo do limiar
+knowrag eval --isolation                   # a suíte de isolamento entre tenants
 ```
 
-Exatamente um dos dois modos, obrigatório. **Nenhum dos dois tem harness ainda** — S10 constrói o
-golden set, S11 a suíte de isolamento — e o comando recusa dizendo qual história falta em vez de
-reportar um passe que ninguém mediu. Os dois jobs de CI rodam este comando em toda push e reportam
-*pendente*; o dia em que o harness existir, eles viram gate sem ninguém ligar nada
-(`scripts/ci/eval-gate.sh`).
+Exatamente um dos dois modos, obrigatório.
+
+| Flag | Padrão | O que faz |
+|---|---|---|
+| `--file` | `docs/eval/golden-set.yaml` | Golden set a medir. Só com `--golden` |
+| `--corpus` | *(vazio)* | Busca **neste arquivo** em vez da coleção do Qdrant. Só com `--golden` |
+| `--min-recall` | `0` | Recall mínimo para passar. `0` registra o número sem reprovar |
+| `--json` | — | Envelope JSON no stdout e nada mais |
+
+O escopo não é flag: a coleção vem de `DEFAULT_COLLECTION` e o tenant é o mesmo padrão que a
+ingestão usa, porque um gate que aceitasse `--tenant` mediria recall de um escopo que ninguém
+ingeriu. O golden set ausente é erro nomeando o caminho (exit 2) — nunca "recall 0", nunca um passe.
+
+**`--corpus` é o que torna o gate hermético possível.** Um corpus é um índice expresso como arquivo:
+chunks com texto, pontuados por sobreposição de termos em vez de embeddings. Uma execução assim não
+abre conexão, não precisa de embedder nem de GPU, e mede o *harness* de ponta a ponta — não a
+qualidade de busca deste deploy. Número saído dali não entra em baseline nenhum.
+
+**O golden tem harness e o isolamento não.** `--golden` mede; o job hermético do CI roda
+`knowrag eval --golden --corpus testdata/eval/hermetic/corpus.yaml` a cada push e reprova de
+verdade. `--isolation` ainda recusa dizendo que S11 a constrói, e o job dela reporta *pendente*. Os
+dois passam por `scripts/ci/eval-gate.sh`, que só aceita "pendente" dos modos que ainda não têm
+harness — golden saiu dessa lista quando ganhou o dele.
 
 ### Servidor MCP (`knowrag-mcp`)
 

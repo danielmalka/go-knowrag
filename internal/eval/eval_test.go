@@ -10,21 +10,27 @@ import (
 	"github.com/danielmalka/go-knowrag/internal/retrieval"
 )
 
-// TestModes_RefuseExplicitlyUntilTheHarnessExists is the rule S06b's report established and this
-// package inherits: not having looked is never allowed to render as having found nothing. A mode
-// with no harness must not answer with a zero-valued Outcome and a nil error, because the zero
-// value of Passed is false today and would become a silent "the gate ran and failed" the moment
-// somebody changed the field's meaning — and, worse, the caller's own check could invert it.
-func TestModes_RefuseExplicitlyUntilTheHarnessExists(t *testing.T) {
+// TestModes_RefuseExplicitly is the rule S06b's report established and this package inherits: not
+// having looked is never allowed to render as having found nothing. Neither mode may answer with a
+// zero-valued Outcome and a nil error, because the zero value of Passed is false today and would
+// become a silent "the gate ran and failed" the moment somebody changed the field's meaning.
+//
+// The two refuse for different reasons since S10 wired the golden harness, and the difference is
+// load-bearing rather than cosmetic — see TestGoldenGate_RefusalIsNotAPendingHarness.
+func TestModes_RefuseExplicitly(t *testing.T) {
 	tests := map[string]struct {
-		run func(context.Context, Options) (Outcome, error)
-		// story is the one this refusal has to name. An operator reading it must be able to find
-		// out whether the gate is missing or broken without opening the source.
-		story string
-		flag  string
+		run      func(context.Context, Options) (Outcome, error)
+		sentinel error
+		// mentions is what the refusal has to name. A reader must be able to tell whether the gate
+		// is missing, misused or broken without opening the source.
+		mentions []string
 	}{
-		"golden":    {run: GoldenGate, story: "S10", flag: "--golden"},
-		"isolation": {run: IsolationGate, story: "S11", flag: "--isolation"},
+		// Isolation has no harness at all; S11 builds it, and the message says so.
+		"isolation": {run: IsolationGate, sentinel: ErrNotImplemented,
+			mentions: []string{"S11", "--isolation", "Nothing was measured"}},
+		// Golden has a harness. Called with no searcher and no golden set, it refuses as a misuse.
+		"golden": {run: GoldenGate, sentinel: ErrNoSearcher,
+			mentions: []string{"Nothing was measured"}},
 	}
 
 	for name, tc := range tests {
@@ -33,19 +39,44 @@ func TestModes_RefuseExplicitlyUntilTheHarnessExists(t *testing.T) {
 			if err == nil {
 				t.Fatalf("the %s mode returned %+v and no error, which reads as a gate that ran", name, outcome)
 			}
-			if !errors.Is(err, ErrNotImplemented) {
-				t.Errorf("the refusal does not carry ErrNotImplemented, so no caller can recognise "+
-					"it without matching prose: %v", err)
+			if !errors.Is(err, tc.sentinel) {
+				t.Errorf("the refusal does not carry %v, so no caller can recognise it without "+
+					"matching prose: %v", tc.sentinel, err)
 			}
 			if outcome.Passed {
 				t.Error("the refusal came back with Passed set, which is the one thing it must never say")
 			}
-			for _, want := range []string{tc.story, tc.flag, "Nothing was measured"} {
+			for _, want := range tc.mentions {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("the refusal %q does not mention %q", err, want)
 				}
 			}
 		})
+	}
+}
+
+// TestGoldenGate_RefusalIsNotAPendingHarness is the whole reason ErrNoSearcher exists as a separate
+// value, and it guards a green CI job over a gate that measured nothing.
+//
+// scripts/ci/eval-gate.sh recognises ErrNotImplemented as "pending, warn and exit 0". The golden
+// harness is not pending — S10 built it and cmd/cli/eval.go wires it — so a golden run that fails
+// for any reason at all must be a failure. If GoldenGate answered with ErrNotImplemented, a broken
+// wiring would print a warning and pass.
+func TestGoldenGate_RefusalIsNotAPendingHarness(t *testing.T) {
+	_, err := GoldenGate(context.Background(), Options{Collection: "interno", TenantID: "tenant-a"})
+	if err == nil {
+		t.Fatal("GoldenGate with no searcher returned no error")
+	}
+	if errors.Is(err, ErrNotImplemented) {
+		t.Errorf("GoldenGate answers with ErrNotImplemented (%v), which scripts/ci/eval-gate.sh "+
+			"reads as a pending harness and exits 0 on. The golden harness exists; a golden gate "+
+			"that cannot run is a failure, not a pending story", err)
+	}
+	// And the two sentinels are genuinely distinct values, not one aliased to the other — which is
+	// the way the assertion above would go vacuous.
+	if errors.Is(ErrNoSearcher, ErrNotImplemented) || errors.Is(ErrNotImplemented, ErrNoSearcher) {
+		t.Error("ErrNoSearcher and ErrNotImplemented match each other, so telling them apart is " +
+			"impossible for the script and for every caller")
 	}
 }
 

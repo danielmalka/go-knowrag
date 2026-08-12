@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 
@@ -22,13 +23,31 @@ type evalModes struct {
 	isolation evalMode
 }
 
+// DefaultGoldenSetPath is where `eval --golden` looks when --file says nothing.
+//
+// docs/ is gitignored on purpose (CLAUDE.md), so this file is absent on a fresh checkout and the
+// command says so by name rather than measuring an empty set. The hermetic CI job points --file
+// somewhere else entirely (.github/workflows/ci.yml).
+const DefaultGoldenSetPath = "docs/eval/golden-set.yaml"
+
+// corpusCollection is the collection name a --corpus run reports.
+//
+// A corpus run reads a local file and names no Qdrant collection, but retrieval.Query.Validate
+// requires one — ErrEmptyCollection, and rightly so: a package that let a query default to a
+// collection would be a package that names one. So the run supplies its own rather than borrowing
+// the configured DEFAULT_COLLECTION, which it never touches and which is unset on a CI runner
+// anyway. Reporting the configured name here would claim the run searched an index it never opened.
+const corpusCollection = "corpus (no index)"
+
 // newEvalCmd builds `eval`.
 //
 // The mode flags are enforced by cobra's own validators rather than by a check in RunE. That is not
 // only less code: MarkFlagsOneRequired puts the requirement in the generated help, so `eval --help`
 // says a mode is mandatory instead of the operator finding out by running it.
-func newEvalCmd(cfg *config.Config, modes evalModes) *cobra.Command {
+func newEvalCmd(cfg *config.Config, modes evalModes, connect clicmd.Connect) *cobra.Command {
 	var golden, isolation, jsonOut bool
+	var goldenSetPath, corpusPath string
+	var minRecall float64
 
 	cmd := &cobra.Command{
 		Use:   "eval",
@@ -36,6 +55,11 @@ func newEvalCmd(cfg *config.Config, modes evalModes) *cobra.Command {
 		Long: "eval runs one of the two gates and exits non-zero if it did not pass.\n\n" +
 			"--golden measures retrieval recall against the golden set. --isolation runs the\n" +
 			"tenant-isolation suite, which has no score: a single failing case fails the suite.\n\n" +
+			"--golden searches the configured Qdrant collection unless --corpus names a corpus\n" +
+			"file, which it searches instead. A corpus run needs no Qdrant, no embedding service\n" +
+			"and no GPU, which is what lets the hermetic CI gate run the real harness; the numbers\n" +
+			"it produces measure the harness, not this deployment's retrieval, and belong in no\n" +
+			"baseline.\n\n" +
 			"A gate that fails exits with its own code, distinct from a broken backend — see the\n" +
 			"exit-code list in `knowrag --help`.",
 		Args: cobra.NoArgs,
@@ -48,11 +72,40 @@ func newEvalCmd(cfg *config.Config, modes evalModes) *cobra.Command {
 			mode, run := modes.pick(golden, isolation)
 			out := cmd.OutOrStdout()
 
-			outcome, err := run(cmd.Context(), eval.Options{
+			opts := eval.Options{
 				Collection: cfg.DefaultCollection,
 				TenantID:   defaultTenantID,
-			})
+			}
+			// Only the golden gate takes a searcher, and the connection is opened only for it: an
+			// `eval --isolation` that dialled Qdrant would be a hermetic job acquiring a dependency
+			// by accident, which is exactly what scripts/ci/eval-gate.sh's header forbids.
+			if golden {
+				searcher, release, serr := openEvalSearcher(cmd.Context(), corpusPath, connect)
+				if serr != nil {
+					if jsonOut {
+						_ = clicmd.Emit(out, clicmd.Failed(serr))
+					}
+					return serr
+				}
+				defer release()
+
+				opts.Searcher = searcher
+				opts.GoldenSetPath = goldenSetPath
+				opts.MinRecall = minRecall
+				if corpusPath != "" {
+					opts.Collection = corpusCollection
+				}
+			}
+
+			outcome, err := run(cmd.Context(), opts)
 			if err != nil {
+				// A golden set that is not there is a usage failure, not a broken backend: the
+				// operator named a path and nothing on the far side will change, so a scheduler
+				// that retried the identical command line would retry it forever. Same reading as
+				// exitUsage's own comment in main.go.
+				if errors.Is(err, eval.ErrGoldenSetMissing) {
+					err = clicmd.Usage("%v", err)
+				}
 				if jsonOut {
 					// The emit error is dropped here alone: this path already has a failure to
 					// report, and replacing it with "the pipe closed" would lose the cause. main
@@ -79,10 +132,40 @@ func newEvalCmd(cfg *config.Config, modes evalModes) *cobra.Command {
 	cmd.Flags().BoolVar(&isolation, "isolation", false, "run the tenant-isolation suite")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
 		"print the outcome as a JSON envelope on stdout and nothing else")
+	cmd.Flags().StringVar(&goldenSetPath, "file", DefaultGoldenSetPath,
+		"golden set to measure against (--golden only)")
+	cmd.Flags().StringVar(&corpusPath, "corpus", "",
+		"search this corpus file instead of the Qdrant collection; needs no Qdrant, no embedder "+
+			"and no GPU (--golden only)")
+	cmd.Flags().Float64Var(&minRecall, "min-recall", 0,
+		"recall the golden gate must reach to pass; 0 records the number without gating on it")
 	cmd.MarkFlagsMutuallyExclusive("golden", "isolation")
 	cmd.MarkFlagsOneRequired("golden", "isolation")
 
 	return cmd
+}
+
+// openEvalSearcher resolves what the golden gate will search.
+//
+// A corpus is loaded before anything else and short-circuits the connection, so `--corpus` never
+// opens a socket even on a host that has Qdrant configured — the hermetic guarantee has to be a
+// property of the code path, not of the CI runner's environment.
+//
+// A corpus that will not load is returned as a usage failure, not a backend one: the operator named
+// a file, and no amount of retrying the same command line will find a different one. That is the
+// same reading `search` gives a malformed query (internal/clicmd/search.go).
+func openEvalSearcher(ctx context.Context, corpusPath string, connect clicmd.Connect) (eval.Searcher, func(), error) {
+	if corpusPath != "" {
+		corpus, err := eval.LoadCorpus(corpusPath)
+		if err != nil {
+			return nil, nil, clicmd.Usage("%v", err)
+		}
+		return eval.NewCorpusSearcher(corpus), func() {}, nil
+	}
+	if connect == nil {
+		return nil, nil, errors.New("eval: no way to reach the index was wired into this command")
+	}
+	return connect(ctx)
 }
 
 // pick resolves the two booleans to the one mode cobra has already guaranteed. Cobra refuses the

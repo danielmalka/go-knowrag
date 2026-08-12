@@ -8,10 +8,14 @@ import (
 	"github.com/danielmalka/go-knowrag/internal/retrieval"
 )
 
-// ErrNotImplemented is what both modes answer with until their harness exists.
+// ErrNotImplemented is what a mode whose harness does not exist answers with.
+//
+// Since S10 wired the golden harness and cmd/cli/eval.go, that is the isolation gate alone — S11
+// builds it. The golden gate no longer reaches this: it measures, and its own misuse case is
+// ErrNoSearcher below.
 //
 // It is a sentinel rather than a message because two callers have to recognise it without matching
-// prose: cmd/cli maps it to an exit code, and the CI jobs that run these gates recognise a
+// prose: cmd/cli maps it to an exit code, and the CI job that runs the isolation gate recognises a
 // still-missing harness by it. That second caller is a shell script, scripts/ci/eval-gate.sh, which
 // carries this message as a literal because it cannot import a Go value; the two are held equal by
 // TestCIWorkflow_PendingSentinelMatchesTheErrorItLooksFor in cmd/cli, which reads that script.
@@ -20,6 +24,14 @@ import (
 // not an evaluation that passed — the same rule the ingestion report follows when it refuses to
 // render "orphans not scanned" as "no orphans found".
 var ErrNotImplemented = errors.New("eval: not implemented")
+
+// ErrNoSearcher is GoldenGate handed no way to search, or no golden set to search for.
+//
+// It is deliberately NOT ErrNotImplemented, and the difference is the whole point of splitting them:
+// scripts/ci/eval-gate.sh treats ErrNotImplemented as "pending, exit 0 with a warning", and the
+// golden harness is not pending — it is built. A caller that forgot to pass a searcher has a bug,
+// and a bug reported as a pending harness is a green CI job over a gate that measured nothing.
+var ErrNoSearcher = errors.New("eval: the golden gate was given nothing to search")
 
 // Options is the scope an evaluation runs against.
 //
@@ -96,19 +108,17 @@ type Outcome struct {
 // GoldenGate loads the golden set, measures recall against it, and answers whether it cleared the
 // threshold.
 //
-// The refusal above it is still reachable, and the reason is scope rather than a missing harness:
-// the harness is in this package (goldenset.go, runner.go, report.go), but nothing builds a
-// Searcher or names a golden-set file until S10 T10 wires cmd/cli/eval.go. Until then the CLI calls
-// this with neither, and a gate with no searcher must say so rather than report a zero.
+// cmd/cli/eval.go supplies the Searcher and the golden-set path; the refusal below is a misuse
+// answer for a programmatic caller that supplies neither, not a pending harness (see ErrNoSearcher).
 //
 // Passed requires Complete. A run where some question could not be asked is not a run that measured
 // the golden set, and its recall — computed over the questions that answered — must never clear a
 // threshold on the strength of the ones it skipped.
 func GoldenGate(ctx context.Context, opts Options) (Outcome, error) {
 	if opts.Searcher == nil || opts.GoldenSetPath == "" {
-		return Outcome{}, notImplemented("golden", "S10",
-			"the CLI wiring that builds a searcher and names a golden-set file (T10); the harness "+
-				"itself is built, but nothing handed this gate either of them")
+		return Outcome{}, fmt.Errorf("%w: searcher=%t golden-set path=%q. Nothing was measured, so "+
+			"this is not a passing evaluation and must not be read as one",
+			ErrNoSearcher, opts.Searcher != nil, opts.GoldenSetPath)
 	}
 
 	set, err := LoadGoldenSet(opts.GoldenSetPath)

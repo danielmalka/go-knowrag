@@ -45,10 +45,20 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26'
-      # Hermetic, as the job name claims: `eval` opens no Qdrant connection and reads no vault.
-      # S10 fills the harness behind `--golden` against a versioned synthetic fixture
-      # (docs/PRD-stories-servico.md §3 S10) — never against the real vaults or the deployed Qdrant.
-      - run: ./scripts/ci/eval-gate.sh golden
+      # Hermetic, as the job name claims. `--corpus` makes the golden gate search a versioned
+      # synthetic file instead of the Qdrant collection, so this opens no connection, needs no
+      # embedding service and no GPU, and never touches a real vault — the guarantee is the code
+      # path cmd/cli/eval.go takes, not this runner's environment.
+      #
+      # --min-recall is the exact number this fixture produces, not a slack threshold.
+      # TestHermeticGoldenGate_FixtureCorpus_AchievesExpectedRecall (internal/eval/hermetic_test.go)
+      # asserts the same number AND reads this line, so a fixture edit that moves the recall fails
+      # `make test` instead of quietly relaxing the gate here.
+      - run: >
+          ./scripts/ci/eval-gate.sh golden
+          --file testdata/eval/hermetic/golden-set.yaml
+          --corpus testdata/eval/hermetic/corpus.yaml
+          --min-recall 0.75
 
   eval-isolation-hermetic:
     runs-on: ubuntu-latest
