@@ -25,14 +25,19 @@ set -uo pipefail
 mode="${1:?usage: eval-gate.sh golden|isolation}"
 shift
 
-# Which modes are still allowed to answer "pending". S10 built the golden harness and wired
-# cmd/cli/eval.go to it, so `eval --golden` now measures and can no longer answer with the sentinel
-# — internal/eval/eval.go returns ErrNoSearcher, not ErrNotImplemented, for its own misuse case.
+# Which modes may still answer "pending", and the list is empty because both gates this build ships
+# measure: S10 wired the golden harness to cmd/cli/eval.go, S11 wired the isolation suite behind
+# `eval --isolation`, and neither can produce the sentinel any more — internal/eval/eval.go answers
+# a misused golden gate with ErrNoSearcher, and its isolation gate has no refusal path at all.
 #
-# Keeping golden on this list would be the failure this script exists to prevent, one level up: a
-# golden job that broke badly enough to reach the pending branch would exit 0 and report a warning,
-# and the gate would be off again with nobody told. `isolation` comes off the list when S11 lands.
-pending_modes="isolation"
+# A mode on this list is a mode whose failure exits 0 with a warning. That is the right reading for
+# a story nobody has built and the wrong one for a gate that exists, so the list being empty is what
+# keeps every failure a failure.
+#
+# The branch below is therefore unreachable today, and it stays for the case that created it: a mode
+# is added here before its harness is written, and the alternative for that job is what this script
+# was written to replace — reporting nothing on every push, including the push that broke it.
+pending_modes=""
 
 # Must equal eval.ErrNotImplemented.Error() (internal/eval/eval.go). Nothing at run time can check
 # that equality — this is a shell script and that is a Go value — so

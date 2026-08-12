@@ -10,58 +10,40 @@ import (
 	"github.com/danielmalka/go-knowrag/internal/retrieval"
 )
 
-// TestModes_RefuseExplicitly is the rule S06b's report established and this package inherits: not
-// having looked is never allowed to render as having found nothing. Neither mode may answer with a
-// zero-valued Outcome and a nil error, because the zero value of Passed is false today and would
-// become a silent "the gate ran and failed" the moment somebody changed the field's meaning.
+// TestGoldenGate_RefusesExplicitly is the rule S06b's report established and this package inherits:
+// not having looked is never allowed to render as having found nothing. A gate that could not run
+// must not answer with a zero-valued Outcome and a nil error, because the zero value of Passed is
+// false today and would become a silent "the gate ran and failed" the moment somebody changed the
+// field's meaning.
 //
-// The two refuse for different reasons since S10 wired the golden harness, and the difference is
-// load-bearing rather than cosmetic — see TestGoldenGate_RefusalIsNotAPendingHarness.
-func TestModes_RefuseExplicitly(t *testing.T) {
-	tests := map[string]struct {
-		run      func(context.Context, Options) (Outcome, error)
-		sentinel error
-		// mentions is what the refusal has to name. A reader must be able to tell whether the gate
-		// is missing, misused or broken without opening the source.
-		mentions []string
-	}{
-		// Isolation has no harness at all; S11 builds it, and the message says so.
-		"isolation": {run: IsolationGate, sentinel: ErrNotImplemented,
-			mentions: []string{"S11", "--isolation", "Nothing was measured"}},
-		// Golden has a harness. Called with no searcher and no golden set, it refuses as a misuse.
-		"golden": {run: GoldenGate, sentinel: ErrNoSearcher,
-			mentions: []string{"Nothing was measured"}},
-	}
+// Golden alone, because it holds the only refusal left. Both harnesses exist — S10 wired this one,
+// S11 the isolation suite — so neither gate is pending, and the only way to reach a refusal here is
+// to call GoldenGate with nothing to search. The isolation side is TestIsolationGate_Measures.
+func TestGoldenGate_RefusesExplicitly(t *testing.T) {
+	outcome, err := GoldenGate(context.Background(), Options{Collection: "interno", TenantID: "tenant-a"})
 
-	for name, tc := range tests {
-		t.Run(name, func(t *testing.T) {
-			outcome, err := tc.run(context.Background(), Options{Collection: "interno", TenantID: "tenant-a"})
-			if err == nil {
-				t.Fatalf("the %s mode returned %+v and no error, which reads as a gate that ran", name, outcome)
-			}
-			if !errors.Is(err, tc.sentinel) {
-				t.Errorf("the refusal does not carry %v, so no caller can recognise it without "+
-					"matching prose: %v", tc.sentinel, err)
-			}
-			if outcome.Passed {
-				t.Error("the refusal came back with Passed set, which is the one thing it must never say")
-			}
-			for _, want := range tc.mentions {
-				if !strings.Contains(err.Error(), want) {
-					t.Errorf("the refusal %q does not mention %q", err, want)
-				}
-			}
-		})
+	if err == nil {
+		t.Fatalf("the golden mode returned %+v and no error, which reads as a gate that ran", outcome)
+	}
+	if !errors.Is(err, ErrNoSearcher) {
+		t.Errorf("the refusal does not carry ErrNoSearcher, so no caller can recognise it without "+
+			"matching prose: %v", err)
+	}
+	if outcome.Passed {
+		t.Error("the refusal came back with Passed set, which is the one thing it must never say")
+	}
+	if !strings.Contains(err.Error(), "Nothing was measured") {
+		t.Errorf("the refusal %q does not say that nothing was measured", err)
 	}
 }
 
 // TestGoldenGate_RefusalIsNotAPendingHarness is the whole reason ErrNoSearcher exists as a separate
 // value, and it guards a green CI job over a gate that measured nothing.
 //
-// scripts/ci/eval-gate.sh recognises ErrNotImplemented as "pending, warn and exit 0". The golden
-// harness is not pending — S10 built it and cmd/cli/eval.go wires it — so a golden run that fails
-// for any reason at all must be a failure. If GoldenGate answered with ErrNotImplemented, a broken
-// wiring would print a warning and pass.
+// scripts/ci/eval-gate.sh recognises ErrNotImplemented as "pending, warn and exit 0" for any mode on
+// its pending list. The golden harness is not pending — S10 built it and cmd/cli/eval.go wires it —
+// so a golden run that fails for any reason at all must be a failure. If GoldenGate answered with
+// ErrNotImplemented, adding a mode to that list would be enough to turn a broken wiring green.
 func TestGoldenGate_RefusalIsNotAPendingHarness(t *testing.T) {
 	_, err := GoldenGate(context.Background(), Options{Collection: "interno", TenantID: "tenant-a"})
 	if err == nil {
@@ -80,19 +62,48 @@ func TestGoldenGate_RefusalIsNotAPendingHarness(t *testing.T) {
 	}
 }
 
-// TestModes_RefusalsAreDistinguishable covers the half a shared sentinel hides: both modes answer
-// with the same error value, so the message is the only thing that says which gate is missing, and
-// a reader who ran --isolation must not be sent to read S10's story.
-func TestModes_RefusalsAreDistinguishable(t *testing.T) {
-	golden, gerr := GoldenGate(context.Background(), Options{})
-	isolation, ierr := IsolationGate(context.Background(), Options{})
+// The claim that the two modes' refusals are distinguishable was asserted here, by comparing the two
+// error messages. It cannot be: only one mode refuses now, and the test dereferenced the other one's
+// error, so with the isolation suite in place it panics rather than fails. What replaced it is
+// narrower and still runnable — the isolation gate must not produce the pending sentinel at all,
+// below.
 
-	if gerr.Error() == ierr.Error() {
-		t.Errorf("both modes refuse with the same sentence, so neither says which gate is missing: %v", gerr)
+// TestIsolationGate_Measures is the other half, and it is the one that changed: the isolation gate
+// has a suite now, so it answers with a verdict instead of a refusal.
+func TestIsolationGate_Measures(t *testing.T) {
+	outcome, err := IsolationGate(context.Background(), Options{Collection: "clientes", TenantID: "tenant-a"})
+	if err != nil {
+		t.Fatalf("IsolationGate: %v", err)
 	}
-	if golden != isolation {
-		t.Errorf("the two refusals returned different Outcomes (%+v vs %+v); both must be the zero "+
-			"value, because neither measured anything", golden, isolation)
+	if outcome.Mode != "isolation" {
+		t.Errorf("Mode = %q, want %q", outcome.Mode, "isolation")
+	}
+	if !outcome.Passed {
+		t.Errorf("the isolation suite did not pass on a clean build:\n%s", outcome.Summary)
+	}
+	// The one field shape S11's task document makes a requirement: no score, ever. An isolation
+	// suite reportable as a percentage is one somebody argues down before a release.
+	if outcome.Score != nil {
+		t.Errorf("the isolation gate reported a score (%v); this suite has no partial credit", *outcome.Score)
+	}
+	if outcome.Summary == "" {
+		t.Error("the isolation gate reported no summary, so an operator sees a verdict and no cases")
+	}
+}
+
+// TestIsolationGate_NeverReportsAPendingHarness is the guard the CI script depends on.
+//
+// scripts/ci/eval-gate.sh treats eval.ErrNotImplemented's message as "pending, warn and exit 0".
+// The isolation suite exists now, so that string must not reach a caller from this path at all — an
+// isolation gate that failed and printed it would go green in CI with nothing measured.
+func TestIsolationGate_NeverReportsAPendingHarness(t *testing.T) {
+	outcome, err := IsolationGate(context.Background(), Options{})
+	if err != nil && errors.Is(err, ErrNotImplemented) {
+		t.Fatalf("the isolation gate answers with ErrNotImplemented: %v", err)
+	}
+	if strings.Contains(outcome.Summary, ErrNotImplemented.Error()) {
+		t.Errorf("the isolation summary carries %q, which the CI script reads as a pending harness:\n%s",
+			ErrNotImplemented, outcome.Summary)
 	}
 }
 
@@ -286,5 +297,31 @@ func TestGoldenGate_MissingGoldenSetIsNotAPass(t *testing.T) {
 	}
 	if outcome.Passed || outcome.Score != nil {
 		t.Errorf("the refusal carries a verdict: %+v", outcome)
+	}
+}
+
+// TestIsolationGate_ReportsAFailingSuite closes the last link: a failing case has to reach the
+// process exit through the gate, not only through the suite's own Report.
+//
+// It is driven by the architecture case's real precondition — a working directory with no go.mod
+// above it — because that is the one suite failure reachable end to end without editing production
+// code. It doubles as the proof that a deployed host with no source tree does not quietly report a
+// boundary nobody checked.
+func TestIsolationGate_ReportsAFailingSuite(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	outcome, err := IsolationGate(context.Background(), Options{})
+	if err != nil {
+		t.Fatalf("IsolationGate: %v", err)
+	}
+	if outcome.Passed {
+		t.Error("the gate reported a pass from a run where the architecture boundary could not be " +
+			"scanned at all")
+	}
+	if !strings.Contains(outcome.Summary, "FAIL") {
+		t.Errorf("the summary does not report the failure:\n%s", outcome.Summary)
+	}
+	if outcome.Score != nil {
+		t.Error("a failing isolation run carries a score")
 	}
 }

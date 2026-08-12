@@ -7,7 +7,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 
@@ -145,29 +144,25 @@ func TestEvalCmd_FailedGate_IsAnAssertionNotABrokenBackend(t *testing.T) {
 // say `!= CategoryAssertion`, which is satisfied by every wrong answer as well as the right one: a
 // category invented later, or a usage error, would have kept it green while the exit code moved.
 //
-// Only --isolation now. S10 wired the golden harness, so `eval --golden` measures; a golden run
-// that answered "no harness" would be a bug, and TestEvalCmd_GoldenNeverReportsAPendingHarness is
-// what holds that.
+// The gate here is a stub, and that is the change: no real gate can answer this way any more, since
+// S10 wired the golden harness and S11 the isolation suite. It is the same reason
+// scripts/ci/eval-gate.sh keeps its pending branch over an empty list — the mapping has to be right
+// on the day a third gate is added before its harness is written, and there is no live gate left to
+// learn it from.
 func TestEvalCmd_MissingHarness_IsABackendFailure(t *testing.T) {
-	// The real entry point, not a fake: what is under test is the category the command gives the
-	// error internal/eval actually returns today.
-	cmd := newEvalCmd(&config.Config{}, evalModes{golden: eval.GoldenGate, isolation: eval.IsolationGate}, stubConnect)
-	var out, errOut bytes.Buffer
-	cmd.SetOut(&out)
-	cmd.SetErr(&errOut)
-	cmd.SetArgs([]string{"--isolation"})
+	r := &recordingModes{err: eval.ErrNotImplemented}
 
-	err := cmd.Execute()
+	_, err := runEval(t, r, "--golden")
 	if err == nil {
-		t.Fatal("eval --isolation reported a pass with no harness behind it")
+		t.Fatal("a gate that answered \"no harness\" exited clean")
 	}
 	if !errors.Is(err, eval.ErrNotImplemented) {
-		t.Errorf("eval --isolation lost the sentinel on its way through cobra: %v", err)
+		t.Errorf("the sentinel was lost on its way through cobra: %v", err)
 	}
 	if got := clicmd.CategoryOf(err); got != clicmd.CategoryBackend {
-		t.Errorf("eval --isolation reports a missing harness as %q, want %q. Assertion would claim "+
-			"a measurement nobody made; usage would tell the operator to fix a command line that "+
-			"is already correct", got, clicmd.CategoryBackend)
+		t.Errorf("a missing harness reports as %q, want %q. Assertion would claim a measurement "+
+			"nobody made; usage would tell the operator to fix a command line that is already "+
+			"correct", got, clicmd.CategoryBackend)
 	}
 }
 
@@ -321,6 +316,37 @@ func TestEvalCmd_CorpusRun_ThresholdDecidesTheExitCode(t *testing.T) {
 				t.Errorf("a failing gate printed no report:\n%s", out.String())
 			}
 		})
+	}
+}
+
+// TestEvalCmd_IsolationNeverReportsAPendingHarness is the CLI-level half of the guard
+// internal/eval's TestIsolationGate_NeverReportsAPendingHarness holds on the package.
+//
+// scripts/ci/eval-gate.sh greps the command's combined output for eval.ErrNotImplemented's message
+// and exits 0 when it finds it. So it is not enough that the gate returns a different error — the
+// string must not reach stdout or stderr on any isolation run at all, or the security gate goes
+// green over a suite that proved nothing.
+func TestEvalCmd_IsolationNeverReportsAPendingHarness(t *testing.T) {
+	cmd := newEvalCmd(&config.Config{}, evalModes{golden: eval.GoldenGate, isolation: eval.IsolationGate},
+		stubConnect)
+	var out, errOut bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	cmd.SetArgs([]string{"--isolation"})
+
+	err := cmd.Execute()
+	printed := out.String() + errOut.String()
+	if err != nil {
+		printed += err.Error()
+	}
+	if strings.Contains(printed, eval.ErrNotImplemented.Error()) {
+		t.Errorf("an isolation run printed %q, which scripts/ci/eval-gate.sh reads as a pending "+
+			"harness and exits 0 on:\n%s", eval.ErrNotImplemented, printed)
+	}
+	// And it really ran: the summary names the cases, so this is not passing because the command
+	// failed before reaching the suite.
+	if !strings.Contains(out.String(), "cross-tenant") {
+		t.Errorf("the isolation run printed no case list:\n%s", out.String())
 	}
 }
 
@@ -560,14 +586,20 @@ func readRepoFile(t *testing.T, path string) string {
 	return string(b)
 }
 
-// TestCIGateScript_GoldenIsNoLongerAllowedToReportPending is the other half of the sentinel
-// contract, and the half that changed with S10.
+// TestCIGateScript_NoModeIsAllowedToReportPending is the other half of the sentinel contract, and
+// the half both harness stories changed.
 //
-// The script exits 0 with a warning when a gate answers with eval.ErrNotImplemented. That is the
-// right reading for a story nobody has built; it is the wrong reading for the golden gate, whose
-// harness exists and is wired (cmd/cli/eval.go). If golden were still on the pending list, a golden
-// job broken badly enough to print that string would go green and nobody would be told.
-func TestCIGateScript_GoldenIsNoLongerAllowedToReportPending(t *testing.T) {
+// The script exits 0 with a warning when a mode on its pending list answers with
+// eval.ErrNotImplemented. That is the right reading for a story nobody has built and the wrong one
+// for both gates this build ships: S10 wired the golden harness (cmd/cli/eval.go) and S11 the
+// isolation suite (internal/eval/eval.go). A gate on that list, broken badly enough to print the
+// sentinel, would go green with nobody told.
+//
+// The assertion is that the list is empty, not that two particular names are off it, and the
+// difference is what makes it hold for a gate nobody has written yet: a third mode put on the list
+// before its harness exists fails here, which is the reminder that the list is what turns a job's
+// failures into warnings.
+func TestCIGateScript_NoModeIsAllowedToReportPending(t *testing.T) {
 	script := readRepoFile(t, evalGateScript)
 
 	const assignment = `pending_modes="`
@@ -579,15 +611,45 @@ func TestCIGateScript_GoldenIsNoLongerAllowedToReportPending(t *testing.T) {
 	rest := script[i+len(assignment):]
 	modes := strings.Fields(rest[:strings.Index(rest, `"`)])
 
-	if slices.Contains(modes, "golden") {
-		t.Errorf("pending_modes is %v; golden has a harness since S10, so a golden failure that "+
-			"printed the sentinel would exit 0", modes)
-	}
-	// The absent half. An empty list would satisfy the check above while also switching off the
-	// pending path for isolation, whose harness genuinely does not exist yet — that job would go
-	// permanently red, which this repository has already paid for once.
-	if !slices.Contains(modes, "isolation") {
-		t.Errorf("pending_modes is %v; S11 has not built the isolation suite, so that job would be "+
-			"permanently red rather than pending", modes)
+	if len(modes) != 0 {
+		t.Errorf("pending_modes is %v; every gate this build ships has a harness, so a mode on that "+
+			"list is one whose failures exit 0 with a warning instead of failing CI", modes)
 	}
 }
+
+// TestEvalCmd_Isolation_ExitCodeFollowsTheVerdict is S11's exit-code contract: the process exit is
+// the release gate, and nothing but the suite's verdict moves it.
+func TestEvalCmd_Isolation_ExitCodeFollowsTheVerdict(t *testing.T) {
+	cases := map[string]struct {
+		outcome  eval.Outcome
+		wantFail bool
+	}{
+		"suite passed": {eval.Outcome{Mode: "isolation", Passed: true, Summary: "**PASS**"}, false},
+		"suite failed": {eval.Outcome{Mode: "isolation", Passed: false, Summary: "**FAIL**"}, true},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			r := &recordingModes{outcome: tc.outcome}
+			_, err := runEval(t, r, "--isolation")
+
+			if !tc.wantFail {
+				if err != nil {
+					t.Fatalf("a passing suite exited non-zero: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("a failing isolation suite exited clean; this is the release gate")
+			}
+			if got := clicmd.CategoryOf(err); got != clicmd.CategoryAssertion {
+				t.Errorf("a failing suite reports as %q, want %q — it ran and answered no, which is "+
+					"not the same event as a broken backend", got, clicmd.CategoryAssertion)
+			}
+		})
+	}
+}
+
+// The isolation gate's `"score": null` was asserted again here, on its own. It is a strict subset of
+// TestEvalCmd_JSON_ScoreIsAbsentNotZero above, which asserts the same bytes for isolation *and* the
+// half that makes it a distinction — that `"score": 0` does not appear. One claim, one test.

@@ -77,6 +77,11 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26'
-      # S11 fills the harness behind `--isolation` against a synthetic multi-tenant fixture
-      # (docs/PRD-stories-servico.md §3 S11).
+      # Hermetic, as the job name claims: the isolation suite builds its own corpus and drives the
+      # real internal/retrieval path against it, so this opens no Qdrant connection, needs no
+      # embedder and reads no vault. It does read the source tree, for the architecture-boundary
+      # case — actions/checkout above is what provides it.
+      #
+      # This is a release gate: one failing case fails the job (PRD §2.7 NFR-3, pass/fail with no
+      # middle ground).
       - run: ./scripts/ci/eval-gate.sh isolation

@@ -5,19 +5,21 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/danielmalka/go-knowrag/internal/eval/isolation"
 	"github.com/danielmalka/go-knowrag/internal/retrieval"
 )
 
 // ErrNotImplemented is what a mode whose harness does not exist answers with.
 //
-// Since S10 wired the golden harness and cmd/cli/eval.go, that is the isolation gate alone — S11
-// builds it. The golden gate no longer reaches this: it measures, and its own misuse case is
-// ErrNoSearcher below.
+// No mode does, on this build: S10 wired the golden harness and S11 the isolation suite, so both
+// gates below measure, and the golden gate's own misuse case is ErrNoSearcher. This value survives
+// them because it is one end of a contract with scripts/ci/eval-gate.sh, whose pending list is empty
+// for the same reason and whose branch is kept for the next gate added before its harness exists.
 //
 // It is a sentinel rather than a message because two callers have to recognise it without matching
-// prose: cmd/cli maps it to an exit code, and the CI job that runs the isolation gate recognises a
-// still-missing harness by it. That second caller is a shell script, scripts/ci/eval-gate.sh, which
-// carries this message as a literal because it cannot import a Go value; the two are held equal by
+// prose: cmd/cli maps it to an exit code, and the CI job that runs a gate recognises a still-missing
+// harness by it. That second caller is a shell script, scripts/ci/eval-gate.sh, which carries this
+// message as a literal because it cannot import a Go value; the two are held equal by
 // TestCIWorkflow_PendingSentinelMatchesTheErrorItLooksFor in cmd/cli, which reads that script.
 //
 // What it must never be is a zero-valued Outcome and a nil error. An evaluation that did not run is
@@ -177,14 +179,37 @@ func attachProvenance(ctx context.Context, report *Report, path string, question
 	report.Stale = ResolveStale(FlagStaleEntries(perEntry, file.Time), perEntry, questions)
 }
 
-func IsolationGate(_ context.Context, _ Options) (Outcome, error) {
-	return Outcome{}, notImplemented("isolation", "S11", "the multi-tenant isolation suite")
+// IsolationGate runs the tenant-isolation suite and reports its binary verdict.
+//
+// Score stays nil, and that is the requirement the Outcome type's own comment states: an isolation
+// suite reportable as a percentage is one somebody argues down before a release. There is a verdict
+// and a list of cases, and nothing to average.
+//
+// The suite builds everything it needs — internal/eval/isolation drives the real internal/retrieval
+// path against its own hostile store — so Options carries no searcher for it and no golden set. It
+// does read the source tree, for the architecture-boundary case; a root it cannot find fails that
+// case rather than skipping it.
+func IsolationGate(ctx context.Context, _ Options) (Outcome, error) {
+	root, err := isolation.ModuleRoot()
+	if err != nil {
+		// Not returned as an error: the suite still runs, and the architecture case reports the
+		// missing tree as the failure it is. Returning here would throw away every other case's
+		// verdict over one case's precondition.
+		root = ""
+	}
+
+	report := isolation.DefaultSuite(root).Run(ctx)
+	return Outcome{
+		Mode:    "isolation",
+		Passed:  report.Pass,
+		Score:   nil,
+		Summary: report.Summary(),
+	}, nil
 }
 
-// notImplemented says which gate is missing, which story builds it, and — the part that matters —
-// that nothing was measured. A caller who reads only the first clause must not be able to come away
-// thinking the gate ran.
-func notImplemented(mode, story, what string) error {
-	return fmt.Errorf("%w: `eval --%s` has no harness yet — %s builds %s. Nothing was measured, "+
-		"so this is not a passing evaluation and must not be read as one", ErrNotImplemented, mode, story, what)
-}
+// The helper that wrapped ErrNotImplemented into "gate X has no harness, story Y builds it" lived
+// here and has no caller left, because both gates measure. It is deleted rather than left unused:
+// golangci-lint's `unused` reports an unexported function nothing calls, and the mode and story it
+// named were arguments from the call site, so nothing of the wording is lost with it. The sentinel
+// stays — it is the Go end of the contract with scripts/ci/eval-gate.sh, whose pending list is
+// empty for the same reason and whose branch is kept for the next gate added before its harness.
