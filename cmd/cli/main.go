@@ -165,7 +165,8 @@ func newRootCmd(cfg *config.Config) *cobra.Command {
 	// The two gates, pointed at internal/eval's entry points. Both refuse with eval.ErrNotImplemented
 	// until S10 and S11 build the harnesses behind them; what is fixed here is the call shape and the
 	// exit code, so neither story has to invent one.
-	root.AddCommand(newEvalCmd(cfg, evalModes{golden: eval.GoldenGate, isolation: eval.IsolationGate}))
+	root.AddCommand(newEvalCmd(cfg, evalModes{golden: eval.GoldenGate, isolation: eval.IsolationGate},
+		func(ctx context.Context) (clicmd.Searcher, func(), error) { return dialSearcher(ctx, cfg) }))
 	// Cobra prints its own message for a bad flag or unknown subcommand; the extra copy Execute
 	// would return here is noise.
 	root.SilenceErrors = true

@@ -28,7 +28,42 @@ var (
 	// to return at least as many candidates as the fused answer needs, or RRF fuses two lists that
 	// were already truncated below the answer size.
 	ErrPrefetchLimitTooLow = errors.New("retrieval: prefetch limit is below top_k + offset")
+
+	// ErrInvalidSearchMode is a Mode that names no mode. It is rejected rather than folded into the
+	// hybrid default, because folding it there would make a garbage int and a deliberate hybrid
+	// query indistinguishable — and the whole point of the toggle is that the eval harness can
+	// prove which one it measured (internal/eval/hybrid_compare.go).
+	ErrInvalidSearchMode = errors.New("retrieval: search mode is not one of the defined modes")
 )
+
+// SearchMode selects the query shape: the §2.3b hybrid (two prefetch legs fused with RRF) or a
+// single dense vector search.
+//
+// The zero value is the hybrid, so every Query written before this field existed keeps the shape it
+// had. Dense-only exists for one reason: S07 could not answer whether the sparse leg earns its
+// place because there was no golden set to measure it with, and S10 is where that measurement
+// happens. Which one this build ships as the default is not decided in this file — S10 T11 adds
+// DefaultSearchMode from the measured comparison, and until then no caller here reads a default.
+type SearchMode int
+
+const (
+	SearchModeHybrid SearchMode = iota
+	SearchModeDenseOnly
+)
+
+func (m SearchMode) String() string {
+	switch m {
+	case SearchModeHybrid:
+		return "hybrid"
+	case SearchModeDenseOnly:
+		return "dense-only"
+	default:
+		return fmt.Sprintf("SearchMode(%d)", int(m))
+	}
+}
+
+// Valid reports whether m names a defined mode.
+func (m SearchMode) Valid() bool { return m == SearchModeHybrid || m == SearchModeDenseOnly }
 
 // maxTopK and maxOffset bound the result window. They are not a policy about how much a caller may
 // read — they are what keeps topK+offset and the multiplication in prefetchLimit inside int, so an
@@ -49,6 +84,11 @@ type Query struct {
 	Text       string
 	TopK       int
 	Offset     int
+
+	// Mode selects hybrid (zero value) or dense-only. It narrows nothing about *which* points may
+	// come back — the filter is built the same way in both modes, tenant condition included — it
+	// only changes how they are ranked.
+	Mode SearchMode
 
 	// Optional facets. Empty means "do not restrict on this field", never "restrict to empty".
 	Area  string
@@ -84,8 +124,13 @@ func (q Query) Validate(prefetchMultiplier int) error {
 		return fmt.Errorf("%w: top_k = %d, want 1..%d", ErrInvalidTopK, q.TopK, maxTopK)
 	case q.Offset < 0 || q.Offset > maxOffset:
 		return fmt.Errorf("%w: offset = %d, want 0..%d", ErrInvalidOffset, q.Offset, maxOffset)
+	case !q.Mode.Valid():
+		return fmt.Errorf("%w: mode = %d", ErrInvalidSearchMode, int(q.Mode))
 	}
 
+	// Checked in both modes even though dense-only builds no prefetch leg. The floor is a property
+	// of the configured multiplier, not of the mode, and one gate that always runs is worth more
+	// than a branch here that a third mode would have to remember to update.
 	_, err := prefetchLimit(q.TopK, q.Offset, prefetchMultiplier)
 	return err
 }

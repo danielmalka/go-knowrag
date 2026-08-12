@@ -1,0 +1,78 @@
+# Hermetic golden set — entirely synthetic, paired with corpus.yaml in this directory.
+#
+# The recall this pair produces is a fixed number, not a threshold, and it is asserted in
+# internal/eval/hermetic_test.go (TestHermeticGoldenGate_FixtureCorpus_AchievesExpectedRecall).
+# .github/workflows/ci.yml passes the same number as --min-recall, and that test also reads the
+# workflow and refuses to pass if the two disagree — so editing this file or corpus.yaml without
+# updating the number fails the build rather than moving the gate quietly.
+#
+# The last question is a deliberate miss: the corpus holds nothing about it. A fixture that scored
+# a perfect run would be one where "the runner counts misses" is never exercised, and the day that
+# broke, the gate would report the same green.
+
+coverage:
+  min_total: 4
+  max_total: 12
+  groups:
+    - name: high
+      areas: [alfa, beta]
+      min: 2
+      max: 6
+    - name: low
+      areas: [gama]
+
+questions:
+  - question: "how often does the beacon rotation run and what happens to the previous signing key"
+    uid: "a1111111-1111-4111-8111-111111111111"
+    area: alfa
+    author: fixture
+    date: "2026-08-11"
+
+  - question: "how do I recover a beacon rotation that failed halfway leaving two active keys"
+    uid: "a1111111-1111-4111-8111-111111111111"
+    chunk_index: 1
+    area: alfa
+    author: fixture
+    date: "2026-08-11"
+
+  - question: "what is the hourly request quota allotted to each lantern"
+    uid: "a2222222-2222-4222-8222-222222222222"
+    area: alfa
+    author: fixture
+    date: "2026-08-11"
+
+  - question: "how does the harbour ledger record a crossing and when is one called stranded"
+    uid: "a3333333-3333-4333-8333-333333333333"
+    area: beta
+    author: fixture
+    date: "2026-08-11"
+
+  - question: "what waterline difference makes a tideline alert fire"
+    uid: "a4444444-4444-4444-8444-444444444444"
+    area: beta
+    author: fixture
+    date: "2026-08-11"
+
+  - question: "when does grafting season open for the orchard"
+    uid: "a5555555-5555-4555-8555-555555555555"
+    area: gama
+    author: fixture
+    date: "2026-08-11"
+
+  # The two misses. No chunk in corpus.yaml answers either, so both are counted misses rather than
+  # errors, and the fixture lands on 6 hits out of 8 — a recall of exactly 0.75.
+  #
+  # Exactly two, and eight questions in total, because the number has to survive a round trip
+  # through a command-line flag: --min-recall parses a decimal, and 6/7 is not one any decimal
+  # string names exactly. 0.75 is.
+  - question: "which quarry supplies the ballast used to weight the moorings"
+    uid: "a9999999-9999-4999-8999-999999999999"
+    area: beta
+    author: fixture
+    date: "2026-08-11"
+
+  - question: "what colour is the pennant flown by the pilot cutter at dusk"
+    uid: "a8888888-8888-4888-8888-888888888888"
+    area: alfa
+    author: fixture
+    date: "2026-08-11"

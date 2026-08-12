@@ -23,6 +23,16 @@
 set -uo pipefail
 
 mode="${1:?usage: eval-gate.sh golden|isolation}"
+shift
+
+# Which modes are still allowed to answer "pending". S10 built the golden harness and wired
+# cmd/cli/eval.go to it, so `eval --golden` now measures and can no longer answer with the sentinel
+# — internal/eval/eval.go returns ErrNoSearcher, not ErrNotImplemented, for its own misuse case.
+#
+# Keeping golden on this list would be the failure this script exists to prevent, one level up: a
+# golden job that broke badly enough to reach the pending branch would exit 0 and report a warning,
+# and the gate would be off again with nobody told. `isolation` comes off the list when S11 lands.
+pending_modes="isolation"
 
 # Must equal eval.ErrNotImplemented.Error() (internal/eval/eval.go). Nothing at run time can check
 # that equality — this is a shell script and that is a Go value — so
@@ -41,12 +51,20 @@ if [ "${#not_implemented}" -lt 8 ]; then
   exit 1
 fi
 
-output=$(go run ./cmd/cli eval "--${mode}" --json 2>&1)
+# "$@" is whatever the workflow passes after the mode — the golden job names its fixture golden set
+# and corpus and its --min-recall there, so the numbers live next to the job that asserts them
+# rather than inside this script.
+output=$(go run ./cmd/cli eval "--${mode}" "$@" --json 2>&1)
 status=$?
 printf '%s\n' "$output"
 
 if [ "$status" -eq 0 ]; then
   exit 0
+fi
+
+if [[ " $pending_modes " != *" $mode "* ]]; then
+  printf '::error title=%s gate failed::the %s gate has a harness and it did not pass\n' "$mode" "$mode" >&2
+  exit "$status"
 fi
 
 if grep -qF "$not_implemented" <<<"$output"; then

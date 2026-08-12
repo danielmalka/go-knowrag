@@ -45,10 +45,30 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26'
-      # Hermetic, as the job name claims: `eval` opens no Qdrant connection and reads no vault.
-      # S10 fills the harness behind `--golden` against a versioned synthetic fixture
-      # (docs/PRD-stories-servico.md §3 S10) — never against the real vaults or the deployed Qdrant.
-      - run: ./scripts/ci/eval-gate.sh golden
+      # Two things have to hold, and the two steps below check one each. Both are here, in this job,
+      # rather than one of them living in `make test` and this job being meaningful only because
+      # that job also exists — a green check named `eval-golden-hermetic` has to mean what its name
+      # says on its own. Reorganise the jobs tomorrow and a protection that lived somewhere else
+      # would vanish with nothing here to notice.
+      #
+      # THE FIXTURE: 6 hits out of 8. Asserted exactly, because the threshold below cannot see it —
+      # deleting the two deliberately-unanswerable questions from golden-set.yaml takes recall to
+      # 1.0, which clears the floor and would otherwise leave this job green over an emptied
+      # fixture. This test also reads the --min-recall value below and fails if the two disagree.
+      - run: go test -run TestHermetic ./internal/eval/
+
+      # THE THRESHOLD: recall must be at least --min-recall. A floor and not an equality, because
+      # that is what a recall gate means — a build that retrieves better must not be failed for it.
+      #
+      # `--corpus` is what makes this hermetic: the golden gate searches a versioned synthetic file
+      # instead of the Qdrant collection, so nothing here opens a connection, needs an embedding
+      # service or a GPU, or touches a real vault. The guarantee is the code path cmd/cli/eval.go
+      # takes (openEvalSearcher), not this runner's environment.
+      - run: >
+          ./scripts/ci/eval-gate.sh golden
+          --file testdata/eval/hermetic/golden-set.yaml
+          --corpus testdata/eval/hermetic/corpus.yaml
+          --min-recall 0.75
 
   eval-isolation-hermetic:
     runs-on: ubuntu-latest

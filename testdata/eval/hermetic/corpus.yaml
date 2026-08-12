@@ -1,0 +1,97 @@
+# Hermetic evaluation corpus — entirely synthetic.
+#
+# Nothing here describes a real vault, a real deployment or a real note. The areas are the neutral
+# placeholder names this repository uses in fixtures (alfa, beta, gama), the subject matter is
+# invented, and the UUIDs were made up for this file. That is a requirement, not a convention: this
+# repository is public (CLAUDE.md), and a fixture is the easiest place for a real folder name to
+# leak in unnoticed.
+#
+# Paired with golden-set.yaml in this directory. Editing either one moves the recall the hermetic
+# gate measures, and that number is asserted in two places — see the header of golden-set.yaml.
+#
+# The tenant on the answerable chunks is `interno` because that is the tenant `cli eval` runs under
+# — defaultTenantID, cmd/cli/ingest.go. A fixture under any other name would return nothing and the
+# gate would measure a recall of zero. TestEvalCmd_CorpusRunNeverDials (cmd/cli/eval_test.go) drives
+# the real command against this file, so the two cannot drift apart in silence.
+#
+# `outro` exists so the corpus searcher's tenant condition is exercised: its chunk answers the
+# beacon question better than anything in `interno`, so a searcher that ignored the tenant scope
+# would return it and change the result.
+
+chunks:
+  - uid: "a1111111-1111-4111-8111-111111111111"
+    chunk_index: 0
+    tenant_id: interno
+    area: alfa
+    path: alfa/beacon-rotation.md
+    text: >
+      The beacon rotation runs every fourteen days. Rotating a beacon replaces its signing key and
+      leaves the previous key valid for one further cycle, so a client that missed the announcement
+      still verifies.
+
+  - uid: "a1111111-1111-4111-8111-111111111111"
+    chunk_index: 1
+    tenant_id: interno
+    area: alfa
+    path: alfa/beacon-rotation.md
+    text: >
+      A rotation that fails halfway leaves two active keys and no announcement. Recover by rerunning
+      the rotation; it is idempotent and will re-announce the current key.
+
+  - uid: "a2222222-2222-4222-8222-222222222222"
+    chunk_index: 0
+    tenant_id: interno
+    area: alfa
+    path: alfa/lantern-quotas.md
+    text: >
+      Each lantern is allotted a quota of nine hundred requests per hour. Exceeding the quota parks
+      the lantern for the remainder of the hour rather than dropping its queue.
+
+  - uid: "a3333333-3333-4333-8333-333333333333"
+    chunk_index: 0
+    tenant_id: interno
+    area: beta
+    path: beta/harbour-ledger.md
+    text: >
+      The harbour ledger records every crossing as a pair of entries, one at departure and one at
+      arrival. An unmatched departure older than a day is reported as a stranded crossing.
+
+  - uid: "a4444444-4444-4444-8444-444444444444"
+    chunk_index: 0
+    tenant_id: interno
+    area: beta
+    path: beta/tideline-alerts.md
+    text: >
+      Tideline alerts fire when the measured waterline differs from the predicted waterline by more
+      than eleven centimetres for three consecutive readings.
+
+  - uid: "a5555555-5555-4555-8555-555555555555"
+    chunk_index: 0
+    tenant_id: interno
+    area: gama
+    path: gama/orchard-grafting.md
+    text: >
+      Grafting season for the orchard opens once the ground thaws. A graft taken before the thaw
+      seals poorly and is usually rejected within a fortnight.
+
+  # The distractor. It shares vocabulary with the lantern question without answering it, so the
+  # question that names both a quota and a lantern has something to be ranked against.
+  - uid: "a6666666-6666-4666-8666-666666666666"
+    chunk_index: 0
+    tenant_id: interno
+    area: alfa
+    path: alfa/lantern-inventory.md
+    text: >
+      The lantern inventory lists every lantern by mast and by hour of installation. It records no
+      quota and no request counts; those live with the lantern quota policy.
+
+  # Another tenant's note, and the best lexical match for the beacon question in the whole file. A
+  # corpus searcher that dropped the tenant condition would rank this first.
+  - uid: "b7777777-7777-4777-8777-777777777777"
+    chunk_index: 0
+    tenant_id: outro
+    area: alfa
+    path: alfa/beacon-rotation.md
+    text: >
+      The beacon rotation runs every fourteen days and replaces its signing key, leaving the previous
+      key valid for one further cycle so a client that missed the announcement still verifies.

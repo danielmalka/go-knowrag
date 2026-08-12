@@ -78,9 +78,24 @@ type SearchRequest struct {
 	// FusionRRF selects reciprocal-rank fusion over the prefetch legs, with the server's default
 	// k — the fusion mode §2.3b fixes.
 	FusionRRF bool
-	Filter    Filter
-	Limit     int
-	Offset    int
+
+	// Dense and DenseVector are the top-level vector query, used by SearchModeDenseOnly: one dense
+	// search over the filter, no prefetch leg and no fusion. Exactly one of (Dense, DenseVector) and
+	// (Prefetch, FusionRRF) describes a given request; internal/store/query.go refuses a request
+	// that sets both, because the two are different queries and Qdrant would silently honour one.
+	//
+	// A top-level query is needed rather than a single prefetch leg because a prefetch is by
+	// definition a candidate source for an outer query to rerank or fuse — a request with prefetch
+	// and no outer query is not a dense search, it is an incomplete one.
+	Dense       []float32
+	DenseVector string
+	// Acorn asks for the ACORN traversal on the top-level filtered search, for the same reason the
+	// legs carry it: in dense-only there is no prefetch, so the filtered HNSW traversal happens here.
+	Acorn bool
+
+	Filter Filter
+	Limit  int
+	Offset int
 	// PayloadFields is the payload projection: only what formatResults reads comes back. Empty
 	// would mean "the whole payload", which is a text field per chunk this package never looks at.
 	PayloadFields []string
@@ -155,8 +170,26 @@ func buildFilter(q Query) Filter {
 // request from a cardinality estimate this process does not have, and tenant_id — with one
 // populated tenant per collection in this build — is the least selective condition here, not the
 // most. Pinning a threshold from here would be guessing with strictly less information.
+// The dense-only branch (SearchModeDenseOnly) drops the sparse leg and the fusion, keeping the same
+// filter, the same limit/offset and the same payload projection: the two modes differ in ranking
+// and in nothing else, which is what makes a hybrid-vs-dense recall comparison a comparison of
+// ranking (internal/eval/hybrid_compare.go).
 func buildQueryRequest(q Query, emb embed.Embedding, legLimit int) SearchRequest {
 	f := buildFilter(q)
+
+	if q.Mode == SearchModeDenseOnly {
+		return SearchRequest{
+			Collection:    q.Collection,
+			Dense:         emb.Dense,
+			DenseVector:   schema.DenseVectorName,
+			Acorn:         true,
+			Filter:        f,
+			Limit:         q.TopK,
+			Offset:        q.Offset,
+			PayloadFields: resultPayloadFields(),
+		}
+	}
+
 	leg := func(vector string) PrefetchLeg {
 		return PrefetchLeg{Vector: vector, Limit: legLimit, Filter: f, Acorn: true}
 	}
