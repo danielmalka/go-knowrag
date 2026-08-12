@@ -18,10 +18,17 @@ const endpointEnv = "KNOWRAG_EMBEDDER_ENDPOINT"
 
 // The tolerance, declared before the measurement rather than fitted to it (S04 T8/T10).
 //
-// The numbers come from what the runtime actually varies by, measured on 2026-08-09 against the
-// live service: embedding the same text alone and inside batches of 2 and 32 gives cosine
-// 0.99999901, max per-element dense delta 1.83e-4, identical sparse indices, max sparse weight
-// delta 2.44e-4. That variance is fp16 rounding over batch padding, not semantics.
+// The numbers come from what the runtime was observed to vary by on 2026-08-09 against the live
+// service: embedding the same text alone and inside batches of 2 and 32 gives cosine 0.99999901,
+// max per-element dense delta 1.83e-4, identical sparse indices, max sparse weight delta 2.44e-4.
+// That variance is fp16 rounding over batch padding, not semantics.
+//
+// Read those four figures as an author's note, not as a measurement anyone can re-run: checked on
+// 2026-08-11, no script, log or dated artefact for a batch-invariance run exists, in the bench cache
+// ADR-001 §6.2 names or anywhere else. What the cache holds is the sparse probe, the n=200 latency
+// run and the batch throughput -- none of them this. Tightening or loosening the thresholds below
+// means measuring again; it does not mean re-reading this comment. ADR-001 §5.0 carries the same
+// caveat, so the two places say one thing.
 //
 // So the thresholds sit two orders of magnitude above the observed noise and far below anything
 // retrieval ranking can feel — RRF fusion over top-k results does not reorder on a 1e-3 perturbation
