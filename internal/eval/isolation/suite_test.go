@@ -103,12 +103,29 @@ func TestReport_HasNoScoreField(t *testing.T) {
 // TestReport_SummaryStatesWhatItDoesNotProve keeps the report honest about its own reach. The suite
 // runs with no Qdrant, so a summary that read as "isolation verified against the database" would
 // overclaim in the one place overclaiming is most expensive.
+//
+// The second list is the other half of the same honesty, and it is the half a reader cannot recover
+// on their own: every case drives one entry point, so a green isolation gate can coexist with a leak
+// on the write path or in `stats`, and whoever reads PASS has to be told that without going to read
+// the suite.
 func TestReport_SummaryStatesWhatItDoesNotProve(t *testing.T) {
 	summary := Suite{Cases: []Case{passing("a")}}.Run(t.Context()).Summary()
 
 	for _, want := range []string{"PASS", "Does not prove", "Qdrant", "integration"} {
 		if !strings.Contains(summary, want) {
 			t.Errorf("the summary does not mention %q:\n%s", want, summary)
+		}
+	}
+	for _, want := range []string{
+		"internal/ingest",       // the write path
+		"cmd/mcp-server",        // the tenant the server binds at startup
+		"stats",                 // counts every tenant when none is named, by design
+		"offset 0",              // pagination is never exercised
+		"FilterMatchesAnything", // and neither is the filter probe
+	} {
+		if !strings.Contains(summary, want) {
+			t.Errorf("the summary does not name %q as outside the suite, so a reader takes PASS for "+
+				"a claim about it:\n%s", want, summary)
 		}
 	}
 

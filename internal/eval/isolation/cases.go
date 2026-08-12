@@ -193,11 +193,10 @@ func PrivateVisibilityCase() Case {
 			if problem := excludes(store.requests, "visibility", "private"); problem != "" {
 				return fmt.Sprintf("%s: %s", seeded.collection, problem)
 			}
-			// The archived exclusion rides on the same default and is checked here rather than in a
-			// case of its own: it is not a security boundary, but it is the other thing every
-			// unprivileged query must carry, and a fixture point nothing asserts on is a fixture
-			// point that stops meaning anything.
-			if problem := excludes(store.requests, "status", "archived"); problem != "" {
+			// A query that lifts nothing must still be scoped. The private note being absent says
+			// nothing about the tenant condition, and a search that reached the store with no scope
+			// would satisfy every assertion above.
+			if problem := requestsCarryTenant(store.requests, seeded.tenantID); problem != "" {
 				return fmt.Sprintf("%s: %s", seeded.collection, problem)
 			}
 
@@ -224,6 +223,60 @@ func PrivateVisibilityCase() Case {
 			}
 		}
 		return ""
+	}}
+}
+
+// ArchivedExclusionCase covers the other default exclusion, the one nothing proved by result.
+//
+// It is not a confidentiality boundary — an archived note belongs to the tenant asking for it — and
+// it is here anyway, because until this case existed the whole of `status != archived` rested on one
+// inspection line inside PrivateVisibilityCase. Deleting that line, or deleting the condition from
+// buildFilter (retrieval/build.go), left the suite green: no case ever searched for the archived
+// note, so no result could contradict either change.
+//
+// Same shape as the private case, and for the same reason: prove the note is absent, then prove it
+// comes back with IncludeArchived set, or the absence is a fact about a note nothing could ever
+// return rather than a fact about the exclusion.
+func ArchivedExclusionCase() Case {
+	return Case{Name: "default exclusions: archived is returned only when asked for", Run: func(ctx context.Context) string {
+		seeded, ok := archivedFixture()
+		if !ok {
+			return "no archived note is seeded, so this case asserts the absence of something that " +
+				"was never there"
+		}
+
+		searcher, store := newProbe()
+		results, err := searcher.Search(ctx, query(seeded.collection, seeded.tenantID, seeded.text))
+		if err != nil {
+			return fmt.Sprintf("searching %s as %q: %v", seeded.collection, seeded.tenantID, err)
+		}
+		for _, r := range results {
+			if r.UID == seeded.uid {
+				return fmt.Sprintf("the archived note %s came back from %s, searched by its own exact "+
+					"text under its own tenant", seeded.uid, seeded.collection)
+			}
+		}
+		if problem := excludes(store.requests, "status", "archived"); problem != "" {
+			return problem
+		}
+		if problem := requestsCarryTenant(store.requests, seeded.tenantID); problem != "" {
+			return problem
+		}
+
+		privileged, _ := newProbe()
+		q := query(seeded.collection, seeded.tenantID, seeded.text)
+		q.IncludeArchived = true
+		lifted, lerr := privileged.Search(ctx, q)
+		if lerr != nil {
+			return fmt.Sprintf("the include-archived control search failed: %v", lerr)
+		}
+		for _, r := range lifted {
+			if r.UID == seeded.uid {
+				return ""
+			}
+		}
+		return fmt.Sprintf("the archived note %s never comes back even with the exclusion lifted, so "+
+			"its absence above proves nothing about the exclusion", seeded.uid)
 	}}
 }
 

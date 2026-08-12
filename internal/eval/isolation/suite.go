@@ -50,6 +50,7 @@ func DefaultSuite(root string) Suite {
 		AdversarialTenantPayloadCase(),
 		QueryTextInjectionCase(),
 		PrivateVisibilityCase(),
+		ArchivedExclusionCase(),
 		PrivilegedPathCase(),
 		ArchitectureBoundaryCase(root),
 	}}

@@ -71,6 +71,19 @@ func fixture() []point {
 
 func tenants() []string { return []string{tenantA, tenantB, tenantC} }
 
+// archivedFixture is the seeded archived note, and reports whether there is one.
+//
+// The bool is the point: ArchivedExclusionCase asserts that a note does not come back, and over a
+// fixture that seeds no archived note that assertion holds against nothing at all.
+func archivedFixture() (point, bool) {
+	for _, p := range fixture() {
+		if p.status == "archived" {
+			return p, true
+		}
+	}
+	return point{}, false
+}
+
 // probeStore is a deliberately hostile stand-in for Qdrant.
 //
 // It is hostile in the one way that matters: it applies **only** the conditions the request carries,
@@ -93,10 +106,24 @@ type probeStore struct {
 	// does, to drive every case into the failure it is supposed to detect. Without a way to do that,
 	// a case whose assertions had all been disabled would still return "" and still report a pass.
 	ignoreFilter bool
+
+	// recordAs rewrites the request this store logs, leaving the request it answers untouched.
+	//
+	// It is the seam for the two assertions no result can reach. A tenant condition missing from the
+	// prefetch legs alone changes nothing about the answer, because matches() below reads the outer
+	// filter and never the legs; a MustNot that was never sent changes nothing either, if the store
+	// excludes those points on its own account — which is the helpful mock this package exists not
+	// to be. Nothing in the suite sets it; cases_nonvacuity_test.go does, to prove the request
+	// inspections in cases.go are load-bearing rather than decorative.
+	recordAs func(retrieval.SearchRequest) retrieval.SearchRequest
 }
 
 func (s *probeStore) ExecuteQuery(_ context.Context, req retrieval.SearchRequest) ([]retrieval.ScoredPoint, error) {
-	s.requests = append(s.requests, req)
+	logged := req
+	if s.recordAs != nil {
+		logged = s.recordAs(req)
+	}
+	s.requests = append(s.requests, logged)
 
 	var out []retrieval.ScoredPoint
 	for _, p := range s.points {
@@ -152,6 +179,17 @@ func field(p point, name string) string {
 	}
 }
 
+// caseSearcher is the one thing a case needs: something that answers a Query.
+//
+// It is an interface only so the suite's own tests can put a case in front of a searcher that
+// misbehaves. That is not a convenience: AdversarialTenantEmptyCase asserts a refusal that happens
+// in Query.Validate (retrieval/query.go) before any store is reached, so no store — however hostile
+// — can drive that case red, and a searcher that accepts what production refuses is the only seam
+// that can. TestDefaultSuite_UsesTheRealProbe pins that the shipped probe is the production type.
+type caseSearcher interface {
+	Search(ctx context.Context, q retrieval.Query) ([]retrieval.Result, error)
+}
+
 // newProbe builds the real *retrieval.Searcher over the hostile store.
 //
 // The searcher is the production type with the production config: nothing about the query shape,
@@ -161,7 +199,7 @@ func field(p point, name string) string {
 // It is a var, not a func, for one reason: the suite's own tests swap it for a leaking probe to
 // prove each case fails when isolation is gone (cases_nonvacuity_test.go). Nothing in the shipped
 // suite reassigns it, and TestDefaultSuite_UsesTheRealProbe pins that.
-var newProbe = func() (*retrieval.Searcher, *probeStore) {
+var newProbe = func() (caseSearcher, *probeStore) {
 	store := &probeStore{points: fixture()}
 	return newSearcherOver(store), store
 }

@@ -78,5 +78,16 @@ func (r Report) Summary() string {
 	b.WriteString("\nProves: the request this system builds always carries its tenant condition, " +
 		"and a store that ignored it would be caught. Does not prove Qdrant honours that condition — " +
 		"internal/retrieval's integration-tagged tests do that against a real instance.\n")
+
+	// The rest of the system, named here rather than left to whoever reads PASS. Every case in this
+	// suite drives one entry point, Searcher.Search, so a green run is a claim about the read path
+	// and about nothing else — and the reader who takes it for a claim about the system is the
+	// failure this paragraph exists to prevent.
+	b.WriteString("\nUntouched by every case above, so a PASS says nothing about them: the write " +
+		"path (internal/ingest), the tenant the MCP server binds from its environment at startup " +
+		"(cmd/mcp-server/config.go), `stats`, which counts every tenant when none is named and does " +
+		"so by design (internal/store/points.go), pagination, since every case here queries at " +
+		"offset 0, and Searcher.FilterMatchesAnything (internal/retrieval/search.go), which no case " +
+		"calls.\n")
 	return b.String()
 }
