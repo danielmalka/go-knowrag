@@ -31,7 +31,9 @@ ExecStart=/bin/sh -c 'exec "$KNOWRAG_PYTHON" "$KNOWRAG_REPO/scripts/embedder-ser
 # the model comes from the Hugging Face cache under the user's home. An earlier version of this unit
 # pinned a working directory and claimed the model cache depended on it. It does not.
 
-# Loading the weights takes ~11 s, so restarting is not free and a crash loop would thrash the GPU.
+# Start to ready is ~9 s for a restart like this one, where the page cache is still warm, and 28-37 s
+# from a cold boot (measured off this unit's own journal; ADR-001 §6.2). Restarting is not free and a
+# crash loop would thrash the GPU.
 Restart=always
 RestartSec=5
 

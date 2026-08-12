@@ -13,13 +13,22 @@ Both are recorded in ADR-001 §6.2. FlagEmbedding is the reference implementatio
 own authors, where sparse is first-class -- so what is left to write is the thin HTTP shell around
 it, which is this file.
 
-Resident by design, not by preference: loading the model measured **~11 s** with the weights already
-in the Hugging Face cache, which is the normal case for a restart. The **314.5 s** of the first run
-is a different number and not this one -- it included downloading the 2.2 GB of weights, and only
-happens on a machine that has never loaded the model. Both are recorded in ADR-001 §6.2, and the
-systemd unit next to this file quotes the ~11 s. A process that loaded on demand would put eleven
-seconds in front of the first query of the day, against a measured 71 ms p99 -- three orders of
-magnitude. This process loads once at startup and stays up. It is never invoked per request.
+Resident by design, not by preference. Startup cost, clocked from the journal rather than quoted
+from another file -- `journalctl --user -u knowrag-embedder` carries the unit's `Started` and the
+`ready on` printed below, so start-to-ready is a subtraction:
+
+  - **28-37 s** when the machine boots. Four of the five real starts on record. This is the normal
+    case.
+  - **~9 s** when the service restarts on top of itself, with the kernel page cache still warm from
+    the process that just died. One start on record, and the number this file used to generalise.
+  - **314.5 s** on a machine that has never loaded the model, because that run downloads 2.2 GB of
+    weights first. Not a load time.
+
+All three are in ADR-001 §6.2, which also records that the first two numbers written here were each
+measured once, under one initial condition, and each described that condition rather than the load.
+A process that loaded on demand would put half a minute in front of the first query of the day,
+against a measured 71 ms p99. This process loads once at startup and stays up. It is never invoked
+per request.
 
 Inference is serialized. One CUDA model is not safe to call concurrently, and the consumers do not
 need it: query embedding is one at a time by nature, and ingestion sends batches. Serialized is not
@@ -358,7 +367,11 @@ def main() -> None:
     ap.add_argument("--fp32", action="store_true", help="load in fp32 instead of fp16")
     args = ap.parse_args()
 
-    print(f"loading {MODEL_ID}@{REVISION[:8]} on {args.device} (measured ~315s)...", flush=True)
+    # No number in this line: it is printed before the load, so any figure here is a claim about a
+    # future the process has not lived yet, and the two that lived here were both wrong (see the
+    # module docstring). The journal timestamps this line and the `ready on` below; that subtraction
+    # is the measurement.
+    print(f"loading {MODEL_ID}@{REVISION[:8]} on {args.device}...", flush=True)
     load_model(args.device, use_fp16=not args.fp32)
 
     probe = _model.encode(["handshake probe"], return_dense=True, return_sparse=True,
