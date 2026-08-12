@@ -202,3 +202,60 @@ func TestRecallStat_ZeroDenominatorIsNotZeroRecall(t *testing.T) {
 			"observations the honest answer is the whole unit interval", empty.Global.Lo, empty.Global.Hi)
 	}
 }
+
+// tiedHit is a hit whose place was decided among equals, as RunGolden marks it.
+func tiedHit(area, text string) QuestionResult {
+	q := question(text, uidA, nil)
+	q.Area = area
+	return QuestionResult{Question: q, Hit: true, Tied: true,
+		TopK: []retrieval.Result{result(uidB, 0, 0.5), result(uidA, 0, 0.5)}}
+}
+
+// TestAggregate_TiedHitsCountAndAreNamed pins the decision the tie flag encodes: a tied hit is a
+// hit, because it is what a search returns today and the recall has to be production's number — and
+// it is listed, because that part of the recall may not survive the next run against an unchanged
+// index.
+func TestAggregate_TiedHitsCountAndAreNamed(t *testing.T) {
+	results := append(hitPattern("alfa", 2, 1), tiedHit("alfa", "a hit decided by a coin toss"))
+
+	r := Aggregate(results)
+
+	if r.Global.Hits != 3 || r.Global.Total != 4 {
+		t.Errorf("global = %d/%d, want 3/4 — a tied hit is still a hit", r.Global.Hits, r.Global.Total)
+	}
+	if len(r.Tied) != 1 {
+		t.Fatalf("%d tied hit(s) retained, want 1", len(r.Tied))
+	}
+	if r.Tied[0].Question.Question != "a hit decided by a coin toss" {
+		t.Errorf("the wrong result was filed as tied: %+v", r.Tied[0])
+	}
+	// A tied hit is not also a failure. Filing it in both would double-count it in the report.
+	for _, f := range r.Failed {
+		if f.Tied {
+			t.Errorf("a tied hit was also filed as a failure: %+v", f)
+		}
+	}
+	// And an ordinary run carries no tie section at all.
+	if len(Aggregate(hitPattern("alfa", 2, 1)).Tied) != 0 {
+		t.Error("a run with no tied hits reported some")
+	}
+}
+
+func TestRenderReport_NamesTiedHits(t *testing.T) {
+	r := Aggregate(append(hitPattern("alfa", 2, 0), tiedHit("beta", "the tied question")))
+	r.K = 5
+
+	out := RenderReport(r)
+	for _, want := range []string{"tie at rank 5", "the tied question", "not reproducible"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the report does not carry %q:\n%s", want, out)
+		}
+	}
+
+	// The absent half: a run with no ties must not print the section, or a reader learns to skip a
+	// heading that is always there.
+	clean := RenderReport(Aggregate(hitPattern("alfa", 2, 0)))
+	if strings.Contains(clean, "tie at rank") {
+		t.Errorf("a report with no tied hits rendered the tie section anyway:\n%s", clean)
+	}
+}

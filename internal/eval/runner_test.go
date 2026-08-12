@@ -1,17 +1,13 @@
 package eval
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"slices"
 	"strings"
 	"testing"
 
-	"github.com/google/uuid"
-
 	"github.com/danielmalka/go-knowrag/internal/retrieval"
-	"github.com/danielmalka/go-knowrag/internal/schema"
 )
 
 // fakeSearcher replays a canned answer per call, so a test can hand the same set back in two
@@ -61,101 +57,6 @@ func intPtr(n int) *int { return &n }
 
 func runConfig(k int) RunConfig {
 	return RunConfig{Collection: "interno", TenantID: "tenant-a", K: k}
-}
-
-// TestRunGolden_TiedScores_TieBreakIsStableAcrossRuns is S10 T3's RED test.
-//
-// Six results all scoring 0.5 with K=5: which five make the cut is decided entirely by the
-// tie-break, so a runner that kept the arrival order would answer differently for the two orders
-// below. Reversing the input is what makes the assertion mean "stable", not "the fake is
-// deterministic".
-func TestRunGolden_TiedScores_TieBreakIsStableAcrossRuns(t *testing.T) {
-	tied := []retrieval.Result{
-		result(uidA, 0, 0.5), result(uidA, 1, 0.5), result(uidB, 0, 0.5),
-		result(uidB, 1, 0.5), result(uidC, 0, 0.5), result(uidC, 1, 0.5),
-	}
-	reversed := slices.Clone(tied)
-	slices.Reverse(reversed)
-
-	q := question("which note covers the restart procedure", uidC, intPtr(1))
-	s := &fakeSearcher{answers: [][]retrieval.Result{tied, reversed}}
-
-	first, err := RunGolden(t.Context(), s, []GoldenQuestion{q}, runConfig(5))
-	if err != nil {
-		t.Fatalf("first run: %v", err)
-	}
-	second, err := RunGolden(t.Context(), s, []GoldenQuestion{q}, runConfig(5))
-	if err != nil {
-		t.Fatalf("second run: %v", err)
-	}
-
-	if first[0].Hit != second[0].Hit {
-		t.Errorf("the two runs disagree on hit/miss (%t vs %t) over the same six tied results",
-			first[0].Hit, second[0].Hit)
-	}
-	if len(first[0].TopK) != 5 || len(second[0].TopK) != 5 {
-		t.Fatalf("top-K lengths %d and %d, want 5 each", len(first[0].TopK), len(second[0].TopK))
-	}
-	for i := range first[0].TopK {
-		if first[0].TopK[i] != second[0].TopK[i] {
-			t.Errorf("rank %d differs between runs: %+v vs %+v", i+1, first[0].TopK[i], second[0].TopK[i])
-		}
-	}
-
-	// The tie-break is not a stable sort over arrival order: it is a function of the point IDs, so
-	// the sixth result — whichever one it is — is the same one both times.
-	if first[0].TopK[4] != second[0].TopK[4] {
-		t.Error("the result that counted as rank 5 is not the same across the two runs")
-	}
-}
-
-// TestSortDeterministically_OrdersByScoreThenPointID proves what the tie-break actually is, which
-// the test above cannot: it would pass over any deterministic order at all, including arrival order
-// from a fake that happens to be consistent.
-func TestSortDeterministically_OrdersByScoreThenPointID(t *testing.T) {
-	hits := []retrieval.Result{result(uidA, 0, 0.1), result(uidB, 0, 0.9), result(uidC, 0, 0.9)}
-
-	ordered, err := sortDeterministically(hits, "tenant-a")
-	if err != nil {
-		t.Fatalf("sortDeterministically: %v", err)
-	}
-	if ordered[2].Score != 0.1 {
-		t.Errorf("the lowest score is at rank %d, want last — the sort is not score-descending",
-			slices.IndexFunc(ordered, func(r retrieval.Result) bool { return r.Score == 0.1 })+1)
-	}
-
-	// Between the two 0.9s the winner is the smaller point ID, computed here the same way the runner
-	// computes it — schema.PointID(tenant, uid, chunkIndex), internal/schema/identity.go. Recomputing
-	// it rather than hardcoding an expected order is deliberate: the ordering is a property of that
-	// formula, and a hardcoded uid would freeze today's hash output into this test.
-	pointOf := func(uid string) uuid.UUID {
-		return schema.PointID("tenant-a", uuid.MustParse(uid), 0)
-	}
-	pb, pc := pointOf(uidB), pointOf(uidC)
-	wantFirst, wantSecond := uidB, uidC
-	if bytes.Compare(pc[:], pb[:]) < 0 {
-		wantFirst, wantSecond = uidC, uidB
-	}
-	if ordered[0].UID != wantFirst || ordered[1].UID != wantSecond {
-		t.Errorf("the two tied results ordered %s, %s; by ascending point ID they are %s, %s — the "+
-			"tie-break is not keyed on schema.PointID", ordered[0].UID, ordered[1].UID, wantFirst, wantSecond)
-	}
-}
-
-// TestSortDeterministically_LeavesTheCallersSliceAlone is the trap the "two runs agree" test would
-// fall into: if the sort worked in place, the first run would reorder the fake's own backing array
-// and the second run would receive an already-sorted list. The two runs would then agree for a
-// reason that has nothing to do with the tie-break.
-func TestSortDeterministically_LeavesTheCallersSliceAlone(t *testing.T) {
-	hits := []retrieval.Result{result(uidA, 0, 0.1), result(uidB, 0, 0.9)}
-	before := slices.Clone(hits)
-
-	if _, err := sortDeterministically(hits, "tenant-a"); err != nil {
-		t.Fatalf("sortDeterministically: %v", err)
-	}
-	if !slices.Equal(hits, before) {
-		t.Errorf("the caller's slice was reordered: %+v, was %+v", hits, before)
-	}
 }
 
 func TestRunGolden_HitAndMiss(t *testing.T) {
@@ -231,10 +132,11 @@ func TestRunGolden_SearcherErrorIsCapturedAndTheRunContinues(t *testing.T) {
 	}
 }
 
-// TestRunGolden_AsksBeyondKSoTiesAtTheBoundaryCanBeReordered pins the one thing TieBreakMargin is
-// for. Without the margin the searcher returns exactly K results and a tie at rank K is decided by
-// whatever Qdrant cut, with nothing left over to reorder.
-func TestRunGolden_AsksBeyondKSoTiesAtTheBoundaryCanBeReordered(t *testing.T) {
+// TestRunGolden_AsksTheProductionQuery is the assertion the whole instrument rests on, and the one
+// whose absence let a defect through: TopK reaches internal/retrieval/query.go's prefetchLimit, so a
+// value larger than K changes the prefetch pool and the fusion width, and the eval measures a
+// ranking production never computes.
+func TestRunGolden_AsksTheProductionQuery(t *testing.T) {
 	s := &fakeSearcher{answers: [][]retrieval.Result{{result(uidA, 0, 0.9)}}}
 
 	if _, err := RunGolden(t.Context(), s, []GoldenQuestion{question("q", uidA, nil)}, runConfig(5)); err != nil {
@@ -243,8 +145,8 @@ func TestRunGolden_AsksBeyondKSoTiesAtTheBoundaryCanBeReordered(t *testing.T) {
 	if len(s.queries) != 1 {
 		t.Fatalf("%d search(es), want 1", len(s.queries))
 	}
-	if want := 5 + TieBreakMargin; s.queries[0].TopK != want {
-		t.Errorf("the search asked for TopK %d, want K+TieBreakMargin = %d", s.queries[0].TopK, want)
+	if s.queries[0].TopK != 5 {
+		t.Errorf("the search asked for TopK %d, want exactly K = 5", s.queries[0].TopK)
 	}
 	if s.queries[0].TenantID != "tenant-a" || s.queries[0].Collection != "interno" {
 		t.Errorf("the search ran under %q/%q, not the RunConfig's scope",
@@ -313,17 +215,228 @@ func TestRunGolden_NonUUIDIsNotSilentlyRanked(t *testing.T) {
 		}
 	})
 
-	t.Run("returned point", func(t *testing.T) {
+	// A returned point whose uid is not a UUID used to be an error here, because the point-ID
+	// tie-break had to parse it. Nothing parses it now — the verdict is a uid comparison — so such a
+	// point is simply not the note the question expected. It is a miss, measured, and no error: the
+	// eval has no opinion about points it did not ask for.
+	t.Run("returned point is simply not a match", func(t *testing.T) {
 		s := &fakeSearcher{answers: [][]retrieval.Result{{result("point-7", 0, 0.9)}}}
 		results, err := RunGolden(t.Context(), s, []GoldenQuestion{question("q", uidA, nil)}, runConfig(5))
 		if err != nil {
 			t.Fatalf("RunGolden: %v", err)
 		}
-		if results[0].Measured() {
-			t.Errorf("a result with no point ID was ranked anyway: %+v", results[0])
-		}
-		if !strings.Contains(results[0].Error, "not written by this pipeline") {
-			t.Errorf("the error %q does not say what is wrong with the point", results[0].Error)
+		if !results[0].Measured() || results[0].Hit {
+			t.Errorf("want a measured miss, got %+v", results[0])
 		}
 	})
+}
+
+// TestRunGolden_ReturnsTheSearchersOrderUntouched is the second half of the correction, and the one
+// a TopK assertion alone would miss.
+//
+// Production hands back Qdrant's order and never reorders it (Search and formatResults in
+// internal/retrieval). The runner used to re-sort by (score, point ID), which does not merely
+// reorder — over a window wider than K it changes which points are inside the cut. Nothing may
+// reorder here now, so the results are asserted position by position against what the searcher
+// returned, deliberately in an order no sort would produce.
+func TestRunGolden_ReturnsTheSearchersOrderUntouched(t *testing.T) {
+	// Ascending score, and uidC before uidA at the same score: both a score sort and a uid sort
+	// would rearrange this.
+	answer := []retrieval.Result{
+		result(uidC, 3, 0.1), result(uidA, 0, 0.1), result(uidB, 0, 0.9),
+	}
+	// The expectation is frozen as a string, and the searcher gets a copy, before anything runs.
+	// Comparing against the same slice the searcher handed out is how this test went vacuous once: a
+	// sort inside the runner works on that backing array, so both sides of the comparison move
+	// together and any reordering at all passes. A defect plant caught exactly that.
+	want := joinUIDs(answer)
+	s := &fakeSearcher{answers: [][]retrieval.Result{slices.Clone(answer)}}
+
+	results, err := RunGolden(t.Context(), s, []GoldenQuestion{question("q", uidA, nil)}, runConfig(5))
+	if err != nil {
+		t.Fatalf("RunGolden: %v", err)
+	}
+	if got := joinUIDs(results[0].TopK); got != want {
+		t.Errorf("the runner reordered the answer:\n  got  %s\n  want %s", got, want)
+	}
+}
+
+// TestRunGolden_TieAtTheCutIsFlaggedNotSmoothedOver covers the third state that replaced the
+// re-sort: a hit that landed on the boundary score is still a hit, and is named as one that may not
+// reproduce.
+func TestRunGolden_TieAtTheCutIsFlaggedNotSmoothedOver(t *testing.T) {
+	cases := map[string]struct {
+		answer     []retrieval.Result
+		expected   string
+		k          int
+		wantHit    bool
+		wantTied   bool
+		wantReason string
+	}{
+		"expected note scores what the last slot scores": {
+			answer:   []retrieval.Result{result(uidA, 0, 0.9), result(uidB, 0, 0.5), result(uidC, 0, 0.5)},
+			expected: uidC, k: 3, wantHit: true, wantTied: true,
+			wantReason: "the cut landed inside a run of equal scores",
+		},
+		"expected note is the last slot but scores above it alone": {
+			answer:   []retrieval.Result{result(uidA, 0, 0.9), result(uidB, 0, 0.8), result(uidC, 0, 0.7)},
+			expected: uidC, k: 3, wantHit: true, wantTied: false,
+			wantReason: "no two results share the boundary score",
+		},
+		"expected note is well above the boundary": {
+			answer:   []retrieval.Result{result(uidA, 0, 0.9), result(uidB, 0, 0.5), result(uidC, 0, 0.5)},
+			expected: uidA, k: 3, wantHit: true, wantTied: false,
+			wantReason: "the expected note does not score what the boundary scores",
+		},
+		// Fewer results than K means nothing was cut, so there is no boundary to be tied at. Without
+		// this the flag would fire on every short answer whose scores happen to match.
+		"a short answer has no boundary": {
+			answer:   []retrieval.Result{result(uidA, 0, 0.5), result(uidB, 0, 0.5)},
+			expected: uidB, k: 5, wantHit: true, wantTied: false,
+			wantReason: "fewer than K results came back, so nothing was excluded",
+		},
+		"a miss is never flagged": {
+			answer:   []retrieval.Result{result(uidA, 0, 0.5), result(uidB, 0, 0.5), result(uidB, 1, 0.5)},
+			expected: uidC, k: 3, wantHit: false, wantTied: false,
+			wantReason: "the expected note is not in the answer at all",
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			s := &fakeSearcher{answers: [][]retrieval.Result{tc.answer}}
+			results, err := RunGolden(t.Context(), s, []GoldenQuestion{question("q", tc.expected, nil)}, runConfig(tc.k))
+			if err != nil {
+				t.Fatalf("RunGolden: %v", err)
+			}
+			if results[0].Hit != tc.wantHit {
+				t.Errorf("hit = %t, want %t", results[0].Hit, tc.wantHit)
+			}
+			if results[0].Tied != tc.wantTied {
+				t.Errorf("tied = %t, want %t: %s", results[0].Tied, tc.wantTied, tc.wantReason)
+			}
+		})
+	}
+}
+
+// TestRunGolden_OverAnsweringSearcherCannotWidenTheWindow is the guard on the shape of the defect
+// that was just removed: even if something hands back more than K, the verdict is taken over K.
+func TestRunGolden_OverAnsweringSearcherCannotWidenTheWindow(t *testing.T) {
+	// The expected note sits at rank 6 of an over-long answer: inside the window only if the runner
+	// forgets to cut.
+	answer := []retrieval.Result{
+		result(uidA, 0, 0.9), result(uidA, 1, 0.8), result(uidA, 2, 0.7),
+		result(uidA, 3, 0.6), result(uidA, 4, 0.5), result(uidC, 0, 0.4),
+	}
+	s := &fakeSearcher{answers: [][]retrieval.Result{answer}}
+
+	results, err := RunGolden(t.Context(), s, []GoldenQuestion{question("q", uidC, nil)}, runConfig(5))
+	if err != nil {
+		t.Fatalf("RunGolden: %v", err)
+	}
+	if len(results[0].TopK) != 5 {
+		t.Errorf("the verdict was taken over %d result(s), want 5", len(results[0].TopK))
+	}
+	if results[0].Hit {
+		t.Error("a note at rank 6 counted as a hit at Recall@5, which is the defect this file was " +
+			"corrected for")
+	}
+}
+
+// cancellingSearcher cancels the run partway through, the way a CI timeout or a Ctrl-C does: the
+// context dies between questions rather than before any of them.
+type cancellingSearcher struct {
+	cancel  context.CancelFunc
+	after   int
+	calls   int
+	answers []retrieval.Result
+}
+
+func (c *cancellingSearcher) Search(ctx context.Context, _ retrieval.Query) ([]retrieval.Result, error) {
+	c.calls++
+	if c.calls == c.after {
+		c.cancel()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return c.answers, nil
+}
+
+// TestRunGolden_CancelledRunSaysItWasCancelled is the distinction a reader of a CI failure needs.
+//
+// Without the ctx check in the loop, the run keeps asking, every remaining search fails against the
+// dead context, and the report comes back with six errored questions — which is byte-identical to a
+// searcher that broke. Report.Complete already stops that from passing (report.go), so the defect
+// is not a false pass; it is that a timeout and a retrieval regression produce the same output.
+func TestRunGolden_CancelledRunSaysItWasCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	questions := make([]GoldenQuestion, 0, 8)
+	for i := range 8 {
+		questions = append(questions, question("question "+string(rune('a'+i)), uidA, nil))
+	}
+	s := &cancellingSearcher{cancel: cancel, after: 3, answers: []retrieval.Result{result(uidA, 0, 0.9)}}
+
+	results, err := RunGolden(ctx, s, questions, runConfig(5))
+
+	if err == nil {
+		t.Fatal("a cancelled run returned no error, so it is indistinguishable from one that finished")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("the error does not unwrap to context.Canceled, so no caller can recognise "+
+			"cancellation without matching prose: %v", err)
+	}
+	for _, want := range []string{"cancelled", "of 8", "not a set of failed searches"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the error %q does not mention %q", err, want)
+		}
+	}
+
+	// It stops rather than grinding through the rest. Eight questions, cancelled on the third: the
+	// loop must not ask the remaining five and file them as failures.
+	if s.calls > 4 {
+		t.Errorf("the searcher was called %d time(s) after cancellation on call 3; the run kept "+
+			"asking and would report the rest as failed searches", s.calls)
+	}
+	if len(results) >= len(questions) {
+		t.Errorf("%d result(s) for %d question(s): the run did not stop", len(results), len(questions))
+	}
+}
+
+// TestRunGolden_AlreadyCancelledContextAsksNothing is the boundary the loop check also covers: a
+// context dead before the first question must not produce a single search.
+func TestRunGolden_AlreadyCancelledContextAsksNothing(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	s := &fakeSearcher{answers: [][]retrieval.Result{{result(uidA, 0, 0.9)}}}
+	results, err := RunGolden(ctx, s, []GoldenQuestion{question("q", uidA, nil)}, runConfig(5))
+
+	if err == nil {
+		t.Fatal("a run on a dead context reported no error")
+	}
+	if s.calls != 0 {
+		t.Errorf("the searcher was called %d time(s) on an already-cancelled context", s.calls)
+	}
+	if len(results) != 0 {
+		t.Errorf("%d result(s) came back from a run that asked nothing", len(results))
+	}
+}
+
+// TestRunGolden_LiveContextIsNotTreatedAsCancelled is the absent half. A check written as
+// `ctx.Err() == nil` by mistake, or one that fired on every iteration, would stop every run at the
+// first question — and the two tests above would still pass.
+func TestRunGolden_LiveContextIsNotTreatedAsCancelled(t *testing.T) {
+	s := &fakeSearcher{answers: [][]retrieval.Result{{result(uidA, 0, 0.9)}}}
+	questions := []GoldenQuestion{question("a", uidA, nil), question("b", uidA, nil), question("c", uidA, nil)}
+
+	results, err := RunGolden(t.Context(), s, questions, runConfig(5))
+	if err != nil {
+		t.Fatalf("a run on a live context was refused: %v", err)
+	}
+	if len(results) != len(questions) {
+		t.Errorf("%d result(s) for %d question(s) on a live context", len(results), len(questions))
+	}
 }

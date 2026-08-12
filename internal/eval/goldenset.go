@@ -23,8 +23,9 @@ var ErrGoldenSetMissing = errors.New("eval: golden set not found")
 // GoldenQuestion is one question and the note that answers it.
 //
 // UID is a string rather than a uuid.UUID because it is what the YAML holds and because a hand-
-// built question in a test should not have to import uuid to say "this is not a UUID" — LoadGoldenSet
-// proves it parses, and the runner parses it again for the point-ID tie-break (runner.go).
+// built question in a test should not have to import uuid to say "this is not a UUID". LoadGoldenSet
+// proves it parses; the runner re-checks it before searching, because RunGolden also serves
+// hand-built questions that never went through the loader (runner.go).
 type GoldenQuestion struct {
 	Question string `yaml:"question" json:"question"`
 	UID      string `yaml:"uid" json:"uid"`

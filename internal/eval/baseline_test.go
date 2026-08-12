@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -159,5 +160,117 @@ func TestCompareToBaseline_AreaThatAppearedOrVanishedIsStillShown(t *testing.T) 
 	}
 	if want := 0.8; math.Abs(d.PerAreaDelta["new"]-want) > tolerance {
 		t.Errorf("the new area's delta = %v, want %v", d.PerAreaDelta["new"], want)
+	}
+}
+
+// TestSaveBaseline_LeavesNoTemporaryFileBehind is the visible half of the atomic write: the
+// directory holds the baseline and nothing else, so nobody has to guess which of two files is the
+// real one.
+func TestSaveBaseline_LeavesNoTemporaryFileBehind(t *testing.T) {
+	path := baselinePath(t)
+	if err := SaveBaseline(path, Aggregate(hitPattern("alfa", 3, 1))); err != nil {
+		t.Fatalf("SaveBaseline: %v", err)
+	}
+
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		t.Fatalf("reading the baseline directory: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != filepath.Base(path) {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("the directory holds %v, want only %s", names, filepath.Base(path))
+	}
+}
+
+// TestSaveBaseline_FailedRenameLeavesNoWreckage covers the only failure of the temp-and-rename path
+// that a test can reach without killing the process mid-write: the rename itself failing.
+//
+// What temp-and-rename actually buys is narrower than it first looks, and worth stating exactly.
+// os.WriteFile opens with O_TRUNC, so an in-place write never leaves the *tail* of a longer old
+// baseline behind, and a truncated JSON document fails Decode anyway. What it buys is that an
+// interrupted write does not destroy the baseline that was already there: the old file is untouched
+// until a complete new one exists to replace it. Reaching that needs a process killed between the
+// truncate and the write, which no unit test here can stage — see the report accompanying this
+// change. This covers the reachable half.
+func TestSaveBaseline_FailedRenameLeavesNoWreckage(t *testing.T) {
+	// A directory where the baseline should go. Writing the temporary file beside it succeeds; the
+	// rename onto a directory does not.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "baseline.json")
+	if err := os.Mkdir(path, 0o750); err != nil {
+		t.Fatalf("staging the fixture: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "occupant"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("staging the fixture: %v", err)
+	}
+
+	if err := SaveBaseline(path, Aggregate(hitPattern("alfa", 3, 1))); err == nil {
+		t.Fatal("SaveBaseline reported success writing over a directory")
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("reading the directory: %v", err)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".tmp") {
+			t.Errorf("a failed save left %s behind, where the next reader has to guess which of the "+
+				"two files is the baseline", e.Name())
+		}
+	}
+}
+
+// TestLoadBaseline_TrailingContentIsCorrupt is the reader's half. json.Decoder stops at the end of
+// the first value and says nothing about the rest, so without an EOF check a file holding a valid
+// baseline followed by the tail of an older one loads clean — and the delta then compares against a
+// number that was never the whole measurement.
+func TestLoadBaseline_TrailingContentIsCorrupt(t *testing.T) {
+	good := baselinePath(t)
+	if err := SaveBaseline(good, Aggregate(hitPattern("alfa", 3, 1))); err != nil {
+		t.Fatalf("SaveBaseline: %v", err)
+	}
+	valid, err := os.ReadFile(good) // #nosec G304 -- a path under t.TempDir()
+	if err != nil {
+		t.Fatalf("reading the baseline: %v", err)
+	}
+
+	cases := map[string][]byte{
+		"a second document":        append(slices.Clone(valid), valid...),
+		"the tail of an older one": append(slices.Clone(valid), []byte(`,"hits":9}`)...),
+		"trailing junk":            append(slices.Clone(valid), []byte("\x00\x00garbage")...),
+	}
+
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "baseline.json")
+			if err := os.WriteFile(path, body, 0o600); err != nil {
+				t.Fatalf("writing the fixture: %v", err)
+			}
+
+			_, err := LoadBaseline(path)
+			if err == nil {
+				t.Fatal("a file with content after the baseline loaded as a valid baseline")
+			}
+			if errors.Is(err, ErrNoBaseline) {
+				t.Errorf("a corrupt baseline reports as a missing one: %v", err)
+			}
+			if !strings.Contains(err.Error(), "corrupt") {
+				t.Errorf("the error %q does not say the file is corrupt", err)
+			}
+		})
+	}
+
+	// The absent half: whitespace after the document is not corruption, and SaveBaseline writes a
+	// trailing newline itself. An EOF check that rejected it would fail on this package's own output.
+	padded := filepath.Join(t.TempDir(), "baseline.json")
+	// #nosec G703 -- padded is filepath.Join(t.TempDir(), <literal>)
+	if err := os.WriteFile(padded, append(slices.Clone(valid), []byte("\n\n  \n")...), 0o600); err != nil {
+		t.Fatalf("writing the fixture: %v", err)
+	}
+	if _, err := LoadBaseline(padded); err != nil {
+		t.Errorf("trailing whitespace was read as corruption: %v", err)
 	}
 }

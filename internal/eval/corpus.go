@@ -21,7 +21,7 @@ import (
 //
 // It exists so `cli eval --golden` can run with no Qdrant, no embedding service and no GPU, which is
 // what the hermetic CI gate requires (S10 T12/T13). What it measures is the harness — load, run,
-// tie-break, aggregate, threshold, exit code — end to end on a number that *emerges* from a search
+// aggregate, threshold, exit code — end to end on a number that *emerges* from a search
 // rather than one written down next to the questions. It measures nothing about BGE-M3 or about
 // Qdrant, and no number produced this way belongs in a baseline: the real gate runs against the real
 // index (S10 T15), outside public CI.
@@ -160,10 +160,11 @@ func cmpFloat(a, b float32) int {
 
 // overlap is the score: how many distinct query terms the chunk contains.
 //
-// Deliberately an integer count and not a length-normalised weight. Ties are the point — a whole-
-// number score makes them common, so the fixture exercises the runner's point-ID tie-break instead
-// of hiding it behind float noise, and the number a run produces is one a reader can recompute by
-// hand from the corpus.
+// Deliberately an integer count and not a length-normalised weight: the number a run produces is
+// one a reader can recompute by hand from the corpus, which is what makes a hermetic recall
+// argument checkable. A whole-number score also makes ties common, which is realistic — a real
+// fusion score ties at the cut too, and RunGolden reports that rather than smoothing it
+// (runner.go, tiedAtTheCut).
 func overlap(query, chunk map[string]bool) int {
 	n := 0
 	for term := range query {

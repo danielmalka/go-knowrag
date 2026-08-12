@@ -40,6 +40,12 @@ type Report struct {
 	// Complete.
 	Errored []QuestionResult `json:"errored"`
 
+	// Tied is every hit whose place in the answer was decided among equally-scored candidates
+	// (runner.go, tiedAtTheCut). They ARE counted in Global, because they are what production
+	// returns and the recall has to be production's number; they are listed separately because that
+	// part of the recall may not reproduce on the next run against an unchanged index.
+	Tied []QuestionResult `json:"tied,omitempty"`
+
 	// Complete is false when any question errored. It is the field that keeps this package honest:
 	// recall computed over the questions that happened to answer is not the recall of the golden
 	// set, and a gate that treats a partial run as a pass is the "orphans: not scanned" failure in
@@ -86,6 +92,9 @@ func Aggregate(results []QuestionResult) Report {
 		if res.Hit {
 			stat.Hits++
 			r.Global.Hits++
+			if res.Tied {
+				r.Tied = append(r.Tied, res)
+			}
 		} else {
 			r.Failed = append(r.Failed, res)
 		}
@@ -137,6 +146,19 @@ func RenderReport(r Report) string {
 		fmt.Fprintf(&b, "- %q (area %s)\n  - expected uid: %s%s\n  - actual top-%d: %s\n",
 			f.Question.Question, f.Question.Area, f.Question.UID, chunkSuffix(f.Question), r.K,
 			joinUIDs(f.TopK))
+	}
+
+	if len(r.Tied) > 0 {
+		fmt.Fprintf(&b, "\n## Hits decided by a tie at rank %d\n\n", r.K)
+		fmt.Fprintf(&b, "%d of the %d hit(s) above scored exactly what the last included result "+
+			"scored, so which of the tied candidates filled the last slot was the ranker's to decide "+
+			"and the same index can answer differently next run. They are counted as hits because "+
+			"they are what a search returns today; they are listed because that part of the recall "+
+			"is not reproducible.\n\n", len(r.Tied), r.Global.Hits)
+		for _, tie := range r.Tied {
+			fmt.Fprintf(&b, "- %q (area %s) — expected uid: %s\n", tie.Question.Question,
+				tie.Question.Area, tie.Question.UID)
+		}
 	}
 
 	if len(r.Errored) > 0 {

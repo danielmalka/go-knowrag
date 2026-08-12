@@ -186,8 +186,8 @@ func TestGoldenGate_UnsetKMeasuresRecallAt5(t *testing.T) {
 	}
 
 	path, questions := goldenGateFixture(t)
-	// Six descending results per question, with each question's expected note last. Descending, so
-	// the tie-break plays no part and the only thing deciding hit/miss is where K cuts.
+	// Six descending results per question, with each question's expected note last. Descending and
+	// all distinct, so no tie is involved and the only thing deciding hit/miss is where K cuts.
 	sixth := func(expected string) []retrieval.Result {
 		return []retrieval.Result{
 			result(uidC, 0, 0.9), result(uidC, 1, 0.8), result(uidC, 2, 0.7),
