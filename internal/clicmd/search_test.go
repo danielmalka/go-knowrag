@@ -103,10 +103,10 @@ func TestSearchCmd_FlagsMapToQuery(t *testing.T) {
 		want retrieval.Query
 	}{
 		"every flag given": {
-			args: []string{"como rotacionar certificados", "--tenant", "malka", "--collection", "outra",
+			args: []string{"como rotacionar certificados", "--tenant", "tenant-a", "--collection", "outra",
 				"--area", "infra", "--top-k", "9", "--include-archived", "--include-private"},
 			want: retrieval.Query{
-				Collection: "outra", TenantID: "malka", Text: "como rotacionar certificados",
+				Collection: "outra", TenantID: "tenant-a", Text: "como rotacionar certificados",
 				TopK: 9, Area: "infra", IncludeArchived: true, IncludePrivate: true,
 			},
 		},
@@ -116,9 +116,9 @@ func TestSearchCmd_FlagsMapToQuery(t *testing.T) {
 		// all. Whether the number is the right one is a question about the MCP tool's default, which
 		// lives in another package — cmd/mcp-server/search_parity_test.go is what compares them.
 		"defaults": {
-			args: []string{"certificados", "--tenant", "malka"},
+			args: []string{"certificados", "--tenant", "tenant-a"},
 			want: retrieval.Query{
-				Collection: "interno", TenantID: "malka", Text: "certificados",
+				Collection: "interno", TenantID: "tenant-a", Text: "certificados",
 				TopK: defaultTopK, Area: "", IncludeArchived: false, IncludePrivate: false,
 			},
 		},
@@ -185,7 +185,7 @@ func TestSearchCmd_BlankTenant_IsAlsoRefused(t *testing.T) {
 func TestSearchCmd_HumanOutput_CarriesEveryLocator(t *testing.T) {
 	s := &fakeSearcher{results: sampleHits()}
 
-	out, _, err := run(t, s, "certificados", "--tenant", "malka")
+	out, _, err := run(t, s, "certificados", "--tenant", "tenant-a")
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
@@ -228,7 +228,7 @@ func breadcrumbLineAfter(t *testing.T, out, path string) string {
 func TestSearchCmd_EmptyResults_SayItAndExitZero(t *testing.T) {
 	s := &fakeSearcher{results: nil}
 
-	out, _, err := run(t, s, "certificados", "--tenant", "malka")
+	out, _, err := run(t, s, "certificados", "--tenant", "tenant-a")
 	if err != nil {
 		t.Fatalf("an empty answer failed the command: %v", err)
 	}
@@ -245,7 +245,7 @@ func TestSearchCmd_EmptyResults_SayItAndExitZero(t *testing.T) {
 func TestSearchCmd_JSON_MatchesGolden(t *testing.T) {
 	s := &fakeSearcher{results: sampleHits()}
 
-	out, _, err := run(t, s, "certificados", "--tenant", "malka", "--json")
+	out, _, err := run(t, s, "certificados", "--tenant", "tenant-a", "--json")
 	if err != nil {
 		t.Fatalf("search --json: %v", err)
 	}
@@ -267,7 +267,7 @@ func TestSearchCmd_JSON_MatchesGolden(t *testing.T) {
 func TestSearchCmd_JSON_IsTheWholeOfStdout(t *testing.T) {
 	s := &fakeSearcher{results: sampleHits()}
 
-	out, _, err := run(t, s, "certificados", "--tenant", "malka", "--json")
+	out, _, err := run(t, s, "certificados", "--tenant", "tenant-a", "--json")
 	if err != nil {
 		t.Fatalf("search --json: %v", err)
 	}
@@ -289,7 +289,7 @@ func TestSearchCmd_JSON_IsTheWholeOfStdout(t *testing.T) {
 func TestSearchCmd_JSON_FailureWritesAnEnvelope(t *testing.T) {
 	s := &fakeSearcher{err: errors.New("qdrant is unreachable")}
 
-	out, _, err := run(t, s, "certificados", "--tenant", "malka", "--json")
+	out, _, err := run(t, s, "certificados", "--tenant", "tenant-a", "--json")
 	if err == nil {
 		t.Fatal("a failing search returned no error")
 	}
@@ -332,7 +332,7 @@ func TestSearchCmd_StructuralRejection_IsAUsageFailure(t *testing.T) {
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			s := &fakeSearcher{err: tc.err}
-			_, _, err := run(t, s, "certificados", "--tenant", "malka")
+			_, _, err := run(t, s, "certificados", "--tenant", "tenant-a")
 			if err == nil {
 				t.Fatal("the failing search returned no error")
 			}
@@ -365,8 +365,8 @@ func TestSearchCmd_IncludePrivate_OnlyAddsPrivateResults(t *testing.T) {
 		return public
 	}}
 
-	off := searchJSONHits(t, s, "certificados", "--tenant", "malka", "--json")
-	on := searchJSONHits(t, s, "certificados", "--tenant", "malka", "--include-private", "--json")
+	off := searchJSONHits(t, s, "certificados", "--tenant", "tenant-a", "--json")
+	on := searchJSONHits(t, s, "certificados", "--tenant", "tenant-a", "--include-private", "--json")
 
 	// The diff, computed rather than eyeballed: strike the private uid out of the privileged answer
 	// and what is left has to be the unprivileged answer, element for element and in order.

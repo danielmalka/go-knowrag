@@ -58,11 +58,11 @@ func TestSelectVaults(t *testing.T) {
 	}
 
 	t.Run("a name outside the roster is refused and the valid names are listed", func(t *testing.T) {
-		got, err := selectVaults(cfg, "malkawhat")
+		got, err := selectVaults(cfg, "vault-c")
 		if err == nil {
 			t.Fatalf("selectVaults on an unregistered vault = %v, want an error", got)
 		}
-		if !strings.Contains(err.Error(), "malkawhat") {
+		if !strings.Contains(err.Error(), "vault-c") {
 			t.Errorf("error %q does not name the offending value", err)
 		}
 		for _, want := range []string{"pessoal", "trabalho", bothVaults} {

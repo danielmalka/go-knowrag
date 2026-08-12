@@ -30,7 +30,7 @@ func (f *fakeQueryAPI) Query(_ context.Context, request *qdrant.QueryPoints) ([]
 // RRF over them, one filter on the outer stage.
 func sampleRequest() retrieval.SearchRequest {
 	f := retrieval.Filter{
-		Must:    []retrieval.Condition{{Field: "tenant_id", Value: "malka"}},
+		Must:    []retrieval.Condition{{Field: "tenant_id", Value: "tenant-a"}},
 		MustNot: []retrieval.Condition{{Field: "status", Value: "archived"}},
 	}
 	return retrieval.SearchRequest{
@@ -113,8 +113,8 @@ func assertFilter(t *testing.T, where string, f *qdrant.Filter) {
 		t.Fatalf("%s: no filter reached the wire", where)
 	}
 	if len(f.GetMust()) != 1 || f.GetMust()[0].GetField().GetKey() != "tenant_id" ||
-		f.GetMust()[0].GetField().GetMatch().GetKeyword() != "malka" {
-		t.Errorf("%s: Must = %v, want exactly tenant_id == malka", where, f.GetMust())
+		f.GetMust()[0].GetField().GetMatch().GetKeyword() != "tenant-a" {
+		t.Errorf("%s: Must = %v, want exactly tenant_id == tenant-a", where, f.GetMust())
 	}
 	if len(f.GetMustNot()) != 1 || f.GetMustNot()[0].GetField().GetKey() != "status" {
 		t.Errorf("%s: MustNot = %v, want exactly the status exclusion", where, f.GetMustNot())

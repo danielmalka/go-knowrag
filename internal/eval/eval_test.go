@@ -26,7 +26,7 @@ func TestModes_RefuseExplicitlyUntilTheHarnessExists(t *testing.T) {
 
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			outcome, err := tc.run(context.Background(), Options{Collection: "interno", TenantID: "malka"})
+			outcome, err := tc.run(context.Background(), Options{Collection: "interno", TenantID: "tenant-a"})
 			if err == nil {
 				t.Fatalf("the %s mode returned %+v and no error, which reads as a gate that ran", name, outcome)
 			}

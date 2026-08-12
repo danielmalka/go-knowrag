@@ -142,7 +142,7 @@ func (f *fakeSearcher) lastQuery() retrieval.Query {
 func testConfig() Config {
 	return Config{
 		Collection:       "interno",
-		TenantID:         "malka",
+		TenantID:         "tenant-a",
 		QdrantEndpoint:   "qdrant.internal:6334",
 		QdrantAPIKey:     "runtime-read-key",
 		EmbedderEndpoint: "http://embedder.internal:8080",

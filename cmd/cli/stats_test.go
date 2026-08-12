@@ -155,7 +155,7 @@ func TestStatsCmd_TenantFlagIsPassedThrough(t *testing.T) {
 		args []string
 		want string
 	}{
-		"scoped":   {args: []string{"--tenant", "malka"}, want: "malka"},
+		"scoped":   {args: []string{"--tenant", "tenant-a"}, want: "tenant-a"},
 		"unscoped": {args: nil, want: ""},
 	}
 
@@ -176,7 +176,7 @@ func TestStatsCmd_TenantFlagIsPassedThrough(t *testing.T) {
 // because the numbers mean different things with and without it, and a consumer that received only
 // counts would have to remember which command line produced them.
 func TestStatsCmd_JSON_CarriesTheScopeAndTheCounts(t *testing.T) {
-	out, _, err := runStats(t, sampleCounts(), nil, "--tenant", "malka", "--json")
+	out, _, err := runStats(t, sampleCounts(), nil, "--tenant", "tenant-a", "--json")
 	if err != nil {
 		t.Fatalf("stats --json: %v", err)
 	}
@@ -191,8 +191,8 @@ func TestStatsCmd_JSON_CarriesTheScopeAndTheCounts(t *testing.T) {
 	if !envelope.OK {
 		t.Errorf("a successful read reported ok=false: %s", out)
 	}
-	if envelope.Data.Tenant != "malka" {
-		t.Errorf("the envelope reports tenant %q, want malka: %s", envelope.Data.Tenant, out)
+	if envelope.Data.Tenant != "tenant-a" {
+		t.Errorf("the envelope reports tenant %q, want tenant-a: %s", envelope.Data.Tenant, out)
 	}
 	got := envelope.Data.Collections["interno"]
 	if got.Points != 3200 || got.UIDs != 780 {

@@ -14,7 +14,7 @@ import (
 func setInstanceEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv(envCollection, "interno")
-	t.Setenv(envTenantID, "malka")
+	t.Setenv(envTenantID, "tenant-a")
 	t.Setenv(envQdrantEndpoint, "qdrant.internal:6334")
 	t.Setenv(envQdrantAPIKey, "runtime-read-key")
 	t.Setenv(envEmbedderEndpoint, "http://embedder.internal:8080")
@@ -33,8 +33,8 @@ func TestLoadConfig_FixedCollectionAndTenant(t *testing.T) {
 	if cfg.Collection != "interno" {
 		t.Errorf("Collection = %q, want %q", cfg.Collection, "interno")
 	}
-	if cfg.TenantID != "malka" {
-		t.Errorf("TenantID = %q, want %q", cfg.TenantID, "malka")
+	if cfg.TenantID != "tenant-a" {
+		t.Errorf("TenantID = %q, want %q", cfg.TenantID, "tenant-a")
 	}
 }
 
@@ -168,7 +168,7 @@ func TestConfig_LogValue_MasksAPIKey(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))
 
-	cfg := Config{Collection: "interno", TenantID: "malka", QdrantAPIKey: "super-secret-key"}
+	cfg := Config{Collection: "interno", TenantID: "tenant-a", QdrantAPIKey: "super-secret-key"}
 	logger.Info("starting", "config", cfg)
 
 	if strings.Contains(buf.String(), "super-secret-key") {

@@ -8,7 +8,7 @@ import (
 // validQuery is the baseline every case below mutates one field of, so a failure names the one
 // thing that was different rather than the whole struct.
 func validQuery() Query {
-	return Query{Collection: "interno", TenantID: "malka", Text: "how do I configure cron", TopK: 5}
+	return Query{Collection: "interno", TenantID: "tenant-a", Text: "how do I configure cron", TopK: 5}
 }
 
 func TestQuery_Validate(t *testing.T) {
