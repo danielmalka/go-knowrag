@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+
+	"github.com/danielmalka/go-knowrag/internal/retrieval"
 )
 
 // ErrNotImplemented is what both modes answer with until their harness exists.
@@ -29,7 +31,27 @@ var ErrNotImplemented = errors.New("eval: not implemented")
 type Options struct {
 	Collection string
 	TenantID   string
+
+	// The golden gate's own inputs, added by S10 as the type comment above anticipated. All four
+	// stay zero-valued until S10 T10 wires cmd/cli/eval.go, and GoldenGate refuses while they are —
+	// see the sentinel below.
+	//
+	// Searcher is the seam that keeps this package free of a Qdrant client and a GPU: the harness
+	// needs one search function and the CLI is what builds one.
+	Searcher      Searcher
+	GoldenSetPath string
+	// MinRecall is the threshold the run is judged against. Zero is a legitimate value — "record
+	// the number, do not gate on it" is what S10 T15 does — so it is not what tells the gate it is
+	// unwired; Searcher and GoldenSetPath are.
+	MinRecall float64
+	// K is the cut-off. Zero means the default below.
+	K int
 }
+
+// DefaultK is the cut-off every acceptance criterion in this project is written against: Recall@5.
+// It is a constant here because the number is asserted in prose in the PRD and would otherwise be
+// re-typed at each call site.
+const DefaultK = 5
 
 // Outcome is what an evaluation reports to the CLI, and it is the piece of this contract that S10
 // and S11 must not diverge from: cmd/cli reads exactly these fields to decide the exit code and
@@ -70,8 +92,79 @@ type Outcome struct {
 // have surfaced as a build failure in somebody else's story. Two names, two jobs: `*Gate` is the
 // CLI-facing seam that answers "did it pass", `Run*` is the harness that does the measuring, and
 // the gate calls the harness.
-func GoldenGate(_ context.Context, _ Options) (Outcome, error) {
-	return Outcome{}, notImplemented("golden", "S10", "the golden set and the recall harness")
+
+// GoldenGate loads the golden set, measures recall against it, and answers whether it cleared the
+// threshold.
+//
+// The refusal above it is still reachable, and the reason is scope rather than a missing harness:
+// the harness is in this package (goldenset.go, runner.go, report.go), but nothing builds a
+// Searcher or names a golden-set file until S10 T10 wires cmd/cli/eval.go. Until then the CLI calls
+// this with neither, and a gate with no searcher must say so rather than report a zero.
+//
+// Passed requires Complete. A run where some question could not be asked is not a run that measured
+// the golden set, and its recall — computed over the questions that answered — must never clear a
+// threshold on the strength of the ones it skipped.
+func GoldenGate(ctx context.Context, opts Options) (Outcome, error) {
+	if opts.Searcher == nil || opts.GoldenSetPath == "" {
+		return Outcome{}, notImplemented("golden", "S10",
+			"the CLI wiring that builds a searcher and names a golden-set file (T10); the harness "+
+				"itself is built, but nothing handed this gate either of them")
+	}
+
+	set, err := LoadGoldenSet(opts.GoldenSetPath)
+	if err != nil {
+		return Outcome{}, err
+	}
+
+	k := opts.K
+	if k <= 0 {
+		k = DefaultK
+	}
+	results, err := RunGolden(ctx, opts.Searcher, set.Questions, RunConfig{
+		Collection: opts.Collection,
+		TenantID:   opts.TenantID,
+		K:          k,
+	})
+	if err != nil {
+		return Outcome{}, err
+	}
+
+	report := Aggregate(results)
+	report.K = k
+	report.Mode = retrieval.SearchModeHybrid.String()
+	if cerr := ValidateCoverage(set.Questions, set.Coverage); cerr != nil {
+		// Warn, do not fail: coverage is an authoring gate, not a run-time one (S10 open question 4,
+		// decided). The warning rides in the report so it reaches the operator who ran the eval.
+		report.CoverageWarning = cerr.Error()
+	}
+	attachProvenance(ctx, &report, opts.GoldenSetPath, set.Questions)
+
+	recall := report.Global.Recall()
+	return Outcome{
+		Mode:    "golden",
+		Passed:  report.Complete && recall >= opts.MinRecall,
+		Score:   &recall,
+		Summary: RenderReport(report),
+	}, nil
+}
+
+// attachProvenance records which version of the golden set was measured.
+//
+// A git failure leaves GoldenSetCommit empty and does not fail the gate: not knowing the commit is
+// a gap in the report, not a reason to throw away a measured run. The renderer prints "not
+// resolved" for it rather than nothing, so the gap is visible instead of looking like a clean
+// provenance section (report.go, renderProvenance).
+//
+// The baseline instant is the golden-set file's own last commit, so what gets flagged is every
+// entry introduced after the file was last committed — that is, entries that exist only in the
+// working tree. S10 T15 passes the real baseline run's time instead, once one exists.
+func attachProvenance(ctx context.Context, report *Report, path string, questions []GoldenQuestion) {
+	file, perEntry, err := GoldenSetCommit(ctx, path, questions)
+	if err != nil {
+		return
+	}
+	report.GoldenSetCommit = file.Hash
+	report.Stale = ResolveStale(FlagStaleEntries(perEntry, file.Time), perEntry, questions)
 }
 
 func IsolationGate(_ context.Context, _ Options) (Outcome, error) {

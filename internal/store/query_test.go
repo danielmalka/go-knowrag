@@ -324,3 +324,95 @@ func TestNewQuerier_NilAPI(t *testing.T) {
 var _ interface {
 	ExecuteQuery(ctx context.Context, req retrieval.SearchRequest) ([]retrieval.ScoredPoint, error)
 } = (*Querier)(nil)
+
+// denseOnlyRequest is what internal/retrieval builds for SearchModeDenseOnly (S10 T7): one
+// top-level dense query over the filter, no prefetch leg, no fusion.
+func denseOnlyRequest() retrieval.SearchRequest {
+	f := retrieval.Filter{
+		Must:    []retrieval.Condition{{Field: "tenant_id", Value: "tenant-a"}},
+		MustNot: []retrieval.Condition{{Field: "status", Value: "archived"}},
+	}
+	return retrieval.SearchRequest{
+		Collection:    "interno",
+		Dense:         []float32{0.1, 0.2},
+		DenseVector:   "dense",
+		Acorn:         true,
+		Filter:        f,
+		Limit:         5,
+		Offset:        3,
+		PayloadFields: []string{"uid", "text"},
+	}
+}
+
+// TestExecuteQuery_TranscribesADenseOnlyRequest is the wire half of the dense-only mode: the
+// vocabulary check lives in internal/retrieval (TestBuildQueryRequest_ModeDenseOnly...), and this is
+// the only place that can assert what the Qdrant client is actually handed.
+func TestExecuteQuery_TranscribesADenseOnlyRequest(t *testing.T) {
+	req := denseOnlyRequest()
+	api, _, err := executeSample(t, req)
+	if err != nil {
+		t.Fatalf("ExecuteQuery: %v", err)
+	}
+	if len(api.requests) != 1 {
+		t.Fatalf("%d request(s) went out, want 1", len(api.requests))
+	}
+	got := api.requests[0]
+
+	if len(got.GetPrefetch()) != 0 {
+		t.Errorf("%d prefetch(es) went out for a dense-only request, want none", len(got.GetPrefetch()))
+	}
+	if got.GetQuery().GetFusion() != qdrant.Fusion(0) || got.GetQuery().GetNearest() == nil {
+		t.Errorf("the query that went out is not a nearest-neighbour dense query: %+v", got.GetQuery())
+	}
+	if !slices.Equal(got.GetQuery().GetNearest().GetDense().GetData(), req.Dense) {
+		t.Error("the dense vector on the wire is not the one the request carried")
+	}
+	if got.GetUsing() != req.DenseVector {
+		t.Errorf("Using = %q, want the named vector %q", got.GetUsing(), req.DenseVector)
+	}
+	if !got.GetParams().GetAcorn().GetEnable() {
+		t.Error("ACORN is not enabled on the top-level search, so the dense-only mode loses the " +
+			"filtered traversal the hybrid legs get")
+	}
+	if got.GetParams().GetAcorn().MaxSelectivity != nil {
+		t.Error("MaxSelectivity was pinned; PRD-contrato §2.3c leaves it to the server")
+	}
+	if got.GetFilter() == nil || len(got.GetFilter().GetMust()) == 0 {
+		t.Error("the filter did not reach the wire, so the dense-only search is unscoped")
+	}
+}
+
+// TestExecuteQuery_RefusesBothAQueryAndPrefetches is the guard on a request that describes two
+// different searches. Honouring either one silently would send a query nobody built — the one thing
+// this file promises never to do.
+func TestExecuteQuery_RefusesBothAQueryAndPrefetches(t *testing.T) {
+	req := denseOnlyRequest()
+	req.Prefetch = sampleRequest().Prefetch
+	req.FusionRRF = true
+
+	api, _, err := executeSample(t, req)
+	if err == nil {
+		t.Fatal("a request carrying both a top-level dense query and prefetch legs was accepted")
+	}
+	if len(api.requests) != 0 {
+		t.Error("the ambiguous request reached the wire before being refused")
+	}
+	for _, want := range []string{"dense", "prefetch"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal %q does not mention %q, so it does not say what is ambiguous", err, want)
+		}
+	}
+}
+
+// TestExecuteQuery_NoAcornOnAFusedRequest keeps the new top-level Params from leaking into the
+// hybrid shape: in hybrid mode the filter runs on the legs, and ACORN belongs there and only there
+// (PRD-contrato §2.3c, and TestBuildQueryRequest_EnablesAcornOnBothPrefetches in internal/retrieval).
+func TestExecuteQuery_NoAcornOnAFusedRequest(t *testing.T) {
+	api, _, err := executeSample(t, sampleRequest())
+	if err != nil {
+		t.Fatalf("ExecuteQuery: %v", err)
+	}
+	if api.requests[0].GetParams() != nil {
+		t.Errorf("a fused request went out with top-level search params: %+v", api.requests[0].GetParams())
+	}
+}

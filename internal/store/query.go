@@ -91,10 +91,29 @@ func queryPoints(req retrieval.SearchRequest) (*qdrant.QueryPoints, error) {
 		WithPayload:    withPayload(req.PayloadFields),
 		WithVectors:    qdrant.NewWithVectors(false),
 	}
-	if req.FusionRRF {
+	// Refused rather than resolved. The two describe different searches, and honouring either one
+	// would send a query the caller did not build — the failure mode this whole file exists to make
+	// impossible. It is a check on the request's own shape, not a filter condition invented here.
+	if len(req.Dense) > 0 && (len(req.Prefetch) > 0 || req.FusionRRF) {
+		return nil, fmt.Errorf("building the query for %s: the request carries both a top-level "+
+			"dense query and %d prefetch leg(s) (fusion=%t); exactly one of the two is a search",
+			req.Collection, len(req.Prefetch), req.FusionRRF)
+	}
+
+	switch {
+	case req.FusionRRF:
 		// nil leaves k and the per-leg weights at the server's defaults, which is what "RRF" with no
 		// further qualification means in PRD-contrato §2.3b.
 		out.Query = qdrant.NewQueryRRF(nil)
+	case len(req.Dense) > 0:
+		out.Query = qdrant.NewQueryDense(req.Dense)
+		out.Using = qdrant.PtrOf(req.DenseVector)
+	}
+	if req.Acorn {
+		// Same enable-only shape as a prefetch leg's, and for the same reason (PRD-contrato §2.3c):
+		// MaxSelectivity stays at the server default because Qdrant estimates cardinality per
+		// request and this process cannot.
+		out.Params = &qdrant.SearchParams{Acorn: &qdrant.AcornSearchParams{Enable: qdrant.PtrOf(true)}}
 	}
 	for i, leg := range req.Prefetch {
 		p, err := prefetchQuery(leg)
