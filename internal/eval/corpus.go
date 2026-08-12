@@ -132,9 +132,10 @@ func (s *CorpusSearcher) Search(_ context.Context, q retrieval.Query) ([]retriev
 	}
 
 	// Sorted by (score desc, uid asc, chunk asc) before truncating, so which chunks survive the TopK
-	// cut is a function of the corpus and never of map or slice order. RunGolden re-sorts what comes
-	// back on its own key (runner.go); this ordering is about which results a caller is handed at
-	// all, which no downstream sort can undo.
+	// cut is a function of the corpus and never of map or slice order. Nothing downstream reorders
+	// this: RunGolden (runner.go) takes the order it is handed and truncates, because re-sorting a
+	// window wider than K was how the runner used to change which notes were in it. So this ordering
+	// is the whole answer to which results a caller sees, not half of it.
 	slices.SortFunc(hits, func(a, b retrieval.Result) int {
 		if a.Score != b.Score {
 			return cmpFloat(b.Score, a.Score)

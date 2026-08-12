@@ -148,6 +148,27 @@ func TestRunGolden_AsksTheProductionQuery(t *testing.T) {
 	if s.queries[0].TopK != 5 {
 		t.Errorf("the search asked for TopK %d, want exactly K = 5", s.queries[0].TopK)
 	}
+	// Offset is pinned for the same reason TopK is, and pinning only TopK was this test's own gap:
+	// prefetchLimit is (TopK+Offset)×multiplier, so a non-zero offset widens the prefetch pool by
+	// exactly the route the margin used to, and an assertion that watched only TopK would stay green
+	// through it.
+	if s.queries[0].Offset != 0 {
+		t.Errorf("the search asked for offset %d; anything but 0 widens the prefetch pool the same "+
+			"way the removed margin did (internal/retrieval/query.go, prefetchLimit)", s.queries[0].Offset)
+	}
+	// The facets are pinned because a filter the operator's search does not carry makes the eval
+	// measure a narrower corpus and call the result Recall@5 — the same class as the TopK defect,
+	// arriving through the other half of the query.
+	if s.queries[0].Area != "" || s.queries[0].Type != "" || s.queries[0].Vault != "" ||
+		len(s.queries[0].Tags) != 0 {
+		t.Errorf("the search carried facets %+v; the golden run must ask what production asks",
+			s.queries[0])
+	}
+	if s.queries[0].IncludeArchived || s.queries[0].IncludePrivate {
+		t.Errorf("the search widened visibility (archived=%t private=%t); production defaults exclude "+
+			"both, so a run that includes them measures a corpus the operator cannot see",
+			s.queries[0].IncludeArchived, s.queries[0].IncludePrivate)
+	}
 	if s.queries[0].TenantID != "tenant-a" || s.queries[0].Collection != "interno" {
 		t.Errorf("the search ran under %q/%q, not the RunConfig's scope",
 			s.queries[0].Collection, s.queries[0].TenantID)
