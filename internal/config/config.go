@@ -36,8 +36,13 @@ const vaultEnvPrefix = "KNOWRAG_VAULT_"
 // Config is the settings every entrypoint needs. No value here is ever committed to the repo:
 // it comes from the config file or the environment, with the environment winning.
 type Config struct {
-	QdrantEndpoint    string `yaml:"qdrant_endpoint"`    // QDRANT_ENDPOINT — host:6334
-	QdrantAPIKey      string `yaml:"qdrant_api_key"`     // QDRANT_API_KEY
+	QdrantEndpoint string `yaml:"qdrant_endpoint"` // QDRANT_ENDPOINT — host:6334
+	// QdrantAPIKey is the administrative credential — KNOWRAG_ADMIN_QDRANT_API_KEY. The name says
+	// administrative because the CLI is: it accepts any --tenant and any --collection it is given
+	// (ADR-002 §2.4), so the key it presents is the operator's, not a scoped runtime one. The MCP
+	// server reads MCP_QDRANT_API_KEY instead (cmd/mcp-server/config.go) and this package never
+	// looks at that variable — there is no fallback between the two in either direction.
+	QdrantAPIKey      string `yaml:"qdrant_api_key"`
 	EmbedderEndpoint  string `yaml:"embedder_endpoint"`  // EMBEDDER_ENDPOINT
 	DefaultCollection string `yaml:"default_collection"` // DEFAULT_COLLECTION
 	LogLevel          string `yaml:"log_level"`          // LOG_LEVEL, optional, default "info"
@@ -308,18 +313,31 @@ const (
 	NeedEmbedder
 )
 
+// AdminQdrantAPIKeyEnv is the variable that holds the CLI's administrative Qdrant credential.
+//
+// It is exported because two other places have to name it and must not spell it themselves: the
+// root command's help, which declares what this tool is (cmd/cli/main.go), and the test that proves
+// no CLI path reads the MCP server's runtime key instead. A literal copied into either of those
+// goes stale the day this one changes, and nothing would report it.
+const AdminQdrantAPIKeyEnv = "KNOWRAG_ADMIN_QDRANT_API_KEY" // #nosec G101 -- a variable name, not a credential
+
 // field binds one setting to its environment variable, for both the env override pass and the
 // required-field check, so the two can never drift apart.
 type field struct {
 	env string
 	// need is which command group requires this setting. Zero means no command requires it.
 	need Need
+	// note is appended to the variable name in the "you have not set this" message, for the one
+	// setting whose name alone does not say which of two credentials it must hold.
+	note string
 	ptr  func(*Config) *string
 }
 
 var fields = []field{
 	{env: "QDRANT_ENDPOINT", need: NeedQdrant, ptr: func(c *Config) *string { return &c.QdrantEndpoint }},
-	{env: "QDRANT_API_KEY", need: NeedQdrant, ptr: func(c *Config) *string { return &c.QdrantAPIKey }},
+	{env: AdminQdrantAPIKeyEnv, need: NeedQdrant, ptr: func(c *Config) *string { return &c.QdrantAPIKey },
+		note: "the administrative Qdrant credential this privileged CLI presents; the MCP server's " +
+			"runtime key is a different variable and is never read here"},
 	{env: "EMBEDDER_ENDPOINT", need: NeedEmbedder, ptr: func(c *Config) *string { return &c.EmbedderEndpoint }},
 	{env: "DEFAULT_COLLECTION", need: NeedCollection, ptr: func(c *Config) *string { return &c.DefaultCollection }},
 	{env: "LOG_LEVEL", ptr: func(c *Config) *string { return &c.LogLevel }},
@@ -384,7 +402,11 @@ func (c *Config) Require(need Need) error {
 	var missing []string
 	for _, f := range fields {
 		if f.need&need != 0 && *f.ptr(c) == "" {
-			missing = append(missing, f.env)
+			name := f.env
+			if f.note != "" {
+				name += " (" + f.note + ")"
+			}
+			missing = append(missing, name)
 		}
 	}
 	return missingErr(missing)

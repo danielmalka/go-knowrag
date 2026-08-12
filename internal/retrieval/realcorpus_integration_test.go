@@ -49,7 +49,7 @@ func realCorpus(t *testing.T) realCorpusEnv {
 
 	env := realCorpusEnv{
 		endpoint:   os.Getenv("QDRANT_ENDPOINT"),
-		apiKey:     os.Getenv("QDRANT_API_KEY"),
+		apiKey:     os.Getenv("KNOWRAG_ADMIN_QDRANT_API_KEY"),
 		embedder:   os.Getenv("EMBEDDER_ENDPOINT"),
 		collection: os.Getenv("DEFAULT_COLLECTION"),
 		tenant:     os.Getenv("KNOWRAG_TENANT_ID"),
@@ -63,9 +63,9 @@ func realCorpus(t *testing.T) realCorpusEnv {
 
 	// The values themselves are never logged — only which name was missing.
 	for name, value := range map[string]string{
-		"QDRANT_ENDPOINT":   env.endpoint,
-		"QDRANT_API_KEY":    env.apiKey,
-		"EMBEDDER_ENDPOINT": env.embedder,
+		"QDRANT_ENDPOINT":              env.endpoint,
+		"KNOWRAG_ADMIN_QDRANT_API_KEY": env.apiKey,
+		"EMBEDDER_ENDPOINT":            env.embedder,
 	} {
 		if value == "" {
 			t.Skipf("%s is not set: this test needs the deployed Qdrant and the real embedding service", name)

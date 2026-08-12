@@ -75,7 +75,13 @@ func NewQdrantClient(cfg Config) (*qdrant.Client, error) {
 		return nil, err
 	}
 	if cfg.APIKey == "" {
-		return nil, fmt.Errorf("store: no Qdrant API key — set QDRANT_API_KEY")
+		// No variable is named here, and that is the correction rather than an omission: two
+		// entrypoints build this Config from two different credentials — cmd/cli from the
+		// administrative key, cmd/mcp-server from its scoped runtime one — so any single variable
+		// this message named would be the wrong one for one of them. Each entrypoint's own
+		// requirement check names its own variable before it ever reaches this constructor
+		// (config.Require for the CLI, LoadConfig for the server).
+		return nil, fmt.Errorf("store: the Qdrant API key in this Config is empty")
 	}
 
 	return qdrant.NewClient(&qdrant.Config{
@@ -99,9 +105,15 @@ func NewQdrantClient(cfg Config) (*qdrant.Client, error) {
 // config.Config — and rejects any other port instead of silently substituting 6334, because an
 // endpoint naming 6333 means the operator believes REST is in play and that belief needs
 // correcting, not overriding.
+//
+// None of the messages below names an environment variable, and that is the same correction the
+// empty-API-key message carries: two entrypoints fill this Config from two different variables —
+// cmd/cli from QDRANT_ENDPOINT, cmd/mcp-server from MCP_QDRANT_ENDPOINT — so any single name here is
+// the wrong one for one of them. They say "the endpoint in this Config" instead, and each
+// entrypoint's own requirement check names its own variable before a Config is ever built.
 func grpcHost(endpoint string) (string, error) {
 	if endpoint == "" {
-		return "", fmt.Errorf("store: no Qdrant endpoint — set QDRANT_ENDPOINT")
+		return "", fmt.Errorf("store: the Qdrant endpoint in this Config is empty")
 	}
 	if !strings.Contains(endpoint, ":") {
 		return endpoint, nil
@@ -109,16 +121,16 @@ func grpcHost(endpoint string) (string, error) {
 
 	host, port, err := net.SplitHostPort(endpoint)
 	if err != nil {
-		return "", fmt.Errorf("store: QDRANT_ENDPOINT %q is not a host or host:%d: %w", endpoint, grpcPort, err)
+		return "", fmt.Errorf("store: the Qdrant endpoint %q is not a host or host:%d: %w", endpoint, grpcPort, err)
 	}
 	if port != fmt.Sprint(grpcPort) {
 		return "", fmt.Errorf(
-			"store: QDRANT_ENDPOINT %q names port %s, but this client speaks gRPC on %d only "+
+			"store: the Qdrant endpoint %q names port %s, but this client speaks gRPC on %d only "+
 				"(REST is not used) — drop the port or use :%d",
 			endpoint, port, grpcPort, grpcPort)
 	}
 	if host == "" {
-		return "", fmt.Errorf("store: QDRANT_ENDPOINT %q has no host part", endpoint)
+		return "", fmt.Errorf("store: the Qdrant endpoint %q has no host part", endpoint)
 	}
 	return host, nil
 }

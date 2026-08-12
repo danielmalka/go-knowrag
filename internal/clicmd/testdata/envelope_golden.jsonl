@@ -1,0 +1,2 @@
+{"ok":true,"data":{"collection":"interno","hits":2}}
+{"ok":false,"error":{"category":"usage","message":"--tenant is required"}}

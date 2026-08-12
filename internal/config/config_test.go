@@ -57,7 +57,7 @@ const allNeeds = NeedQdrant | NeedCollection | NeedEmbedder
 func setRequiredEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("QDRANT_ENDPOINT", "qdrant.example:6334")
-	t.Setenv("QDRANT_API_KEY", "env-key")
+	t.Setenv("KNOWRAG_ADMIN_QDRANT_API_KEY", "env-key")
 	t.Setenv("EMBEDDER_ENDPOINT", "http://embedder.example:8080")
 	t.Setenv("DEFAULT_COLLECTION", "knowrag_interno")
 	setRequiredVaultEnv(t)
@@ -550,7 +550,7 @@ func TestLoad_AllRequiredPresent_ReturnsConfig(t *testing.T) {
 func TestRequire_MissingVar_ReturnsError(t *testing.T) {
 	// The per-vault settings are not here: their names depend on the roster, so RequireVaults
 	// checks them — see TestRequireVaults_ReportsEveryMissingSettingAtOnce.
-	missing := []string{"QDRANT_ENDPOINT", "QDRANT_API_KEY", "EMBEDDER_ENDPOINT", "DEFAULT_COLLECTION"}
+	missing := []string{"QDRANT_ENDPOINT", "KNOWRAG_ADMIN_QDRANT_API_KEY", "EMBEDDER_ENDPOINT", "DEFAULT_COLLECTION"}
 
 	for _, name := range missing {
 		t.Run(name, func(t *testing.T) {
@@ -575,6 +575,41 @@ func TestRequire_MissingVar_ReturnsError(t *testing.T) {
 	}
 }
 
+// TestRequire_MissingAdminKey_SaysWhichCredentialItWants covers the one setting whose name is not
+// the whole instruction.
+//
+// This installation has two Qdrant credentials on purpose: an administrative one, which is this
+// CLI's, and a scoped runtime one, which is the MCP server's. An operator told only "set
+// KNOWRAG_ADMIN_QDRANT_API_KEY" on a host where the other is already exported has every reason to
+// paste the one they have — and it would work well enough to be wrong quietly. The message has to
+// say which of the two it is asking for.
+func TestRequire_MissingAdminKey_SaysWhichCredentialItWants(t *testing.T) {
+	clearEnv(t)
+	setRequiredEnv(t)
+	if err := os.Unsetenv(AdminQdrantAPIKeyEnv); err != nil {
+		t.Fatalf("unsetting %s: %v", AdminQdrantAPIKeyEnv, err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load(): %v", err)
+	}
+	err = cfg.Require(NeedQdrant)
+	if err == nil {
+		t.Fatalf("Require(NeedQdrant) with %s unset = nil, want an error", AdminQdrantAPIKeyEnv)
+	}
+	for _, want := range []string{AdminQdrantAPIKeyEnv, "administrative"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal %q does not mention %q", err, want)
+		}
+	}
+	// Naming the other credential here would be worse than saying nothing: it is the variable an
+	// operator must not reach for, and a message that mentions it reads as permission.
+	if strings.Contains(err.Error(), "MCP_QDRANT_API_KEY") {
+		t.Errorf("the refusal %q names the MCP server's runtime credential", err)
+	}
+}
+
 // TestRequire_OnlyChecksWhatTheCommandNeeds is the regression this refactor exists for: `schema
 // apply` talks to Qdrant and nothing else, and used to be refused for a missing EMBEDDER_ENDPOINT
 // it never reads. Adding the vault paths to a single global list would have made it demand a vault
@@ -582,7 +617,7 @@ func TestRequire_MissingVar_ReturnsError(t *testing.T) {
 func TestRequire_OnlyChecksWhatTheCommandNeeds(t *testing.T) {
 	clearEnv(t)
 	t.Setenv("QDRANT_ENDPOINT", "qdrant.example:6334")
-	t.Setenv("QDRANT_API_KEY", "env-key")
+	t.Setenv("KNOWRAG_ADMIN_QDRANT_API_KEY", "env-key")
 
 	cfg, err := Load()
 	if err != nil {

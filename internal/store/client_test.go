@@ -19,8 +19,17 @@ func TestNewQdrantClient_EmptyHost_ReturnsError(t *testing.T) {
 	if err == nil {
 		t.Fatal("NewQdrantClient(Config{}) = nil error, want an error naming the missing endpoint")
 	}
-	if !strings.Contains(err.Error(), "QDRANT_ENDPOINT") {
-		t.Errorf("error %q does not name the missing setting (QDRANT_ENDPOINT)", err)
+	if !strings.Contains(err.Error(), "endpoint") {
+		t.Errorf("error %q does not say which field is empty", err)
+	}
+	// The absent half, and the same assertion the empty-key test makes for the same reason: this
+	// constructor serves two entrypoints that read two different variables, so a message naming
+	// either one misdirects the operator of the other.
+	for _, env := range []string{"QDRANT_ENDPOINT", "MCP_QDRANT_ENDPOINT"} {
+		if strings.Contains(err.Error(), env) {
+			t.Errorf("error %q names %s, but this constructor cannot know which variable filled "+
+				"the Config it was handed", err, env)
+		}
 	}
 }
 
@@ -30,10 +39,20 @@ func TestNewQdrantClient_EmptyAPIKey_ReturnsError(t *testing.T) {
 		t.Errorf("client = %v, want nil alongside the error", client)
 	}
 	if err == nil {
-		t.Fatal("missing API key returned a nil error, want an error naming the missing setting")
+		t.Fatal("missing API key returned a nil error, want an error saying the key is empty")
 	}
-	if !strings.Contains(err.Error(), "QDRANT_API_KEY") {
-		t.Errorf("error %q does not name the missing setting (QDRANT_API_KEY)", err)
+	if !strings.Contains(err.Error(), "API key") {
+		t.Errorf("error %q does not say which field is empty", err)
+	}
+	// The absent half is the assertion that matters, and it is why this test no longer looks for a
+	// variable name. Two entrypoints fill Config.APIKey from two different credentials, so a
+	// message naming either one is a message that misdirects the operator of the other. Each
+	// entrypoint names its own before it builds a Config (config.Require, mcp-server's LoadConfig).
+	for _, env := range []string{"KNOWRAG_ADMIN_QDRANT_API_KEY", "MCP_QDRANT_API_KEY", "QDRANT_API_KEY"} {
+		if strings.Contains(err.Error(), env) {
+			t.Errorf("error %q names %s, but this constructor serves both entrypoints and cannot "+
+				"know which variable filled the Config it was handed", err, env)
+		}
 	}
 }
 

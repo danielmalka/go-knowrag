@@ -355,7 +355,7 @@ func startIngest(t *testing.T, bin string, env ingestEnv) *exec.Cmd {
 		"PATH=" + os.Getenv("PATH"),
 		"XDG_CACHE_HOME=" + env.cache,
 		"QDRANT_ENDPOINT=" + deadQdrant,
-		"QDRANT_API_KEY=not-a-real-key",
+		"KNOWRAG_ADMIN_QDRANT_API_KEY=not-a-real-key",
 		"DEFAULT_COLLECTION=" + env.collection,
 		"EMBEDDER_ENDPOINT=" + env.embedder,
 		"KNOWRAG_VAULTS=fixture",

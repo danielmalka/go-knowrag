@@ -282,7 +282,7 @@ do embedder, que ele nunca usa.
 | Variável | Para quê |
 |---|---|
 | `QDRANT_ENDPOINT` | `host:6334` — gRPC, o único protocolo que o código fala |
-| `QDRANT_API_KEY` | chave do Qdrant |
+| `KNOWRAG_ADMIN_QDRANT_API_KEY` | chave **administrativa** do Qdrant — a CLI aceita qualquer `--tenant` e qualquer `--collection`, então a credencial dela é a do operador. O servidor MCP lê `MCP_QDRANT_API_KEY` e nenhuma das duas cai para a outra |
 | `EMBEDDER_ENDPOINT` | URL do serviço de embedding, ex.: `http://127.0.0.1:7999` |
 | `DEFAULT_COLLECTION` | collection alvo |
 | `LOG_LEVEL` | opcional, default `info` |
@@ -338,6 +338,62 @@ o corpus real ainda não aconteceu.
 a busca filtra por um tenant que não tem ponto nenhum: zero resultados, sem erro, sem aviso. Do lado
 da ingestão o valor tem default (`interno`) e do lado do MCP é obrigatório — então é a variável do
 servidor que precisa ser escrita à mão para casar com um `--tenant` que talvez ninguém tenha digitado.
+
+### Flags de `knowrag search`
+
+```bash
+knowrag search "como rotacionar certificados" --tenant interno
+knowrag search "certificados" --tenant interno --area infra --json
+```
+
+| Flag | Default | Para quê |
+|---|---|---|
+| `--tenant` | **obrigatória** | o `tenant_id` de toda a busca; não existe valor que signifique "todos" |
+| `--collection` | `DEFAULT_COLLECTION` | a collection consultada |
+| `--area` | vazio | restringe a uma área; vazio busca todas |
+| `--top-k` | `5` | quantos chunks voltam |
+| `--include-archived` | desligado | inclui notas com `status: archived` |
+| `--include-private` | desligado | inclui notas com `visibility: private` |
+| `--json` | desligado | escreve o envelope JSON no stdout e mais nada |
+
+**`--include-private` é o caminho privilegiado, e é o único que existe.** A tool MCP não tem campo
+equivalente e estruturalmente não consegue pedir conteúdo privado — é por isso que ele mora aqui e
+por isso que a CLI usa credencial administrativa própria. A paridade entre esta busca e a do
+servidor MCP é definida com esta flag e `--include-archived` desligadas, e é verificada em cada
+`go test` por `cmd/mcp-server/search_parity_test.go`, sem rede e sem Qdrant.
+
+Exit codes, válidos para toda a CLI: `0` ok, `2` erro de uso (o comando precisa mudar), `1` falha de
+backend (vale tentar de novo), `3` outra ingestão segurando o lock, `4` gate que rodou e reprovou,
+`130` interrompido. O `4` é separado do `1` de propósito: recall que caiu é uma medição verdadeira de
+um sistema pior, e quem lê `1` volta a tentar.
+
+### `knowrag stats`
+
+```bash
+knowrag stats                      # todo tenant, todas as collections
+knowrag stats --tenant interno --json
+```
+
+Por collection, quantos pontos e quantas notas distintas. **A diferença entre os dois números é onde
+o órfão aparece**: uma nota que encolheu deixa pontos para trás que não pertencem mais a chunk nenhum.
+Para contar uid distinto ele lê o uid de cada ponto — uma passada inteira pela collection, alguns
+segundos contra o Qdrant implantado. É comando para rodar de propósito, não em cron.
+
+Escopo deliberadamente mínimo (PRD): serve para conferir ingestão e detectar órfão, não é
+observabilidade. Não tem flag além de `--tenant` e `--json`.
+
+### `knowrag eval`
+
+```bash
+knowrag eval --golden      # recall contra o golden set
+knowrag eval --isolation   # a suíte de isolamento entre tenants
+```
+
+Exatamente um dos dois modos, obrigatório. **Nenhum dos dois tem harness ainda** — S10 constrói o
+golden set, S11 a suíte de isolamento — e o comando recusa dizendo qual história falta em vez de
+reportar um passe que ninguém mediu. Os dois jobs de CI rodam este comando em toda push e reportam
+*pendente*; o dia em que o harness existir, eles viram gate sem ninguém ligar nada
+(`scripts/ci/eval-gate.sh`).
 
 ### Servidor MCP (`knowrag-mcp`)
 
