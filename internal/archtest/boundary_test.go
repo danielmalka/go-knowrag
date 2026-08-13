@@ -122,18 +122,28 @@ const authoringPackage = modulePath + "/internal/goldenauthor"
 // internal/goldenset now holds the schema and reaches no searcher.
 //
 // The check is over the transitive closure and not over a list of directories, and that is the second
-// thing this test learned the hard way. A version of it walked a hand-written map of packages: two
-// separate reviews found that deleting one line from that map turned the whole invariant off with the
-// entire suite still green, and that the closure it did not walk had two live holes in it —
-// internal/config or internal/vault gaining an import of internal/retrieval both compiled and both
-// passed. Deriving the reachable set from the source on every run is what makes those unwritable
-// rather than merely tested for: there is no list to shorten and no directory to forget.
+// thing this test learned the hard way. A version of it walked a hand-written map of packages, and two
+// reviews took it apart from opposite ends. One deleted a single line from the map: the invariant went
+// off entirely and the whole suite stayed green. The other attacked the closure the map did not walk
+// and found two live holes — internal/config importing internal/retrieval, and internal/vault
+// importing it — each of which compiled and passed. Both are red now (they are the plants that decided
+// this rewrite), and they are red for the same reason the deleted line no longer matters: the
+// reachable set is derived from the source on every run, so there is no list to shorten and no
+// directory to forget.
 //
-// One residual, stated at the severity it has. internal/schema cannot import internal/retrieval or
-// internal/store at all — both already depend on internal/schema, so the edge is an import cycle and
-// the compiler refuses it. That is topology, not this test, and it is worth knowing precisely because
-// it would otherwise look like a case this test proved. This test would catch it too; it just never
-// gets the chance.
+// internal/vault is worth naming on its own, because it was the sharp end of that. The old version
+// used "internal/goldenauthor imports internal/vault" as its proof that the walk was looking at
+// something — while being blind to internal/vault itself gaining a route to search. The guard and its
+// blind spot were the same package. That is why the non-vacuity below is anchored on the predicate
+// catching internal/eval instead: it asks whether this check can still catch a searcher, which is the
+// property at risk, rather than whether one import still exists.
+//
+// One package is out of reach of all of this, and it is topology rather than proof. internal/schema
+// cannot import internal/retrieval or internal/store at all: both already depend on internal/schema
+// (`go list -deps` on either), so the edge is an import cycle and the compiler refuses it. Planting it
+// does not turn this test red — it fails to build. Worth knowing exactly, because a green result there
+// looks like this test proved something and it did not; this test would catch it, it just never gets
+// the chance.
 //
 // The ceiling, so nobody re-derives it: this is red, not impossible. Go has no intra-module import
 // restriction — `internal/` gates by module, not by importer, and a build tag cannot select on who is

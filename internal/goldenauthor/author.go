@@ -18,21 +18,24 @@
 // local type declared in a file that already imported retrieval. Each fix was narrower than the hole
 // it closed, and the next one would have needed type inference.
 //
-// Here the guarantee is the import graph. This package imports internal/vault and
-// internal/goldenset and nothing else of this module; it cannot import internal/retrieval,
-// internal/store or internal/eval, and there is no sibling file in its package that can.
-// TestArch_GoldenAuthoringCannotReachTheIndex (internal/archtest/boundary_test.go) is the whole
-// check, and it is one FindImporters call per forbidden package over one directory, with no list of
-// symbols, files or packages of its own. Three of the five bypasses became impossible to write
-// rather than merely red, which is what CLAUDE.md says to aim for when a plant will not go red.
+// Here the guarantee is the import graph. This package imports internal/vault and internal/goldenset
+// and nothing else of this module, and nothing it reaches through those imports internal/retrieval or
+// internal/store. TestArch_GoldenAuthoringCannotReachTheIndex (internal/archtest/boundary_test.go) is
+// the whole check: it derives this package's transitive closure from the source and asks whether the
+// two packages that *are* the index are in it. It names no symbols, no files and no packages of its
+// own beyond those two. Three of the five bypasses became impossible to write rather than merely red,
+// which is what CLAUDE.md says to aim for when a plant will not go red.
 //
 // The last of the five was closed by the split that created internal/goldenset. internal/eval used
 // to be two things in one package — the golden-set file schema this code needs, and the gate that
 // searches — so importing it for the first brought the second: eval.LoadCorpus,
 // eval.NewCorpusSearcher and eval.RunGolden compiled from here and returned real hits over a local
-// corpus file. The schema now lives in internal/goldenset, which imports no searcher, and
-// internal/eval is on the forbidden list of the test above. Writing that bypass is no longer a
-// question of discipline: the names are not in scope.
+// corpus file. The schema now lives in internal/goldenset, which reaches no searcher.
+//
+// Stated exactly, because the wider claim is tempting and false: writing that bypass still *compiles*.
+// Go has no way to forbid an import to one package and allow it to another. What it now takes is an
+// import line for a package this one has no other reason to want, and that line is the whole of what
+// the test walks — where before the split it took no new import at all and nothing went red.
 //
 // What is left in cmd/cli is a cobra wrapper thin enough to read in one screen.
 package goldenauthor

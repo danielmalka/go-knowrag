@@ -12,9 +12,11 @@
 // that way — it forbids internal/eval to internal/goldenauthor, which is only possible because the
 // schema left.
 //
-// So the rule for anything added here: this package may not import internal/retrieval,
-// internal/store or internal/eval, directly or through a new dependency. Measuring belongs on the
-// other side of that line, in internal/eval.
+// So the rule for anything added here: this package may not reach internal/retrieval or
+// internal/store, directly or through anything it imports. Measuring belongs on the other side of
+// that line, in internal/eval — which is itself unreachable from here for the same reason, since it
+// imports internal/retrieval. The test enforces reachability rather than a list of forbidden names,
+// so a new dependency that searches is caught the day it lands.
 package goldenset
 
 import (
