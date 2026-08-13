@@ -473,7 +473,7 @@ func TestSearchKnowledge_KnowledgeLayerDown_SaysUnavailableNotEmpty(t *testing.T
 		endpoint  string
 	}{
 		"qdrant unreachable": {
-			qdrantErr(codes.Unavailable, "connection error: desc = transport: dial tcp 100.64.0.2:6334: connect: no route to host"),
+			qdrantErr(codes.Unavailable, "connection error: desc = transport: dial tcp 203.0.113.5:6334: connect: no route to host"),
 			"qdrant", testConfig().QdrantEndpoint,
 		},
 		"qdrant did not answer in time": {
