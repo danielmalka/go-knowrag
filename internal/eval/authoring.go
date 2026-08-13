@@ -35,7 +35,24 @@ const defaultQuestionIndent = "  "
 // key and its entries are the last thing in the file. Two things stand in front of that, and they
 // catch different failures: the layout check below refuses a file whose `questions:` key is not last,
 // and the read-back parses the exact bytes that would be written before any of them reach disk. A
-// hand-reordered file is refused, never corrupted, and nothing is ever half-written.
+// hand-reordered file is refused with nothing written.
+//
+// What that does and does not promise, stated exactly, because the difference is narrow and an
+// earlier version of this comment claimed the wider one:
+//
+//   - It promises this function never *emits* bytes it has not already parsed, and never builds on a
+//     file it could not read. Every refusal happens before the file is opened for writing.
+//   - It does not promise atomicity. There is no fsync and no temp-file rename, so a process killed
+//     inside the write syscall leaves a partial final entry on disk. The next run fails to parse the
+//     file and names it; the repair is deleting the truncated lines by hand.
+//
+// The temp-and-rename that would close that window is deliberately not here, and not for cost: a
+// rename publishes a whole file, so two sessions appending at once would end with one of them
+// silently overwriting the other's entry. O_APPEND of only the new bytes is what makes concurrent
+// appends safe by construction rather than by luck — every writer adds its own bytes to whatever the
+// file holds at that moment and rewrites none of them. Trading a guarantee against concurrent loss
+// for a guarantee against a torn tail is the wrong trade on a file that is the owner's hand-typed
+// work, and it is also why there is no lock here: there is nothing for one to protect.
 func AppendQuestion(path string, q GoldenQuestion) error {
 	// An entry with an empty area or a uid that is not a UUID is refused, and it is refused by the
 	// read-back below rather than by a check up here. There used to be one, and a planted defect that
@@ -49,8 +66,23 @@ func AppendQuestion(path string, q GoldenQuestion) error {
 	if err != nil {
 		return fmt.Errorf("eval: reading the golden set at %s: %w", path, err)
 	}
-	if _, err := decodeGoldenSet(current, path); err != nil {
+	set, err := decodeGoldenSet(current, path)
+	if err != nil {
 		return err
+	}
+	// Here, and not only where a session opens the file. This is the function that writes, so this is
+	// where a file that cannot govern an authoring session has to be refused: a zero-byte file decodes
+	// into a valid empty GoldenSet, and appending to it produces entries in areas no table constrains
+	// and a total no table bounds. Nothing downstream would notice — ValidateCoverage warns at run
+	// time and does not gate.
+	//
+	// What used to stop it was an accident of the caller: drawNote walks CoverageStatus, which returns
+	// nothing for a table with no groups, so the session ended before writing. That is the call site
+	// protecting the function, which is the failure mode this repository catalogues (CLAUDE.md), and
+	// it protects no other caller — a bulk import, a harness, a script.
+	if verr := set.Coverage.Validate(); verr != nil {
+		return fmt.Errorf("eval: refusing to append to %s, whose coverage table would govern "+
+			"nothing: %w", path, verr)
 	}
 
 	found, last, indent := questionsLayout(current)
@@ -109,16 +141,35 @@ func AppendQuestion(path string, q GoldenQuestion) error {
 //
 // A key with no entries yet, or no key at all, answers with defaultQuestionIndent — any consistent
 // indentation is valid YAML, and the read-back in AppendQuestion is what proves the one chosen fits.
+// It scans text rather than the parsed document because the parsed document has already thrown away
+// the two things it needs: where the bytes sit, and how they are indented. The cost of scanning text
+// is that anything which merely *looks* like a top-level key has to be excluded by hand, and both
+// exclusions below are bugs this function shipped with:
+//
+//   - A comment at column zero — `# nota pra mim`, typed between sessions — was read as the next
+//     top-level key, and every later append was refused with "move `questions:` to the end" about a
+//     file where it already was. That breaks the incremental hand-edited workflow this whole command
+//     exists to serve.
+//   - A carriage return. In a CRLF file every blank line arrives here as "\r", which is not empty and
+//     is not indented, so it read as a top-level key too — same wrong refusal, from a file that had
+//     nothing wrong with it. This is not hypothetical: the vaults come off a Windows mount.
+//
+// The appended block is written with LF line endings even into a CRLF file. YAML accepts either, and
+// mixing them changes no byte that was already there, which is the property that matters here.
 func questionsLayout(data []byte) (found, last bool, indent string) {
 	indent = defaultQuestionIndent
 	haveIndent := false
-	for _, line := range strings.Split(string(data), "\n") {
+	for _, raw := range strings.Split(string(data), "\n") {
+		line := strings.TrimSuffix(raw, "\r")
 		if strings.HasPrefix(line, questionsKey) {
 			found, last, haveIndent = true, true, false
 			continue
 		}
 		body := strings.TrimLeft(line, " \t")
-		if body == "" {
+		// Blank lines and comments are not structure. A comment cannot be mistaken for content
+		// either: a `#` at the start of a line inside a value only occurs in a block scalar, and a
+		// block scalar's lines are indented past their key, so they never reach column zero.
+		if body == "" || strings.HasPrefix(body, "#") {
 			continue
 		}
 		// A non-empty line at column zero is a top-level key. One after `questions:` means the entry

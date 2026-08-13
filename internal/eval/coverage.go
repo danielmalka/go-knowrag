@@ -98,22 +98,39 @@ func CoverageStatus(questions []GoldenQuestion, table CoverageTable) []AreaStatu
 	return out
 }
 
+// Validate refuses a table that constrains nothing, independently of any question set.
+//
+// It is separate from ValidateCoverage because two callers need it and only one of them has a
+// finished question set to check. AppendQuestion (authoring.go) is the other: it is the function that
+// writes, so it is where a table that would aim a whole authoring session at nothing has to be
+// refused — a guard only the caller applies is a guard the next caller does not.
+//
+// Both refusals below have the same shape. A table with no groups would let every per-area check pass
+// over an empty loop and return nil, which reads as "coverage is fine" from a validator that looked at
+// nothing — the same shape as an ingestion report rendering "orphans not scanned" as "no orphans
+// found". A table that bounds no total is satisfied by one question.
+func (t CoverageTable) Validate() error {
+	if len(t.Groups) == 0 {
+		return errors.New("eval: the coverage table declares no groups, so this check would pass " +
+			"any golden set at all — declare the table in the golden-set file under `coverage:`")
+	}
+	if t.MinTotal <= 0 && t.MaxTotal <= 0 {
+		return errors.New("eval: the coverage table bounds no total, so a one-question golden set " +
+			"would satisfy it — set `min_total` and `max_total`")
+	}
+	return nil
+}
+
 // ValidateCoverage checks a question set against its table, reporting every violation at once.
 //
 // Warn-only at run time, strict at authoring time: `cli eval --golden` renders what this returns as
 // a warning and keeps going, because a temporarily out-of-range golden set should not stop somebody
 // from measuring recall (S10 open question 4, decided). Authoring is where it is fatal.
 func ValidateCoverage(questions []GoldenQuestion, table CoverageTable) error {
-	// A table with no groups would let every check below pass over an empty loop and return nil,
-	// which reads as "coverage is fine" from a validator that looked at nothing — the same shape as
-	// an ingestion report rendering "orphans not scanned" as "no orphans found". Refuse instead.
-	if len(table.Groups) == 0 {
-		return errors.New("eval: the coverage table declares no groups, so this check would pass " +
-			"any golden set at all — declare the table in the golden-set file under `coverage:`")
-	}
-	if table.MinTotal <= 0 && table.MaxTotal <= 0 {
-		return errors.New("eval: the coverage table bounds no total, so a one-question golden set " +
-			"would satisfy it — set `min_total` and `max_total`")
+	// Returned alone rather than joined with the rest: a table that constrains nothing makes every
+	// violation below meaningless, and reporting them together would bury the one that matters.
+	if err := table.Validate(); err != nil {
+		return err
 	}
 
 	counts := map[string]int{}

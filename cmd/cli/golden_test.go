@@ -10,11 +10,13 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/danielmalka/go-knowrag/internal/archtest"
 	"github.com/danielmalka/go-knowrag/internal/clicmd"
 	"github.com/danielmalka/go-knowrag/internal/config"
 	"github.com/danielmalka/go-knowrag/internal/eval"
@@ -670,6 +672,19 @@ func TestOpenGoldenSetForAuthoring_TellsTheTwoFailuresApart(t *testing.T) {
 		t.Errorf("a malformed golden set is reported as a missing one: %v", err)
 	}
 
+	// A zero-byte file is the third case and the one that looks like neither: it is there, and it
+	// decodes into a valid empty GoldenSet. Refused here so the operator hears it before a
+	// fifteen-second vault scan and a session that would print an empty report and exit.
+	empty := writeSet(t, "")
+	_, err = openGoldenSetForAuthoring(empty)
+	if err == nil {
+		t.Fatal("a zero-byte golden set was accepted, so the session would scan the vaults and then " +
+			"end with nothing to draw — which reads as 'nothing left to ask'")
+	}
+	if clicmd.CategoryOf(err) != clicmd.CategoryUsage {
+		t.Errorf("a zero-byte golden set is reported as %q", clicmd.CategoryOf(err))
+	}
+
 	// And the case that must not be refused at all: a table with no questions yet.
 	if _, err := openGoldenSetForAuthoring(writeSet(t, goldenTable)); err != nil {
 		t.Errorf("a golden set with a table and no questions was refused, which is the file every "+
@@ -677,48 +692,181 @@ func TestOpenGoldenSetForAuthoring_TellsTheTwoFailuresApart(t *testing.T) {
 	}
 }
 
-// searchWords are the fragments no identifier in golden.go may contain.
+// How the no-search-results rule is actually held, in the order of how hard each part is to get past.
+// Stated here because the next person has to know which of these to trust, and the weakest one is the
+// one that looks the most reassuring.
 //
-// This is the second half of the no-search-results rule, and it covers what the output allow-list
-// cannot: the allow-list proves nothing outside the known shapes is *printed*, and this proves the
-// file has no way to obtain a search result in the first place. Between them the defect stops being
-// something a reviewer has to notice.
-//
-// Identifiers, not file text: the command's own help says in prose that it never searches, and that
-// sentence has to stay.
+//  1. TestAuthorGolden_PrintsNothingButItsOwnShapes. The strongest, because it constrains every line
+//     printed regardless of what anything is named. Its limit is real: it only sees the sessions the
+//     tests drive. Those cover save, skip, stop, both progress reports and the card, so a leak on any
+//     of those paths is caught — a leak on a branch no test enters is not.
+//  2. TestGoldenCmd_CannotReachSearch, below. It closes what (1) cannot: a leak on an undriven path,
+//     and a leak whose printed line happens to fit an allowed shape — `fmt.Fprintln(out, "")` of an
+//     empty summary is a blank line, and blank lines are allowed.
+//  3. searchWords. Cosmetic. Two reviewers walked past it: one with symbols that already exist in the
+//     tree and carry no banned substring, one by simply naming a function `askQdrantNearest`. It is
+//     kept because it costs nothing and catches the first draft anybody would type, and it is named
+//     here as the weak one so nobody mistakes it for the guarantee.
 var searchWords = []string{"Search", "Retriev", "Query", "Hit", "Recall"}
 
-// TestGoldenCommand_NamesNoSearchSymbol — see searchWords.
-func TestGoldenCommand_NamesNoSearchSymbol(t *testing.T) {
-	path := filepath.Join(moduleRoot(t), "cmd", "cli", "golden.go")
+// searchOnlyPackages are the packages that exist to talk to the index. golden.go reads the vaults; a
+// single import of either of these is the whole defect, whatever the symbol is called.
+var searchOnlyPackages = []string{
+	"github.com/danielmalka/go-knowrag/internal/retrieval",
+	"github.com/danielmalka/go-knowrag/internal/store",
+}
 
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
-	if err != nil {
-		t.Fatalf("parsing %s: %v", path, err)
+// searchOwningFiles are the files of this same package that can reach a searcher. Being in package
+// main, everything they declare is callable from golden.go with no import at all — which is how the
+// first reviewer's exploit worked, using openEvalSearcher (cmd/cli/eval.go).
+//
+// The check is on the declaring file, not on the name: renaming openEvalSearcher moves nothing, it is
+// still declared here and still refused. That is the difference between matching an edge and matching
+// a string.
+var searchOwningFiles = []string{"eval.go", "search.go"}
+
+// goldenAllowedSelectors is default-deny, and the direction is the point.
+//
+// golden.go imports two packages that also carry search results — internal/eval holds Searcher,
+// RunGolden, QuestionResult, GoldenGate and Options, and internal/clicmd holds Searcher and Connect —
+// so a denylist would have to be kept current with every symbol either package ever grows. This lists
+// what golden.go may use instead. Anything else from either package fails, including something added
+// tomorrow under a name nobody predicted.
+//
+// Adding an entry here is a deliberate act: the question to answer first is whether the symbol can
+// carry, or produce, anything the index returned.
+var goldenAllowedSelectors = map[string][]string{
+	"eval": {
+		"GoldenQuestion", "GoldenSet", "AreaStatus",
+		"CoverageStatus", "ReadGoldenSet", "AppendQuestion", "ErrGoldenSetMissing",
+	},
+	"clicmd": {"Usage"},
+}
+
+// TestGoldenCmd_CannotReachSearch is the dependency-edge half of the rule. See the numbered list
+// above for what it covers that the output allow-list does not.
+func TestGoldenCmd_CannotReachSearch(t *testing.T) {
+	root := moduleRoot(t)
+	const goldenFile = "cmd/cli/golden.go"
+
+	// (a) The import edge. Reuses internal/archtest, which is where this module's other architecture
+	// invariant already lives, so there is one walker and one definition of "imports".
+	for _, pkg := range searchOnlyPackages {
+		violations, err := archtest.FindImporters(root, pkg, nil)
+		if err != nil {
+			t.Fatalf("walking %s for %s: %v", root, pkg, err)
+		}
+		for _, v := range violations {
+			if v.File == goldenFile {
+				t.Errorf("%s imports %q. `golden` reads the vaults and must have no route to the "+
+					"index at all: a question written after seeing what a search returns is a "+
+					"question tuned until it passes", v, pkg)
+			}
+		}
 	}
 
-	identifiers := 0
-	ast.Inspect(file, func(n ast.Node) bool {
+	fset := token.NewFileSet()
+	golden, err := parser.ParseFile(fset, filepath.Join(root, goldenFile), nil, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parsing %s: %v", goldenFile, err)
+	}
+
+	// (b) The same-package edge, which needs no import and is therefore the one a reader misses.
+	owned := declaredIn(t, filepath.Join(root, "cmd", "cli"), searchOwningFiles)
+	if len(owned) == 0 {
+		t.Fatalf("no top-level declarations found in %v, so this half of the test is looking at "+
+			"nothing", searchOwningFiles)
+	}
+
+	// (c) The cross-package edge, default-deny. See goldenAllowedSelectors.
+	used := map[string]bool{}
+	selectors := 0
+	ast.Inspect(golden, func(n ast.Node) bool {
+		if sel, ok := n.(*ast.SelectorExpr); ok {
+			pkg, isIdent := sel.X.(*ast.Ident)
+			if !isIdent {
+				return true
+			}
+			if allowed, watched := goldenAllowedSelectors[pkg.Name]; watched {
+				selectors++
+				used[pkg.Name+"."+sel.Sel.Name] = true
+				if !slices.Contains(allowed, sel.Sel.Name) {
+					t.Errorf("%s: golden.go uses %s.%s, which is not on the list this file may use "+
+						"from %s. If it cannot carry anything the index returned, add it to "+
+						"goldenAllowedSelectors deliberately; otherwise this is the leak",
+						fset.Position(sel.Pos()), pkg.Name, sel.Sel.Name, pkg.Name)
+				}
+			}
+			return true
+		}
 		ident, ok := n.(*ast.Ident)
 		if !ok {
 			return true
 		}
-		identifiers++
+		if where, isOwned := owned[ident.Name]; isOwned {
+			t.Errorf("%s: golden.go references %q, declared in %s — one of the files in this package "+
+				"that can reach a searcher. Package main needs no import, so this is a route to the "+
+				"index with nothing in the import block to show for it",
+				fset.Position(ident.Pos()), ident.Name, where)
+		}
 		for _, word := range searchWords {
 			if strings.Contains(ident.Name, word) {
-				t.Errorf("%s: golden.go names %q. This command must have no way to reach a search "+
-					"result: a question written after seeing what the index returns is a question "+
-					"tuned until it passes", fset.Position(ident.Pos()), ident.Name)
+				t.Errorf("%s: golden.go names %q", fset.Position(ident.Pos()), ident.Name)
 			}
 		}
 		return true
 	})
 
-	// Non-vacuity, for the reason main_test.go's scans state: a walker that found nothing passes
-	// silently and forever.
-	if identifiers < 100 {
-		t.Fatalf("the scan found %d identifier(s) in golden.go — the file is larger than that, so "+
-			"this test is passing because it is looking at nothing", identifiers)
+	// Non-vacuity, both directions. A walk that matched nothing passes forever; an allow-list entry
+	// nothing uses is a hole opened for a call that no longer exists.
+	if selectors < 10 {
+		t.Fatalf("the scan found %d watched selector(s) in golden.go — it uses more than that, so "+
+			"this test is passing because it is looking at nothing", selectors)
 	}
+	for pkg, names := range goldenAllowedSelectors {
+		for _, name := range names {
+			if !used[pkg+"."+name] {
+				t.Errorf("goldenAllowedSelectors permits %s.%s, which golden.go does not use — an "+
+					"allow-list entry nobody needs is a door left open", pkg, name)
+			}
+		}
+	}
+}
+
+// declaredIn maps every top-level declaration name in the named files of dir to the file it came
+// from. Types, functions, methods' receivers aside, constants and variables all count: any of them is
+// reachable from another file of the same package.
+func declaredIn(t *testing.T, dir string, files []string) map[string]string {
+	t.Helper()
+
+	fset := token.NewFileSet()
+	owned := map[string]string{}
+	for _, name := range files {
+		file, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", name, err)
+		}
+		for _, decl := range file.Decls {
+			switch d := decl.(type) {
+			case *ast.FuncDecl:
+				// Methods are excluded: their names are only reachable through a value of the
+				// receiver type, and the receiver type is itself in this map if it is declared here.
+				if d.Recv == nil {
+					owned[d.Name.Name] = name
+				}
+			case *ast.GenDecl:
+				for _, spec := range d.Specs {
+					switch s := spec.(type) {
+					case *ast.TypeSpec:
+						owned[s.Name.Name] = name
+					case *ast.ValueSpec:
+						for _, ident := range s.Names {
+							owned[ident.Name] = name
+						}
+					}
+				}
+			}
+		}
+	}
+	return owned
 }

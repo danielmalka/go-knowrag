@@ -149,6 +149,92 @@ coverage:
 	}
 }
 
+// TestAppendQuestion_KeepsWorkingAfterAHandWrittenComment. The tool is built for sessions with hand
+// edits between them, and a note-to-self at column zero used to read as the next top-level key: every
+// later append was refused, telling the owner to move `questions:` to the end of a file where it
+// already was.
+func TestAppendQuestion_KeepsWorkingAfterAHandWrittenComment(t *testing.T) {
+	before := coverageOnly + `  - question: an entry somebody typed
+    uid: ` + uidA + `
+    area: alfa
+    author: someone
+    date: "2026-08-12"
+# lembrar de dividir essa em duas
+`
+	path := writeGoldenSet(t, before)
+
+	if err := AppendQuestion(path, aQuestion("a second one", uidB, "beta")); err != nil {
+		t.Fatalf("AppendQuestion after a hand-written comment: %v", err)
+	}
+	if got := readSet(t, path); !strings.HasPrefix(got, before) {
+		t.Errorf("the comment did not survive the append:\n%s", got)
+	}
+	if got := len(loadFixture(t, readSet(t, path)).Questions); got != 2 {
+		t.Errorf("the set holds %d entr(ies), want 2:\n%s", got, readSet(t, path))
+	}
+}
+
+// TestAppendQuestion_KeepsWorkingOnACRLFFile is the same bug through the other door, and it is the
+// owner's actual environment: the vaults sit on a Windows mount and the global CLAUDE.md lists CRLF
+// as a known trap. A blank line in a CRLF file arrives as "\r", which is neither empty nor indented,
+// so it read as a top-level key and produced the same wrong refusal.
+//
+// The blank line is placed both between entries and at the end, because only one of those positions
+// was reported and a fix for one is not a fix for the other.
+func TestAppendQuestion_KeepsWorkingOnACRLFFile(t *testing.T) {
+	body := coverageOnly + `  - question: an entry somebody typed
+    uid: ` + uidA + `
+    area: alfa
+    author: someone
+    date: "2026-08-12"
+
+  - question: another entry
+    uid: ` + uidC + `
+    area: alfa
+    author: someone
+    date: "2026-08-12"
+
+`
+	before := strings.ReplaceAll(body, "\n", "\r\n")
+	path := writeGoldenSet(t, before)
+
+	if err := AppendQuestion(path, aQuestion("a third one", uidB, "beta")); err != nil {
+		t.Fatalf("AppendQuestion over a CRLF file with blank lines: %v", err)
+	}
+	if got := readSet(t, path); !strings.HasPrefix(got, before) {
+		t.Errorf("the CRLF bytes did not survive the append:\n%q", got)
+	}
+	if got := len(loadFixture(t, readSet(t, path)).Questions); got != 3 {
+		t.Errorf("the set holds %d entr(ies), want 3:\n%q", got, readSet(t, path))
+	}
+}
+
+// TestAppendQuestion_RefusesATableThatGovernsNothing moves the guard to the function that writes.
+//
+// A zero-byte file decodes into a valid empty GoldenSet, so nothing about reading it says no. What
+// said no until now was an accident of one caller — the session's draw walks CoverageStatus, which
+// returns nothing for a table with no groups, so it ended before writing — and an accident at the
+// call site protects no other caller.
+func TestAppendQuestion_RefusesATableThatGovernsNothing(t *testing.T) {
+	for name, before := range map[string]string{
+		"a zero-byte file":       "",
+		"a table with no groups": "coverage:\n  min_total: 4\n  max_total: 8\nquestions:\n",
+		"a table bounding no total": "coverage:\n  groups:\n    - name: core\n      areas: [alfa]\n" +
+			"      min: 2\n      max: 4\nquestions:\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := writeGoldenSet(t, before)
+
+			if err := AppendQuestion(path, aQuestion("a question", uidA, "alfa")); err == nil {
+				t.Fatalf("the append was accepted against %s:\n%s", name, readSet(t, path))
+			}
+			if got := readSet(t, path); got != before {
+				t.Errorf("the refused append still changed the file:\n%s", got)
+			}
+		})
+	}
+}
+
 // TestAppendQuestion_RefusesAnEmptyEntryList is the failure the read-back catches and the layout
 // check cannot: `questions: []` is the last top-level key of this file, so the layout is right, and
 // an item still cannot be appended under a flow-style empty list.

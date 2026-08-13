@@ -23,13 +23,6 @@ type evalModes struct {
 	isolation evalMode
 }
 
-// DefaultGoldenSetPath is where `eval --golden` looks when --file says nothing.
-//
-// docs/ is gitignored on purpose (CLAUDE.md), so this file is absent on a fresh checkout and the
-// command says so by name rather than measuring an empty set. The hermetic CI job points --file
-// somewhere else entirely (.github/workflows/ci.yml).
-const DefaultGoldenSetPath = "docs/eval/golden-set.yaml"
-
 // corpusCollection is the collection name a --corpus run reports.
 //
 // A corpus run reads a local file and names no Qdrant collection, but retrieval.Query.Validate

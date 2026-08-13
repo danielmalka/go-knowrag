@@ -19,6 +19,19 @@ import (
 	"github.com/danielmalka/go-knowrag/internal/vault"
 )
 
+// DefaultGoldenSetPath is where both `golden` and `eval --golden` look when --file says nothing.
+//
+// docs/ is gitignored on purpose (CLAUDE.md), so this file is absent on a fresh checkout and both
+// commands say so by name rather than measuring or appending to an empty set. The hermetic CI job
+// points --file somewhere else entirely (.github/workflows/ci.yml).
+//
+// It lives here rather than beside `eval`, where it started, and the move is load-bearing:
+// TestGoldenCmd_CannotReachSearch refuses any reference from this file to something declared in
+// cmd/cli/eval.go, which is one of the two files in this package that can reach a searcher. A shared
+// constant parked in one of them would have to be excepted, and an architecture check with an
+// exception list is an architecture check with a way in.
+const DefaultGoldenSetPath = "docs/eval/golden-set.yaml"
+
 // goldenAuthorEnv carries the name written into every entry's `author`.
 //
 // It arrives by environment variable, and not as a flag with a default or a value in a config file,
@@ -212,15 +225,30 @@ func runGolden(stdin *os.File, out io.Writer, in io.Reader, cfg *config.Config, 
 // this branch would be unreachable from any test — which is how a refusal quietly stops refusing.
 func openGoldenSetForAuthoring(path string) (eval.GoldenSet, error) {
 	set, err := eval.ReadGoldenSet(path)
-	if err == nil {
-		return set, nil
+	if err != nil {
+		if errors.Is(err, eval.ErrGoldenSetMissing) {
+			return eval.GoldenSet{}, clicmd.Usage("no golden set at %s. Create it with a `coverage:` "+
+				"table first — the table is what says how many questions each area needs, and this "+
+				"command has nothing to aim at without it (internal/eval/coverage.go, CoverageTable)",
+				path)
+		}
+		return eval.GoldenSet{}, clicmd.Usage("%v", err)
 	}
-	if errors.Is(err, eval.ErrGoldenSetMissing) {
-		return eval.GoldenSet{}, clicmd.Usage("no golden set at %s. Create it with a `coverage:` "+
-			"table first — the table is what says how many questions each area needs, and this "+
-			"command has nothing to aim at without it (internal/eval/coverage.go, CoverageTable)", path)
+
+	// The same predicate AppendQuestion applies before it writes (internal/eval/authoring.go), called
+	// through the same method so the two can never disagree about what a usable table is.
+	//
+	// It is not a duplicate of that guard, and the difference is what the operator gets. This one runs
+	// before the vaults are scanned and says what to fix; without it a zero-byte file — which decodes
+	// into a perfectly valid empty GoldenSet — buys a fifteen-second scan and then a session that
+	// prints an empty progress report and exits, which reads as "there is nothing left to ask" from a
+	// tool that never looked. The one in AppendQuestion is what makes it true rather than tidy.
+	if err := set.Coverage.Validate(); err != nil {
+		return eval.GoldenSet{}, clicmd.Usage("the golden set at %s declares no usable coverage "+
+			"table, so this session would have no area to draw from and no target to fill: %v",
+			path, err)
 	}
-	return eval.GoldenSet{}, clicmd.Usage("%v", err)
+	return set, nil
 }
 
 // goldenAuthor resolves the name every entry is attributed to. USER is the fallback because a
