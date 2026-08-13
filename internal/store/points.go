@@ -188,8 +188,8 @@ func (c *Client) ScrollByUID(ctx context.Context, tenantID string, uid uuid.UUID
 // internal/ingest/orphans.go) and the integrity check (internal/ingest/note.go), where it looks like
 // a smaller, still-plausible index rather than a wrong one. Continuing on a repeated offset instead
 // of erroring would not even produce a partial read — it would re-issue the same request forever,
-// which is the one failure in this family an operator would actually notice (the process never
-// returns), and the reason D-38 called it Low severity rather than Medium.
+// which is the one failure in this family an operator would actually notice, because the process
+// never returns.
 //
 // Neither shape is reachable through Qdrant's documented behaviour — the offset comes back nil when
 // there is nothing after the page, and otherwise advances. Both are checked anyway because "not
