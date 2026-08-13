@@ -93,6 +93,18 @@ done
 
 : "${KNOWRAG_DRILL_STATE_DIR:=.drill}"
 
+# Armado antes de `date`, que é o primeiro comando externo deste arquivo, e com o corpo escrito
+# inline em vez de chamar `interrupted`: bash executa as instruções de topo à medida que as lê, e
+# `interrupted` e `die` só existem algumas dezenas de linhas abaixo. Um trap que nomeia uma função
+# ainda não definida falha na hora do sinal e deixa o script seguir — pior que não ter trap nenhum.
+#
+# Por que existir tão cedo: um SIGINT que chegue enquanto um comando de primeiro plano roda e sai 0 é
+# descartado para sempre (jobs.c, wait_sigint_handler), e instalar o trap depois não o recupera. Nada
+# perigoso acontece nesta janela — nenhum `mv`, nenhuma poda —, mas sem isto o Ctrl-C do operador
+# sumiria em silêncio. main() reinstala o mesmo par de sinais apontando para `interrupted`, que aí já
+# existe e escreve no transcript.
+trap 'printf "ABORTED: interrupted by a signal\n" >&2; exit 1' INT TERM
+
 run_id="$(date -u +%Y%m%dT%H%M%SZ)"
 before_file="$KNOWRAG_DRILL_STATE_DIR/$run_id-prune-before.txt"
 after_file="$KNOWRAG_DRILL_STATE_DIR/$run_id-prune-after.txt"
@@ -158,8 +170,9 @@ restore() {
 interrupted() { die "interrupted by a signal"; }
 
 main() {
-  # Before the first count, because the first count is already a foreground command that can swallow
-  # a SIGINT, and a run that loses the interrupt there goes on to move the note and prune.
+  # Substitui o handler inline do topo por este, que escreve no transcript além do stderr. O de lá
+  # cobre a janela anterior a esta linha; este cobre o resto, e é o que os testes de sinal exercitam
+  # (cmd/cli/prune_drill_test.go).
   trap interrupted INT TERM
 
   mkdir -p "$KNOWRAG_DRILL_STATE_DIR" || die "cannot create $KNOWRAG_DRILL_STATE_DIR"
