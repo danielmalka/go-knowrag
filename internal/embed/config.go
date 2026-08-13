@@ -98,3 +98,36 @@ func ParseProfile(data []byte) (Profile, error) {
 	}
 	return p, nil
 }
+
+// OperatorProfile is the embedder profile for a command a person ran and is waiting on: the CLI's
+// ingestion, and the measurement harnesses that time it.
+//
+// It lives here, rather than in each command, because it was written three times and the three
+// copies had no way to disagree loudly. Nothing compared them; a number changed in one would have
+// left the measurement harnesses timing a connection profile production no longer uses, and the
+// symptom is a report that looks right.
+//
+// The one profile this deliberately does not cover is the MCP server's, which is tighter on purpose
+// and for a reason that does not apply here (cmd/mcp-server/main.go): a search has somebody waiting
+// on it, and its own p95 is a requirement rather than something it measures.
+//
+// The numbers:
+//
+// VerifyTimeout is 30 s because the handshake happens once, at startup, with nothing waiting on it.
+// An ingestion is a 30-minute contract (NFR-4 in PRD.md), so 30 s spent confirming beats starting a
+// run against a backend nobody checked. A service merely still coming up does not consume this — it
+// binds its socket only after the model is loaded (scripts/embedder-service/server.py), so it
+// refuses instantly rather than answering slowly. What the budget covers is a wedged backend.
+//
+// Timeout, BatchSize, MaxConcurrent and MaxRetries are the ingestion's shape: batches of 32 with two
+// in flight, retried three times, against a service that serialises requests anyway.
+func OperatorProfile(endpoint string) Profile {
+	return Profile{
+		Endpoint:      endpoint,
+		Timeout:       2 * time.Minute,
+		VerifyTimeout: 30 * time.Second,
+		BatchSize:     32,
+		MaxConcurrent: 2,
+		MaxRetries:    3,
+	}
+}
