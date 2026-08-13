@@ -142,7 +142,9 @@ func (c *Client) DeleteByFilter(ctx context.Context, tenantID string, uid uuid.U
 // Pagination is a loop rather than a single large limit because "how many points does this uid
 // have" is precisely the question being asked — a note that shrank can have an arbitrary tail, and
 // a fixed limit that silently truncated it would report the orphans as absent and make the note
-// look integral.
+// look integral. The loop's stop condition is scrollPageDone, shared with Stats and ScrollTenant: an
+// empty page that still carries an offset is an error, not silent end-of-scroll, for the same reason
+// a fixed limit is rejected above — it too would return a subset as if it were the whole uid.
 func (c *Client) ScrollByUID(ctx context.Context, tenantID string, uid uuid.UUID) ([]ingest.PointRecord, error) {
 	var out []ingest.PointRecord
 	var offset *qdrant.PointId
@@ -166,11 +168,45 @@ func (c *Client) ScrollByUID(ctx context.Context, tenantID string, uid uuid.UUID
 			}
 			out = append(out, rec)
 		}
-		if next == nil || len(page) == 0 {
+		done, err := scrollPageDone(page, next, fmt.Sprintf("scrolling %s/%s", c.collection, uid))
+		if err != nil {
+			return nil, err
+		}
+		if done {
 			return out, nil
 		}
 		offset = next
 	}
+}
+
+// scrollPageDone applies the one pagination stop condition Stats, ScrollByUID, and ScrollTenant all
+// share: stop when there is no offset to resume from, and refuse an empty page that still carries
+// one rather than reading it as the end. Continuing on that shape would re-issue the same request
+// forever; stopping in silence would report part of the collection as if it were all of it — and for
+// ScrollByUID and ScrollTenant that partial read feeds straight into the orphan candidate set
+// (ScanOrphans, internal/ingest/orphans.go) and the integrity check (internal/ingest/note.go), where
+// it looks like a smaller, still-plausible index rather than a wrong one.
+//
+// Not reachable through Qdrant's documented behaviour — the offset comes back nil when there is
+// nothing after the page. It is checked because "not reachable" is a claim about a server this code
+// does not contain, and the cost of being wrong is a wrong answer that looks right.
+//
+// The three callers share this exact decision and change together: touch the stop condition here,
+// not in one of them.
+//
+// read names what was being read, for the error message. It is not called `context` because this
+// file imports the context package, and a parameter by that name shadows it for anyone who later
+// needs a deadline in here.
+func scrollPageDone(page []*qdrant.RetrievedPoint, next *qdrant.PointId, read string) (bool, error) {
+	if next == nil {
+		return true, nil
+	}
+	if len(page) == 0 {
+		return false, fmt.Errorf(
+			"%s: the scroll returned an empty page and an offset to continue from, so this read "+
+				"would report part of the collection as all of it", read)
+	}
+	return false, nil
 }
 
 // scopeConditions is the tenant_id + uid scope, spelled once so no call site can forget half of it.
@@ -247,21 +283,14 @@ func (c *Client) Stats(ctx context.Context, tenantID string) (Stats, error) {
 			uids[uid] = struct{}{}
 			points++
 		}
-		if next == nil {
-			return Stats{Points: points, UIDs: len(uids)}, nil
+		// The stop condition — and the empty-page-with-offset error the doc comment above promises —
+		// is scrollPageDone, shared with ScrollByUID and ScrollTenant.
+		done, err := scrollPageDone(page, next, fmt.Sprintf("counting %s", c.collection))
+		if err != nil {
+			return Stats{}, err
 		}
-		// An empty page that still hands back an offset is the one shape this loop cannot honour:
-		// continuing would re-issue the same request forever, and stopping would return a count of
-		// part of the collection as the count of all of it. The comment above promises this read
-		// cannot truncate in silence, so it is an error rather than the second of those.
-		//
-		// Not reachable through Qdrant's documented behaviour — the offset comes back nil when there
-		// is nothing after the page. It is checked because "not reachable" is a claim about a server
-		// this code does not contain, and the cost of being wrong is a wrong number that looks right.
-		if len(page) == 0 {
-			return Stats{}, fmt.Errorf(
-				"counting %s: the scroll returned an empty page and an offset to continue from, so "+
-					"this count would be of part of the collection reported as all of it", c.collection)
+		if done {
+			return Stats{Points: points, UIDs: len(uids)}, nil
 		}
 		offset = next
 	}
@@ -278,6 +307,16 @@ func (c *Client) Stats(ctx context.Context, tenantID string) (Stats, error) {
 // Grouping happens here rather than at the caller because the caller's question is per uid, and a
 // flat slice would make every caller write the same grouping loop. A uid the tenant has no points
 // for is simply absent from the map, which is the same answer ScrollByUID gives as an empty slice.
+//
+// The loop's stop condition is scrollPageDone, shared with Stats and ScrollByUID: an empty page that
+// still carries an offset is an error, not silent end-of-scroll — this is the read the orphan
+// candidate set and the integrity check are built on, so a partial snapshot here reads as a smaller,
+// still-plausible tenant rather than a wrong one.
+//
+// That consequence is a claim about another package, so here is where to check it: this map becomes
+// prefetchedStore in internal/ingest/prefetch.go, whose ScrollByUID answers "absent from the map" as
+// "this uid has no points" — which is what internal/ingest/note.go reads as a note needing a full
+// re-embed. Truncating here does not delete anything extra; it silently re-does work.
 func (c *Client) ScrollTenant(ctx context.Context, tenantID string) (map[uuid.UUID][]ingest.PointRecord, error) {
 	out := map[uuid.UUID][]ingest.PointRecord{}
 	var offset *qdrant.PointId
@@ -314,7 +353,11 @@ func (c *Client) ScrollTenant(ctx context.Context, tenantID string) (map[uuid.UU
 			}
 			out[id] = append(out[id], rec)
 		}
-		if next == nil || len(page) == 0 {
+		done, err := scrollPageDone(page, next, fmt.Sprintf("scrolling tenant %s in %s", tenantID, c.collection))
+		if err != nil {
+			return nil, err
+		}
+		if done {
 			return out, nil
 		}
 		offset = next

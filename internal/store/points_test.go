@@ -309,6 +309,43 @@ func TestClient_ScrollByUID_RejectsAPointWithNoHash(t *testing.T) {
 	}
 }
 
+// TestClient_ScrollByUID_EmptyPageWithOffset_IsAnErrorNotSilentEnd mirrors
+// TestStats_EmptyPageWithAnOffset_IsAnErrorNotAPartialCount for the reader that feeds a note's own
+// integrity check: a page that comes back empty while still handing over an offset used to stop the
+// loop and return the points read so far as if they were the whole uid. Reading fewer points than
+// exist makes the note look like it lost chunks that are still in the index.
+func TestClient_ScrollByUID_EmptyPageWithOffset_IsAnErrorNotSilentEnd(t *testing.T) {
+	api := &fakePointAPI{
+		pages: [][]*qdrant.RetrievedPoint{
+			{retrieved(t, 0, "hash-0")},
+			{}, // empty, and the offset below says there is more after it
+		},
+		offsets: []*qdrant.PointId{qdrant.NewIDNum(7), qdrant.NewIDNum(7)},
+	}
+	c := newTestClient(t, api)
+
+	got, err := c.ScrollByUID(t.Context(), testTenant, testUID(t))
+	if err == nil {
+		t.Fatalf("ScrollByUID returned %v and no error for a scroll that stopped early", got)
+	}
+}
+
+// TestClient_ScrollByUID_EmptyFinalPage_EndsCleanly is the other half of that condition: an empty
+// page with no offset — a uid with no points at all — is a normal, error-free end, not the shape
+// above.
+func TestClient_ScrollByUID_EmptyFinalPage_EndsCleanly(t *testing.T) {
+	api := &fakePointAPI{pages: [][]*qdrant.RetrievedPoint{{}}}
+	c := newTestClient(t, api)
+
+	records, err := c.ScrollByUID(t.Context(), testTenant, testUID(t))
+	if err != nil {
+		t.Fatalf("ScrollByUID: %v", err)
+	}
+	if len(records) != 0 {
+		t.Errorf("%d record(s), want 0", len(records))
+	}
+}
+
 // TestPayloadRoundTrip is the shared marshal/unmarshal helper's contract: what goes in comes back
 // with the same Go types, so condition 4 compares like with like.
 func TestPayloadRoundTrip(t *testing.T) {
@@ -459,6 +496,80 @@ func TestClient_ScrollTenant_PageFailsMidway_DiscardsEverything(t *testing.T) {
 	if len(api.scrolls) != 2 {
 		t.Errorf("%d scroll(s) issued, want 2 — the read has to stop at the failure, not carry on",
 			len(api.scrolls))
+	}
+}
+
+// TestClient_ScrollTenant_ScopedAndPaginated is ScrollTenant's normal-pagination case: the scroll
+// follows the offset across several pages, filters on tenant_id alone (uid is not known yet, that's
+// the question being answered), and groups every point under the uid its own payload names.
+func TestClient_ScrollTenant_ScopedAndPaginated(t *testing.T) {
+	uidA := testUID(t)
+	uidB := uuid.MustParse("0198a7f2-4b31-7c42-9e15-3d8a92c47b6b")
+	api := &fakePointAPI{
+		pages: [][]*qdrant.RetrievedPoint{
+			{retrievedWithUID(t, 0, "hash-0", uidA), retrievedWithUID(t, 1, "hash-1", uidA)},
+			{retrievedWithUID(t, 0, "hash-2", uidB)},
+		},
+		offsets: []*qdrant.PointId{qdrant.NewIDNum(7), nil},
+	}
+	c := newTestClient(t, api)
+
+	got, err := c.ScrollTenant(t.Context(), testTenant)
+	if err != nil {
+		t.Fatalf("ScrollTenant: %v", err)
+	}
+	if len(got[uidA]) != 2 {
+		t.Errorf("%d record(s) for uidA, want 2 — a truncated read would report a subset of the "+
+			"tenant as the whole of it", len(got[uidA]))
+	}
+	if len(got[uidB]) != 1 {
+		t.Errorf("%d record(s) for uidB, want 1", len(got[uidB]))
+	}
+	if len(api.scrolls) != 2 {
+		t.Errorf("%d scroll call(s), want 2 — the second page was never fetched", len(api.scrolls))
+	}
+	assertKeywordCondition(t, api.scrolls[0].GetFilter().GetMust(), "tenant_id", testTenant)
+}
+
+// TestClient_ScrollTenant_EmptyPageWithOffset_IsAnErrorNotSilentEnd mirrors
+// TestStats_EmptyPageWithAnOffset_IsAnErrorNotAPartialCount for the reader the orphan candidate set
+// and the integrity check are built on: a page that comes back empty while still handing over an
+// offset used to stop the loop and return the snapshot gathered so far as if it were the whole
+// tenant. A uid missing from a partial snapshot looks like a note with no points at all, so the
+// integrity short-circuit never fires and the note is reembedded every run for no reason.
+func TestClient_ScrollTenant_EmptyPageWithOffset_IsAnErrorNotSilentEnd(t *testing.T) {
+	api := &fakePointAPI{
+		pages: [][]*qdrant.RetrievedPoint{
+			{retrievedWithUID(t, 0, "hash-0", testUID(t))},
+			{}, // empty, and the offset below says there is more after it
+		},
+		offsets: []*qdrant.PointId{qdrant.NewIDNum(7), qdrant.NewIDNum(7)},
+	}
+	c := newTestClient(t, api)
+
+	got, err := c.ScrollTenant(t.Context(), testTenant)
+	if err == nil {
+		t.Fatalf("ScrollTenant returned %v and no error for a scroll that stopped early", got)
+	}
+	if got != nil {
+		t.Errorf("ScrollTenant returned %v alongside its error; the accumulated pages have to be "+
+			"discarded, because a caller that ignores the error would treat a partial snapshot as complete", got)
+	}
+}
+
+// TestClient_ScrollTenant_EmptyFinalPage_EndsCleanly is the other half of that condition: an empty
+// page with no offset — a tenant with no points at all — is a normal, error-free end, not the shape
+// above.
+func TestClient_ScrollTenant_EmptyFinalPage_EndsCleanly(t *testing.T) {
+	api := &fakePointAPI{pages: [][]*qdrant.RetrievedPoint{{}}}
+	c := newTestClient(t, api)
+
+	got, err := c.ScrollTenant(t.Context(), testTenant)
+	if err != nil {
+		t.Fatalf("ScrollTenant: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("%d uid(s), want 0", len(got))
 	}
 }
 
