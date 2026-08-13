@@ -83,3 +83,25 @@ func TestPercentile_OutlierMovesP99ButNotP50(t *testing.T) {
 		t.Errorf("p99 = %v, want it to surface one of the outliers (>= %v)", p99, ms(9000))
 	}
 }
+
+// TestPercentile_SmallSampleDoesNotStepOverTheWorstOne is the case every other test in this file
+// misses. They all use n=100, where 0.50, 0.95 and 0.99 times n are whole numbers and truncating
+// agrees with the ceiling — so they held while the formula was wrong.
+//
+// n=30 is what cmd/measure-search defaults to. At that size p99 must be the maximum: ceil(0.99*30)
+// is 30. Truncating gives 29, which reads the second-worst sample and reports the one catastrophic
+// query as if it had not happened.
+func TestPercentile_SmallSampleDoesNotStepOverTheWorstOne(t *testing.T) {
+	durations := make([]time.Duration, 30)
+	for i := range durations {
+		durations[i] = 10 * time.Millisecond
+	}
+	durations[29] = 9 * time.Second
+
+	if got := Percentile(durations, 0.99); got != 9*time.Second {
+		t.Errorf("p99 of 30 samples whose worst is 9s = %v, want 9s — the outlier was stepped over", got)
+	}
+	if got := Percentile(durations, 0.50); got != 10*time.Millisecond {
+		t.Errorf("p50 = %v, want 10ms", got)
+	}
+}
