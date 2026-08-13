@@ -38,7 +38,7 @@ func TestWriteJSONReport_CreatesDirAndValidJSON(t *testing.T) {
 	path := filepath.Join(dir, "nested", "report.json")
 
 	phases := measure.IngestPhases{LockAcquire: 10 * time.Millisecond, VaultScan: 2 * time.Second, Orchestrate: 3 * time.Second}
-	verdict := measure.EvaluateIngest(phases.Accounted()+50*time.Millisecond, phases, 60*time.Second)
+	verdict := measure.EvaluateIngest(phases.Accounted()+50*time.Millisecond, phases, 60*time.Second, 0, 0)
 	report := ingest.Report{Mode: "incremental"}
 
 	if err := writeJSONReport(path, verdict, report); err != nil {
@@ -71,7 +71,7 @@ func TestWriteJSONReport_CreatesDirAndValidJSON(t *testing.T) {
 func TestWriteJSONReport_FailingRunIsVisibleInTheFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "report.json")
 	phases := measure.IngestPhases{LockAcquire: time.Millisecond, VaultScan: time.Millisecond, Orchestrate: time.Millisecond}
-	verdict := measure.EvaluateIngest(phases.Accounted(), phases, 60*time.Second)
+	verdict := measure.EvaluateIngest(phases.Accounted(), phases, 60*time.Second, 0, 0)
 	report := ingest.Report{
 		Mode:    "incremental",
 		Results: []ingest.NoteResult{{State: ingest.StateFailed, Err: errFake{}}},
