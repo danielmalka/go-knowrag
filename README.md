@@ -290,6 +290,41 @@ go build -o ~/bin/knowrag-mcp ./cmd/mcp-server
 
 Transporte stdio: o cliente MCP o executa como processo filho. Não abra porta, não rode como daemon.
 
+### 5. Os dois drills
+
+Dois procedimentos que se rodam de propósito, com um humano olhando. Ambos **destroem alguma coisa
+de verdade**, e por isso exigem `--yes` *e* stdin num terminal — mais rígido que o `--prune` do
+`ingest`, que aceita `--yes` **ou** um prompt respondido. Nenhum dos dois pergunta nada: um drill
+pendurado esperando resposta é pior que qualquer das duas respostas.
+
+```bash
+cp scripts/drill.env.example scripts/drill.env   # preencher; .env* é gitignored
+set -a; . scripts/drill.env; set +a
+
+./scripts/recovery-drill.sh --yes                        # derruba o índice inteiro e reconstrói
+./scripts/prune-drill.sh --yes pessoal areas/nota.md     # apaga os pontos de uma nota e devolve
+```
+
+**`recovery-drill.sh`** executa o que o runbook só descrevia: apaga o volume do Qdrant e reingere
+tudo. Em cinco fases, com aborto entre elas — pré-voo (embedder, vaults, disco, Qdrant; reprovar
+aqui **não destrói nada**), contagem antes gravada em arquivo, autorização, destruição e
+reconstrução, contagem depois e veredito. Qualquer diferença nas contagens é reprovação.
+
+O nome do volume sai do **container em execução**, nunca de um `docker-compose.yml`: o arquivo do
+repositório e o da VPS divergiram nesse nome, e um script que chutasse criaria um volume vazio —
+virando exatamente a perda que ele existe para evitar. É também por isso que ele usa
+`docker compose down` seguido de `docker volume rm <nome descoberto>`, e não `down -v`.
+
+**`prune-drill.sh`** tira uma nota do vault (move de lado, devolve por `trap` em qualquer saída),
+reingere, confirma que ela é o **único** órfão do relatório, roda `--prune --yes`, e só aceita se os
+totais caíram por exatamente os pontos daquela nota e exatamente um uid — é essa aritmética que prova
+que nada de outro vault foi tocado. No fim devolve a nota e reingere até as contagens voltarem.
+
+Os dois anunciam, em toda execução, o que **não** medem — indisponibilidade percebida, recuperação
+parcial, falha no meio da reingestão — do mesmo jeito que `verify-deploy.sh`. Nenhum dos dois roda
+em CI; o que roda lá são os testes que os dirigem contra fakes (`cmd/cli/drill_test.go`,
+`cmd/cli/prune_drill_test.go`).
+
 ## Configuração
 
 Tudo por variável de ambiente, ou por arquivo YAML apontado por `KNOWRAG_CONFIG_FILE` com as mesmas

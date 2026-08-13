@@ -2,6 +2,10 @@ docs
 bin/
 cover.out
 
+# Onde os drills (scripts/recovery-drill.sh, scripts/prune-drill.sh) escrevem as contagens de antes
+# e depois e o transcript da execução: estado de uma máquina, não do repositório.
+.drill/
+
 # `make test-embedder` importa server.py, e o CPython escreve o bytecode ao lado do fonte
 __pycache__/
 internal/schema/applied_state.json.tmp-*
