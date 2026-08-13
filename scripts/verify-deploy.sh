@@ -114,10 +114,16 @@ else
   #   - quotes stripped: compose treats KEY="x" and KEY=x as the same value x. Comparing them raw
   #     makes two identical credentials look like two different ones, which is precisely the
   #     comparison this block exists to make.
-  #   - carriage returns stripped: this repository is developed on WSL and edited from Windows, where
-  #     a file can arrive with CRLF endings and every value silently gains a trailing \r.
   #   - inline comments stripped from unquoted values, which is compose's rule and not this script's
   #     invention: `KEY=secret # rotated Tuesday` is the value `secret`.
+  #
+  # Carriage returns are handled too — this repository is developed on WSL and edited from Windows,
+  # so a file can arrive with CRLF endings and every value gains a trailing \r — but by the rules
+  # already written rather than by one of their own. sed's `[[:space:]]` includes \r, so the
+  # trailing-whitespace rule below removes it from an unquoted value, and the quote patterns discard
+  # everything past the closing quote, \r included. There was a dedicated `s/\r$//` here until a
+  # review disabled it and no test went red: it never ran on a value the other two rules had not
+  # already cleaned.
   #
   # This reimplements a subset of compose's dotenv rules rather than asking compose, and that is a
   # real tradeoff: asking `docker compose --env-file … config` would be exact, and would also make
@@ -130,7 +136,7 @@ else
   # quoted". The first pass isolates the raw value; the second interprets it.
   dotenv_value() {
     grep -E "^(export[[:space:]]+)?$1=" "$env_file" | tail -1 |
-      sed -E "s/^(export[[:space:]]+)?$1=//; s/\r$//" |
+      sed -E "s/^(export[[:space:]]+)?$1=//" |
       sed -E "s/^\"([^\"]*)\".*$/\1/
               t
               s/^'([^']*)'.*$/\1/
