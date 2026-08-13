@@ -210,6 +210,9 @@ func TestVerifyDeploy_KeyPairChecks(t *testing.T) {
 		// file half-edited from Windows is what produces the mixed shape.
 		{"same key, CRLF on one line only", "QDRANT_API_KEY=shared-key-fixture\r\nQDRANT_READ_ONLY_API_KEY=shared-key-fixture\n"},
 		{"same key, export prefix on one side", "export QDRANT_API_KEY=shared-key-fixture\nQDRANT_READ_ONLY_API_KEY=shared-key-fixture\n"},
+		{"same key, inline comment on one side", "QDRANT_API_KEY=shared-key-fixture # rotated Tuesday\nQDRANT_READ_ONLY_API_KEY=shared-key-fixture\n"},
+		{"same key, quoted and commented on one side", "QDRANT_API_KEY=\"shared-key-fixture\" # rotated Tuesday\nQDRANT_READ_ONLY_API_KEY=shared-key-fixture\n"},
+		{"same key, trailing whitespace on one side", "QDRANT_API_KEY=shared-key-fixture   \nQDRANT_READ_ONLY_API_KEY=shared-key-fixture\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env := tc.env
@@ -223,15 +226,26 @@ func TestVerifyDeploy_KeyPairChecks(t *testing.T) {
 		})
 	}
 
-	// Genuinely different keys must still pass, which is what stops the cases above from being
-	// answered by a check that just always fails.
-	t.Run("genuinely different keys pass", func(t *testing.T) {
-		env := "QDRANT_API_KEY=\"admin-key-fixture\"\nQDRANT_READ_ONLY_API_KEY=readonly-key-fixture\n"
-		code, output := runVerifyDeploy(t, compose, &env)
-		if code != 0 {
-			t.Fatalf("verify-deploy.sh rejected two genuinely different keys; output:\n%s", output)
-		}
-	})
+	// Genuinely different keys must still pass, and these carry the same decorations as the cases
+	// above. Without them every case above is answered by a check that always fails — and a value
+	// whose quotes hold a space is what stops the comment-stripping from eating a legitimate key.
+	for _, tc := range []struct {
+		name string
+		env  string
+	}{
+		{"plain", "QDRANT_API_KEY=admin-key-fixture\nQDRANT_READ_ONLY_API_KEY=readonly-key-fixture\n"},
+		{"quoted", "QDRANT_API_KEY=\"admin-key-fixture\"\nQDRANT_READ_ONLY_API_KEY=readonly-key-fixture\n"},
+		{"commented", "QDRANT_API_KEY=admin-key-fixture # the privileged one\nQDRANT_READ_ONLY_API_KEY=readonly-key-fixture\n"},
+		{"quoted value containing spaces", "QDRANT_API_KEY=\"admin key fixture\"\nQDRANT_READ_ONLY_API_KEY=readonly-key-fixture\n"},
+	} {
+		t.Run("genuinely different keys pass, "+tc.name, func(t *testing.T) {
+			env := tc.env
+			code, output := runVerifyDeploy(t, compose, &env)
+			if code != 0 {
+				t.Fatalf("verify-deploy.sh rejected two genuinely different keys; output:\n%s", output)
+			}
+		})
+	}
 
 	// The one case in this file where a missing check must NOT fail the script: no .env exists next
 	// to the fixture, which is CI's own situation (deploy/.env is gitignored), and check 5 is

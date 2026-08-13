@@ -116,9 +116,27 @@ else
   #     comparison this block exists to make.
   #   - carriage returns stripped: this repository is developed on WSL and edited from Windows, where
   #     a file can arrive with CRLF endings and every value silently gains a trailing \r.
+  #   - inline comments stripped from unquoted values, which is compose's rule and not this script's
+  #     invention: `KEY=secret # rotated Tuesday` is the value `secret`.
+  #
+  # This reimplements a subset of compose's dotenv rules rather than asking compose, and that is a
+  # real tradeoff: asking `docker compose --env-file … config` would be exact, and would also make
+  # this script need Docker, which is the property that lets it run in CI and on any checkout. The
+  # cost of the choice is that these rules can drift from compose's. Every rule above is pinned by a
+  # test in cmd/cli/verify_deploy_test.go, so drift shows up as a failing fixture rather than as a
+  # check that quietly stops matching reality.
+  # Two passes rather than one, because sed's `t` branches on any substitution made since the line
+  # was read — including the prefix strip — so a single script cannot use it to mean "the value was
+  # quoted". The first pass isolates the raw value; the second interprets it.
   dotenv_value() {
     grep -E "^(export[[:space:]]+)?$1=" "$env_file" | tail -1 |
-      sed -E "s/^(export[[:space:]]+)?$1=//; s/\r$//; s/^\"(.*)\"$/\1/; s/^'(.*)'$/\1/"
+      sed -E "s/^(export[[:space:]]+)?$1=//; s/\r$//" |
+      sed -E "s/^\"([^\"]*)\".*$/\1/
+              t
+              s/^'([^']*)'.*$/\1/
+              t
+              s/[[:space:]]+#.*$//
+              s/[[:space:]]+$//"
   }
   admin_value=$(dotenv_value QDRANT_API_KEY)
   readonly_value=$(dotenv_value QDRANT_READ_ONLY_API_KEY)
