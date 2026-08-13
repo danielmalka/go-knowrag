@@ -61,6 +61,24 @@ Quem enforça é o Qdrant, e é aí que está o valor: `internal/store` não exp
 não chama caminho de escrita, mas as duas são convenções que este repositório mantém sozinho. A chave
 read-only é a linha que sobrevive a alguém quebrá-las.
 
+## O golden set real não bloqueia a entrega — decisão de 2026-08-13
+
+Escrever as 60–90 perguntas de avaliação saiu de requisito e virou **"quem sabe um dia"**. O dono
+decidiu assim sabendo o que perde, e o que se perde é específico: sem elas não há Recall@5 medido, e
+a escolha entre busca híbrida e densa continua sendo a que o código já traz, sustentada por
+raciocínio e não por número.
+
+**O que isso não é.** Não é abandono do instrumento: o runner, o Recall@K com intervalo de Wilson, a
+tabela de cobertura, a proveniência por git e o gate hermético existem, medem, e rodam no CI a cada
+push. O que falta é conteúdo que só o dono pode produzir, porque a pergunta precisa ser dele e
+precisa ser escrita antes de qualquer resultado ser visto.
+
+Não trate a ausência do golden set como pendência que trava fechamento, e não a ofereça como próximo
+passo obrigatório. Se ele quiser retomar, existe ferramenta para isso — a autoria assistida, que
+sorteia uma nota e pede uma pergunta por vez.
+
+Reabre por vontade do dono. Não reabre porque um documento de story ainda lista a tarefa.
+
 ## `docs/` fica fora do git, e isso é decisão fechada
 
 `docs/` está no `.gitignore` de propósito: é onde moram os ADRs, o PRD e o registro de débitos
@@ -131,6 +149,28 @@ Duas consequências práticas:
 E a leitura que fecha o ciclo: numa rodada de plante de defeito, **a lista que importa é a dos testes
 que não ficaram vermelhos**. É nela que o teste vazio se esconde, e é a que ninguém lê.
 
+### A variante que nenhum plante pega: dados de teste que fazem duas fórmulas coincidirem
+
+Em 2026-08-13, uma função de percentil documentava `ceil(p*n)` e implementava truncamento. Todos os
+testes usavam **n=100**, onde `p*n` cai redondo para p50, p95 e p99 — e aí `ceil` e `floor` dão o
+mesmo índice. A suíte inteira ficava verde provando uma fórmula que o código não implementava.
+
+O custo apareceu no tamanho que a ferramenta recomenda: com **n=30**, `int(0.99*30)` é 29, então o p99
+lia a segunda pior amostra. Uma consulta de 9 s entre trinta de 10 ms saía como `p99 = 10ms`, e o
+veredito dizia que passou. A ferramenta existia para achar aquela consulta.
+
+**Plantar não ajuda aqui**, e é isso que torna o caso distinto do resto desta seção: qualquer plante
+sobre a fórmula errada continua verde com aqueles dados. O que acha é a pergunta:
+
+> **Existe entrada em que a fórmula documentada e a implementada dariam respostas diferentes — e ela
+> está nos testes?**
+
+O vizinho passa nesse critério e mostra como é quando dá certo: `WilsonInterval`
+(`internal/eval/confidence.go`) é testado com **0 de 50** e **50 de 50**, casos em que a aproximação
+normal ingênua daria intervalo degenerado `(0,0)` e `(1,1)` e o Wilson não. Os dados **separam** as
+fórmulas. Se os casos fossem todos de proporção intermediária, o teste passaria com qualquer uma das
+duas.
+
 ## Três modos de falhar em silêncio, todos achados numa fase de plantes
 
 Em 2026-08-11, fechando a S06b, a rodada de plantes achou três coisas que **não** são bug de lógica e
@@ -155,6 +195,29 @@ para de provar, sem avisar, e continua na lista como se provasse.
    preservada entre aspas é indistinguível de frase falsa esquecida — para um grep, e para quem lê
    rápido. Uma correção assim chegou a fazer a verificação óbvia responder "não corrigido" sobre
    código corrigido.
+
+## Plante contra artefato que não é Go precisa de `-count=1`, e isso mente exatamente como um teste vazio
+
+Em 2026-08-13 isto aconteceu **duas vezes no mesmo dia, por pessoas diferentes, sem uma saber da
+outra** — e as duas quase reportaram testes bons como vazios.
+
+Quando o alvo do plante é um **script**, um YAML, uma fixture — qualquer coisa que o processo do
+`go test` não abre —, o cache de teste **replica o verde por cima do plante**. O Go só invalida cache
+por arquivo Go e por variável de ambiente; um `verify-deploy.sh` alterado não é entrada que ele
+rastreia. A saída é indistinguível de "o plante aplicou e nada reprovou", que é justamente a lista que
+este arquivo manda ler com atenção.
+
+Um dos dois casos foi pior e vale como advertência específica: o plante trocava a string `tail -1`, e o
+**comentário logo acima do código contém esse literal**, escrito para explicar a escolha. O plante
+aplicou, o arquivo mudou, nada ficou vermelho — porque ele editou a explicação, não a regra. Comentário
+bom, que cita o código que explica, **aumenta** a chance de o plante errar o alvo.
+
+Duas exigências, e as duas são baratas:
+
+1. **`-count=1` em toda rodada de plante** que não seja puramente Go.
+2. **O harness afirma que aplicou antes de rodar** — comparar o arquivo com o original, ou casar a
+   linha exata e falhar alto se ela não existir. Plante que não aplica precisa gritar, não sumir no
+   meio de quarenta linhas verdes.
 
 ## Quando um plante não fica vermelho, o conserto costuma ser tirar o lugar onde dá para errar
 
