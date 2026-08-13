@@ -291,6 +291,48 @@ func TestClient_ScrollByUID_ScopedAndPaginated(t *testing.T) {
 	}
 }
 
+// TestClient_ScrollByUID_OffsetAdvances_AcrossSeveralPages is the D-38 counterpart to the repeat
+// tests below: an offset that legitimately changes page over page, more than once, must not trip the
+// new "did it advance" check. ScopedAndPaginated above only ever hands out one non-final offset
+// before the offset that ends the scroll; this one changes it twice, so a comparison bug that flagged
+// any offset in the same shape as a repeat would show up here.
+func TestClient_ScrollByUID_OffsetAdvances_AcrossSeveralPages(t *testing.T) {
+	api := &fakePointAPI{
+		pages: [][]*qdrant.RetrievedPoint{
+			{retrieved(t, 0, "hash-0")},
+			{retrieved(t, 1, "hash-1")},
+			{retrieved(t, 2, "hash-2")},
+		},
+		offsets: []*qdrant.PointId{qdrant.NewIDNum(7), qdrant.NewIDNum(8), nil},
+	}
+	c := newTestClient(t, api)
+
+	records, err := c.ScrollByUID(t.Context(), testTenant, testUID(t))
+	if err != nil {
+		t.Fatalf("ScrollByUID: %v", err)
+	}
+	if got, want := len(records), 3; got != want {
+		t.Errorf("%d record(s), want %d", got, want)
+	}
+	if len(api.scrolls) != 3 {
+		t.Errorf("%d scroll call(s), want 3", len(api.scrolls))
+	}
+}
+
+// TestScrollPageDone_FirstPage_NoPriorOffsetToRepeat is the D-38 edge case named explicitly: the
+// first page of a scroll has no previous offset to compare against (prevOffset is nil), so a
+// non-empty page handing out an offset must not be read as a repeat.
+func TestScrollPageDone_FirstPage_NoPriorOffsetToRepeat(t *testing.T) {
+	page := []*qdrant.RetrievedPoint{retrieved(t, 0, "hash-0")}
+	done, err := scrollPageDone(page, nil, qdrant.NewIDNum(7), "test")
+	if err != nil {
+		t.Fatalf("scrollPageDone: %v", err)
+	}
+	if done {
+		t.Error("scrollPageDone reported done on a first page that handed out an offset to continue from")
+	}
+}
+
 // TestClient_ScrollByUID_RejectsAPointWithNoHash: a point written under the previous contract has no
 // point_hash, and reading it as if it did would make it compare equal to nothing and integral to no
 // one. It is named at the read instead.
@@ -343,6 +385,31 @@ func TestClient_ScrollByUID_EmptyFinalPage_EndsCleanly(t *testing.T) {
 	}
 	if len(records) != 0 {
 		t.Errorf("%d record(s), want 0", len(records))
+	}
+}
+
+// TestClient_ScrollByUID_OffsetRepeats_IsAnErrorNotInfiniteLoop is D-38: a page came back non-empty,
+// but the offset to resume from is the same one this page was just requested with. Reading the page
+// shape alone (non-empty + an offset) would call that "more to fetch" and re-issue the identical
+// request forever. If this test hangs instead of failing, the offset comparison regressed — the fake
+// below would keep answering the same page/offset pair indefinitely.
+func TestClient_ScrollByUID_OffsetRepeats_IsAnErrorNotInfiniteLoop(t *testing.T) {
+	stuck := qdrant.NewIDNum(7)
+	api := &fakePointAPI{
+		pages: [][]*qdrant.RetrievedPoint{
+			{retrieved(t, 0, "hash-0")},
+			{retrieved(t, 1, "hash-1")}, // non-empty, but the offset below never moves past `stuck`
+		},
+		offsets: []*qdrant.PointId{stuck, stuck},
+	}
+	c := newTestClient(t, api)
+
+	got, err := c.ScrollByUID(t.Context(), testTenant, testUID(t))
+	if err == nil {
+		t.Fatalf("ScrollByUID returned %v and no error for an offset that never advanced", got)
+	}
+	if len(api.scrolls) != 2 {
+		t.Errorf("%d scroll call(s), want 2 — a third would mean the repeat went undetected", len(api.scrolls))
 	}
 }
 
@@ -570,6 +637,31 @@ func TestClient_ScrollTenant_EmptyFinalPage_EndsCleanly(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Errorf("%d uid(s), want 0", len(got))
+	}
+}
+
+// TestClient_ScrollTenant_OffsetRepeats_IsAnErrorNotInfiniteLoop mirrors
+// TestClient_ScrollByUID_OffsetRepeats_IsAnErrorNotInfiniteLoop (D-38) for the reader the orphan
+// candidate set and the integrity check are built on: a page shape that looks like "more to fetch"
+// but whose offset never moved past the one this page was requested with. If this test hangs instead
+// of failing, the offset comparison regressed.
+func TestClient_ScrollTenant_OffsetRepeats_IsAnErrorNotInfiniteLoop(t *testing.T) {
+	stuck := qdrant.NewIDNum(7)
+	api := &fakePointAPI{
+		pages: [][]*qdrant.RetrievedPoint{
+			{retrievedWithUID(t, 0, "hash-0", testUID(t))},
+			{retrievedWithUID(t, 1, "hash-1", testUID(t))},
+		},
+		offsets: []*qdrant.PointId{stuck, stuck},
+	}
+	c := newTestClient(t, api)
+
+	got, err := c.ScrollTenant(t.Context(), testTenant)
+	if err == nil {
+		t.Fatalf("ScrollTenant returned %v and no error for an offset that never advanced", got)
+	}
+	if len(api.scrolls) != 2 {
+		t.Errorf("%d scroll call(s), want 2 — a third would mean the repeat went undetected", len(api.scrolls))
 	}
 }
 
