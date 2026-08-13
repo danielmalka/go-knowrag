@@ -77,20 +77,51 @@ elif ! grep -q ':?' <<<"$key"; then
   fail "QDRANT__SERVICE__API_KEY has no ':?' default-is-an-error marker — an unset key would start an unauthenticated Qdrant"
 fi
 
-# 4. The memory limit is NOT checked, and this script says so on every run rather than staying
-# quiet about a check it does not make.
+# 4. The read-only key gets the same three checks, because it fails the same three ways.
+readonly_key=$(grep -E 'QDRANT__SERVICE__READ_ONLY_API_KEY' <<<"$body" | head -1)
+if [ -z "$readonly_key" ]; then
+  fail "QDRANT__SERVICE__READ_ONLY_API_KEY is not set — the MCP server would have to present the administrative key"
+elif ! grep -q '\${' <<<"$readonly_key"; then
+  fail "QDRANT__SERVICE__READ_ONLY_API_KEY is a literal — it must come from the environment"
+elif ! grep -q ':?' <<<"$readonly_key"; then
+  fail "QDRANT__SERVICE__READ_ONLY_API_KEY has no ':?' default-is-an-error marker — an unset key would start a Qdrant with no read-only credential, and the MCP server would need the administrative one"
+fi
+
+# 5. The two keys are different values, and this is the check the whole read-only arrangement rests
+# on. Setting both variables to the same string is not a weaker version of the separation — it is the
+# administrative key wearing a second name, and Qdrant grants the client full write access. Nothing
+# in the compose file can show it: to Qdrant they are two accepted keys, and to this script they are
+# two variable references that both look right.
 #
-# The number is supposed to come from ADR-001, which records none for Qdrant: §6.1 cancelled the
-# headroom measurement because it was budgeting for an embedder that had left the machine, and §8
-# says NFR-6's "Qdrant + embedder ≤ 3 GB" describes a machine that no longer exists. A threshold
-# invented here would be a gate passing against a number nobody measured — which is worse than this
-# line, because this line is visible.
-printf 'NOT CHECKED: the container memory limit. ADR-001 records no figure for Qdrant (§6.1, §8);\n'
-printf '             measure MemAvailable and Qdrant RSS on the deployed host, record it there, and\n'
-printf '             the limit and its check land in this script together.\n'
+# So this is the one check that reads outside the compose file, and only when there is something to
+# read. deploy/.env is gitignored and absent in CI, which means this check does not run there — that
+# is correct rather than a gap, because CI has no keys to compare. It runs on the machine that has
+# them, which is the machine that can get this wrong.
+env_file="$(dirname "$compose")/.env"
+if [ ! -f "$env_file" ]; then
+  printf 'NOT CHECKED: whether the two keys are different values — %s does not exist here.\n' "$env_file"
+  printf '             This check runs on the machine that holds the keys, not in CI.\n'
+else
+  admin_value=$(grep -E '^QDRANT_API_KEY=' "$env_file" | head -1 | cut -d= -f2-)
+  readonly_value=$(grep -E '^QDRANT_READ_ONLY_API_KEY=' "$env_file" | head -1 | cut -d= -f2-)
+  # Values are compared, never printed: this script's output goes to CI logs and terminals.
+  if [ -z "$admin_value" ] || [ -z "$readonly_value" ]; then
+    fail "$env_file leaves QDRANT_API_KEY or QDRANT_READ_ONLY_API_KEY empty — compose would refuse to start, and an empty value is not a key"
+  elif [ "$admin_value" = "$readonly_value" ]; then
+    fail "$env_file sets both keys to the same value — the read-only key is then the administrative key under another name, and the MCP server gets write access"
+  fi
+fi
+
+# 6. The memory limit is NOT checked, and this script says so on every run rather than staying quiet
+# about a check it does not make. It is absent by decision of 2026-08-13, not for want of a
+# measurement: the only number available was NFR-6's budget for two processes sharing the host, and
+# the embedder has left it. See the comment in the compose file itself.
+printf 'NOT CHECKED: the container memory limit, which is absent by decision rather than oversight.\n'
+printf '             Revisit on an OOM kill or a second memory consumer on that host — not because\n'
+printf '             the line is missing.\n'
 
 if [ "$failures" -gt 0 ]; then
   printf '\n%s: %d check(s) failed\n' "$compose" "$failures" >&2
   exit 1
 fi
-printf '%s: image pin, bind addresses and API key all check out\n' "$compose"
+printf '%s: image pin, bind addresses and both API keys check out\n' "$compose"

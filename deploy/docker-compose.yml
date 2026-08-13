@@ -26,6 +26,21 @@ services:
       # missing value a startup error rather than a Qdrant that comes up with authentication off,
       # which is the one failure mode that looks like success from every angle.
       QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:?set QDRANT_API_KEY in deploy/.env}
+      # The read-only key, and it protects against something the admin key's scope does not.
+      #
+      # It is not about who is on the network — that question was settled by decision (ADR-003), and
+      # this key would not change the answer. It is about what the long-lived server process can do
+      # with the credential it holds. The MCP server answers questions built from note text, and note
+      # text is untrusted input by this codebase's own design (cmd/mcp-server wraps every result in a
+      # do-not-follow envelope). A process in that position holding a key that can write is a strictly
+      # larger blast radius than the same process holding one that cannot, no matter who its callers
+      # are.
+      #
+      # Qdrant enforces this server-side, which is the point: the guarantee does not depend on the
+      # client remembering to only read. internal/store has no search method and cmd/mcp-server never
+      # calls a write path, but both are conventions this repository maintains — this is the one line
+      # that survives someone breaking them.
+      QDRANT__SERVICE__READ_ONLY_API_KEY: ${QDRANT_READ_ONLY_API_KEY:?set QDRANT_READ_ONLY_API_KEY in deploy/.env}
     ports:
       # gRPC, the only protocol this codebase speaks (PRD-contrato §2.3b), published on **one
       # interface, named by a variable**.
@@ -46,20 +61,18 @@ services:
       # without a listener. Every published port is a thing to keep verifying.
     volumes:
       - qdrant-storage:/qdrant/storage
-    # There is deliberately **no memory limit here, and its absence is a blocked task, not an
-    # oversight.**
+    # There is deliberately **no memory limit here, and its absence is a decision, not a gap.**
     #
-    # The limit is supposed to come from a number recorded in ADR-001, and ADR-001 records none for
-    # Qdrant: §6.1 cancelled the headroom measurement outright, on the grounds that it was budgeting
-    # for an embedder that had left the machine, and §8 says NFR-6's "RSS combinado Qdrant + embedder
-    # ≤ 3 GB" now "descreve uma máquina que não existe mais". PRD.md's NFR table says the same about
-    # that 3 GB in its own words: the ceiling "não foi recalculado, só ficou folgado", to be
-    # confirmed or corrected in S12 against the real deployment.
+    # The only number available to write is NFR-6's 3 GB, and that budget was measured for two
+    # processes sharing this host. The embedder moved off it, so applying the pair's ceiling to the
+    # survivor would invent a limit — and hand scripts/verify-deploy.sh a threshold to pass against
+    # that nobody measured. A wrong limit here is worse than none: too low and the container is
+    # OOM-killed under exactly the load it was sized for.
     #
-    # Writing `mem_limit: 3g` here would take a budget measured for two processes, apply it to one,
-    # and give scripts/verify-deploy.sh a number to pass against that nobody measured. The next
-    # honest step is a measurement on the running VPS — `MemAvailable` and Qdrant's own RSS under
-    # load — recorded in ADR-001; then the limit and its check land here together.
+    # Measuring the right number was the alternative, and the owner dispensed with it on 2026-08-13.
+    # The evidence backing that call is the service itself: it has run here for weeks, unlimited,
+    # without an incident. Re-open this if that stops being true — an OOM kill, or a second memory
+    # consumer landing on this host — not because the line is missing.
 volumes:
   # Named, so collections survive `docker compose down` and a container restart. Dropping the data
   # is then an explicit `docker compose down -v` — which is also step 2 of the rebuild recovery in
