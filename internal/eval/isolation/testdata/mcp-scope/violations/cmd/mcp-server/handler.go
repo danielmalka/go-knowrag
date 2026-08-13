@@ -1,6 +1,11 @@
 // This tree exists to be scanned, never to be built. It holds one of each escalation route
-// MCPScopeBindingCase forbids, so the case can be shown to fire rather than only to stay green —
+// MCPScopeBindingCase refuses, so the case can be shown to fire rather than only to stay green —
 // the same role internal/archtest/testdata/violation.go plays for the architecture case.
+//
+// Four of the six were written by hand. Two — the `:=` alias and the embedded input — were found by
+// review, against the earlier version of this case that read the source's shape instead of its
+// resolved types, and both passed it clean. They are here because a route that once escaped is the
+// one worth keeping a fixture for.
 //
 // It lives under testdata/, which the go tool ignores, so nothing here is compiled or linted.
 package main
@@ -32,6 +37,24 @@ func laundered(cfg config, in toolInput) retrieval.Query {
 }
 
 func scopeFor(in toolInput) string { return in.Area }
+
+// aliased renames the input on the way in. The declaration carries no type, so nothing about its
+// shape says `toolInput`; only the resolved type does.
+func aliased(cfg config, in toolInput) retrieval.Query {
+	proxy := in
+	return retrieval.Query{Collection: cfg.Collection, TenantID: proxy.TenantID}
+}
+
+// requestCtx embeds the input, so `c.TenantID` is a promoted field and requestCtx declares no JSON
+// tag of its own — invisible to any rule that reads declarations rather than types.
+type requestCtx struct {
+	toolInput
+	deadline int
+}
+
+func embedded(cfg config, c requestCtx) retrieval.Query {
+	return retrieval.Query{Collection: cfg.Collection, TenantID: c.TenantID}
+}
 
 // omitted names no tenant at all, which is a scope this package never decided.
 func omitted(cfg config) retrieval.Query {
