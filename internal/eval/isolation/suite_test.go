@@ -125,10 +125,17 @@ func TestReport_SummaryStatesWhatItDoesNotProve(t *testing.T) {
 		}
 	}
 
-	proves, gaps, split := strings.Cut(summary, "Untouched by every case above")
-	if !split {
-		t.Fatalf("the summary no longer separates what it proves from what it leaves untouched, so "+
-			"neither list can be checked against the paragraph it belongs to:\n%s", summary)
+	// Three paragraphs, cut apart before anything is read, because each names things the others must
+	// not. The MCP qualification is its own paragraph rather than part of what is proven: it mentions
+	// cmd/mcp-server too, so a claim check run over the two together would be satisfied by the
+	// qualification alone — the whole claim could then be deleted with this test green. A defect
+	// plant found exactly that.
+	claim, rest, splitClaim := strings.Cut(summary, "The MCP claim is made over")
+	qualification, gaps, splitGaps := strings.Cut(rest, "Untouched by every case above")
+	if !splitClaim || !splitGaps {
+		t.Fatalf("the summary no longer separates what it proves, how far the MCP claim reaches, and "+
+			"what it leaves untouched, so no list can be checked against the paragraph it belongs "+
+			"to:\n%s", summary)
 	}
 	for _, want := range []string{
 		"stats",                 // counts every tenant when none is named, by design
@@ -144,7 +151,7 @@ func TestReport_SummaryStatesWhatItDoesNotProve(t *testing.T) {
 	// still be disclaimed. Both halves are required: the first alone would pass over a summary that
 	// said it twice and in opposite directions, which is worse than either sentence on its own.
 	for _, want := range []string{"internal/ingest", "cmd/mcp-server"} {
-		if !strings.Contains(proves, want) {
+		if !strings.Contains(claim, want) {
 			t.Errorf("the summary does not say %q is proven, so a reader who needs to know whether it "+
 				"is covered cannot find out from PASS:\n%s", want, summary)
 		}
@@ -162,7 +169,7 @@ func TestReport_SummaryStatesWhatItDoesNotProve(t *testing.T) {
 	// than driving the server. A summary that claimed it without that qualification would be selling
 	// a build-time rule as a call that was made and refused.
 	for _, want := range []string{"source", "main package"} {
-		if !strings.Contains(proves, want) {
+		if !strings.Contains(qualification, want) {
 			t.Errorf("the summary claims the MCP scope binding without saying it is read off that "+
 				"command's source, so PASS reads as an escalation attempt this suite made:\n%s", summary)
 		}
