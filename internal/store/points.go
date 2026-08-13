@@ -192,14 +192,18 @@ func (c *Client) ScrollByUID(ctx context.Context, tenantID string, uid uuid.UUID
 //
 // The three callers share this exact decision and change together: touch the stop condition here,
 // not in one of them.
-func scrollPageDone(page []*qdrant.RetrievedPoint, next *qdrant.PointId, context string) (bool, error) {
+//
+// read names what was being read, for the error message. It is not called `context` because this
+// file imports the context package, and a parameter by that name shadows it for anyone who later
+// needs a deadline in here.
+func scrollPageDone(page []*qdrant.RetrievedPoint, next *qdrant.PointId, read string) (bool, error) {
 	if next == nil {
 		return true, nil
 	}
 	if len(page) == 0 {
 		return false, fmt.Errorf(
 			"%s: the scroll returned an empty page and an offset to continue from, so this read "+
-				"would report part of the collection as all of it", context)
+				"would report part of the collection as all of it", read)
 	}
 	return false, nil
 }
@@ -307,6 +311,11 @@ func (c *Client) Stats(ctx context.Context, tenantID string) (Stats, error) {
 // still carries an offset is an error, not silent end-of-scroll — this is the read the orphan
 // candidate set and the integrity check are built on, so a partial snapshot here reads as a smaller,
 // still-plausible tenant rather than a wrong one.
+//
+// That consequence is a claim about another package, so here is where to check it: this map becomes
+// prefetchedStore in internal/ingest/prefetch.go, whose ScrollByUID answers "absent from the map" as
+// "this uid has no points" — which is what internal/ingest/note.go reads as a note needing a full
+// re-embed. Truncating here does not delete anything extra; it silently re-does work.
 func (c *Client) ScrollTenant(ctx context.Context, tenantID string) (map[uuid.UUID][]ingest.PointRecord, error) {
 	out := map[uuid.UUID][]ingest.PointRecord{}
 	var offset *qdrant.PointId
