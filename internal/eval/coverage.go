@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 )
 
 // CoverageGroup is one row of the weighted coverage table: a set of areas that share a per-area
@@ -26,6 +27,75 @@ type CoverageTable struct {
 	MinTotal int             `yaml:"min_total" json:"min_total"`
 	MaxTotal int             `yaml:"max_total" json:"max_total"`
 	Groups   []CoverageGroup `yaml:"groups" json:"groups"`
+}
+
+// AreaStatus is one area's standing against the table: what it holds and what the table asks of it.
+//
+// It is a report and a work queue at once. ValidateCoverage answers "is this set legal", which is
+// the question a gate asks; this answers "where is it short", which is the question an author asks,
+// and the two must not be different derivations of the same counts.
+type AreaStatus struct {
+	Area  string
+	Group string
+	Have  int
+	Min   int
+	Max   int
+}
+
+// Needs is how many more questions this area has to gain before it satisfies its minimum. Zero
+// means the minimum is met, or that the group declares none.
+func (a AreaStatus) Needs() int {
+	if a.Min > a.Have {
+		return a.Min - a.Have
+	}
+	return 0
+}
+
+// Full reports whether the table forbids another question in this area. A Max of zero is "no
+// maximum" (see CoverageGroup), so it is never full.
+func (a AreaStatus) Full() bool { return a.Max > 0 && a.Have >= a.Max }
+
+// CoverageStatus reports every area the table declares, neediest first.
+//
+// The order is the whole point, and it is a single order rather than one for display and one for
+// selection: an author who is shown "research is 5 short" and then handed a note from a full area
+// has been given two answers to one question. Areas that are full sort last, so a caller that walks
+// this list and stops at the first area it can use never has to re-derive which areas are eligible.
+//
+// Within equal need, fewer questions first, then the area name — so two runs over the same file
+// produce the same order and the same first pick. Areas the table does not list do not appear:
+// a question in one is a violation ValidateCoverage reports, not a shortfall to fill.
+func CoverageStatus(questions []GoldenQuestion, table CoverageTable) []AreaStatus {
+	counts := map[string]int{}
+	for _, q := range questions {
+		counts[q.Area]++
+	}
+
+	var out []AreaStatus
+	for _, g := range table.Groups {
+		for _, area := range g.Areas {
+			out = append(out, AreaStatus{
+				Area: area, Group: g.Name, Have: counts[area], Min: g.Min, Max: g.Max,
+			})
+		}
+	}
+
+	slices.SortFunc(out, func(a, b AreaStatus) int {
+		if a.Full() != b.Full() {
+			if a.Full() {
+				return 1
+			}
+			return -1
+		}
+		if d := b.Needs() - a.Needs(); d != 0 {
+			return d
+		}
+		if d := a.Have - b.Have; d != 0 {
+			return d
+		}
+		return strings.Compare(a.Area, b.Area)
+	})
+	return out
 }
 
 // ValidateCoverage checks a question set against its table, reporting every violation at once.
