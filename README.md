@@ -298,7 +298,8 @@ de verdade**, e por isso exigem `--yes` *e* stdin num terminal — mais rígido 
 pendurado esperando resposta é pior que qualquer das duas respostas.
 
 ```bash
-cp scripts/drill.env.example scripts/drill.env   # preencher; .env* é gitignored
+cp scripts/drill.env.example scripts/drill.env   # preencher
+git check-ignore -v scripts/drill.env            # confira que está ignorado, não presuma
 set -a; . scripts/drill.env; set +a
 
 ./scripts/recovery-drill.sh --yes                        # derruba o índice inteiro e reconstrói

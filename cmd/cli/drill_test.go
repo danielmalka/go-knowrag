@@ -1,12 +1,43 @@
+// THE SCRIPTS THESE TESTS DRIVE ARE NOT GO SOURCE, AND THAT ALMOST MADE THIS SUITE LIE.
+//
+// `go test` caches a result and replays it while its recorded inputs are unchanged. Its idea of an
+// input is the test binary plus the files the test process opened — and a shell script that is only
+// ever handed to exec.Command is opened by bash, in another process, where the go command cannot see
+// it. So editing scripts/recovery-drill.sh and re-running changes nothing: the previous PASS is
+// replayed, `(cached)`, without the test executing at all.
+//
+// This is not theoretical and it is not a nuisance. It was reproduced twice on 2026-08-13, by two
+// people who did not know of each other: delete `preflight || exit 1` — the one line that stops a
+// failed preflight from destroying an index with no backup — run `go test ./cmd/cli/`, and read
+// PASS. With -count=1 six of eight subtests fail and one of them destroys the volume against the
+// fake. The same replay covered the --yes/tty gate and the count comparison.
+//
+// THE FIX IS readScriptForCacheKey, AND EVERY PATH INTO THIS FILE GOES THROUGH IT: each run reads
+// its script with os.ReadFile before exec'ing it, which puts the file in the test's input set, so a
+// changed script invalidates the cached result by itself.
+//
+// Why this and not `-count=1` in the Makefile: the flag protects one command line, and the runs that
+// matter are the ones nobody typed carefully — an IDE's run button, a bare `go test ./...`, a future
+// Makefile target, a `go test` inside a git hook. A flag is also undone by editing an unrelated line
+// of the Makefile, with nothing to notice. Reading the file protects all of them and cannot be
+// removed without deleting a named function that says why it exists.
+//
+// WHAT IT DOES NOT PROTECT: only what these tests actually open. The fakes are Go string constants
+// in drill_fakes_test.go, so they are covered already — as package source, not by this mechanism.
+// Anything else the scripts consult at run time — the system's bash, ssh or awk, a change in
+// coreutils — is invisible to the cache and to this mechanism, and a stale PASS after such a change
+// is still possible. `-count=1` is the answer for those, and it is what the plant harness uses.
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -18,73 +49,6 @@ const (
 	recoveryDrillScript = "../../scripts/recovery-drill.sh"
 	pruneDrillScript    = "../../scripts/prune-drill.sh"
 )
-
-// fakeSSH stands in for the ssh that reaches the machine running Qdrant. It records every remote
-// command it is handed — that log, and not the script's own output, is what the tests assert on:
-// what the script *printed* it would do is not evidence of what it did.
-//
-// It answers the three reads scripts/recovery-drill.sh performs (the container id, the volume name,
-// the space) from environment variables, so each test decides what the machine looks like.
-const fakeSSH = `#!/usr/bin/env bash
-printf '%s\n' "$2" >>"$FAKE_SSH_LOG"
-if [ "${FAKE_SSH_FAIL:-0}" = 1 ]; then exit 255; fi
-case "$2" in
-  *"compose ps -q"*)
-    # Counted, because the drill discovers twice — once in the preflight and once inside the
-    # destruction — and FAKE_CID_SECOND is how a test makes the container disappear between them.
-    c=$(cat "$FAKE_PS_COUNT" 2>/dev/null || printf 0)
-    c=$((c + 1)); printf '%s' "$c" >"$FAKE_PS_COUNT"
-    if [ "$c" -ge 2 ] && [ -n "${FAKE_CID_SECOND+set}" ]; then printf '%s\n' "$FAKE_CID_SECOND"
-    else printf '%s\n' "${FAKE_CID-cid-0001}"; fi ;;
-  *"docker inspect"*) printf '%s\n' "${FAKE_VOLUME-qdrant_storage}" ;;
-  # ${VAR-default}, never ${VAR:-default}: a test that sets FAKE_DU_KB="" is saying the machine
-  # answered with nothing, and the colon form would hand it the default instead — which is how the
-  # first version of this fake reported a passing disk check over a size that was never read.
-  *"du -sk"*)         printf '%s\t/qdrant/storage\n' "${FAKE_DU_KB-1024}" ;;
-  *"df -Pk"*)
-    printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n'
-    printf '/dev/vda1 200000 1024 %s 1%% /\n' "${FAKE_DF_KB-100000}" ;;
-  *"volume rm"*)      if [ "${FAKE_VOLUME_RM_FAIL:-0}" = 1 ]; then exit 1; fi ;;
-  *"compose up -d"*)  if [ "${FAKE_UP_FAIL:-0}" = 1 ]; then exit 1; fi ;;
-esac
-exit 0
-`
-
-// fakeKnowrag stands in for the CLI. `stats` answers FAKE_STATS_BEFORE the first time and
-// FAKE_STATS_AFTER every time after that, which is what lets a test say "the index came back
-// smaller" without anything real being destroyed.
-//
-// FAKE_STATS_SEQUENCE=1 adds a third answer, back at FAKE_STATS_BEFORE: scripts/prune-drill.sh
-// counts three times — before, after the prune, after the note is restored — and its full cycle
-// only closes if the third read is back where the first was.
-const fakeKnowrag = `#!/usr/bin/env bash
-printf '%s\n' "$*" >>"$FAKE_CLI_LOG"
-case "$1" in
-  stats)
-    n=$(cat "$FAKE_STATS_COUNT" 2>/dev/null || printf 0)
-    n=$((n + 1))
-    printf '%s' "$n" >"$FAKE_STATS_COUNT"
-    if [ "$n" = 1 ]; then printf '%s\n' "$FAKE_STATS_BEFORE"
-    elif [ "$n" = 2 ]; then printf '%s\n' "$FAKE_STATS_AFTER"
-    elif [ "${FAKE_STATS_SEQUENCE:-0}" = 1 ]; then printf '%s\n' "$FAKE_STATS_BEFORE"
-    else printf '%s\n' "$FAKE_STATS_AFTER"; fi
-    exit 0 ;;
-  schema)
-    if [ "${FAKE_SCHEMA_FAIL:-0}" = 1 ]; then exit 1; fi
-    printf 'interno: ok\n'; exit 0 ;;
-  ingest)
-    if [ "${2:-}" = "--dry-run" ]; then
-      if [ "${FAKE_DRYRUN_FAIL:-0}" = 1 ]; then printf 'embedder handshake failed\n' >&2; exit 1; fi
-      printf '730 note(s): skipped=730\norphans: none\n'; exit 0
-    fi
-    case "$*" in
-      *--prune*) printf '%s\n' "${FAKE_PRUNE_REPORT-}"; exit "${FAKE_PRUNE_CODE:-0}" ;;
-    esac
-    if [ "${FAKE_INGEST_FAIL:-0}" = 1 ]; then exit 1; fi
-    printf '%s\n' "${FAKE_INGEST_REPORT-730 note(s): upserted=730}"; exit 0 ;;
-esac
-exit 0
-`
 
 // drillRun is one execution of a script against the fakes: what it exited with, everything it
 // printed, and — the part the dangerous assertions read — what actually reached ssh and the CLI.
@@ -164,6 +128,7 @@ func runDrill(t *testing.T, script string, args []string, env map[string]string,
 		"FAKE_CLI_LOG":              filepath.Join(dir, "cli.log"),
 		"FAKE_STATS_COUNT":          filepath.Join(dir, "stats.count"),
 		"FAKE_PS_COUNT":             filepath.Join(dir, "ps.count"),
+		"FAKE_SCHEMA_COUNT":         filepath.Join(dir, "schema.count"),
 		"FAKE_STATS_BEFORE":         "interno      points: 4210     uids: 730",
 		"FAKE_STATS_AFTER":          "interno      points: 4210     uids: 730",
 		"KNOWRAG_DRILL_SSH":         "drill-fixture",
@@ -186,9 +151,15 @@ func runDrill(t *testing.T, script string, args []string, env map[string]string,
 	if err != nil {
 		t.Fatalf("resolving %s: %v", script, err)
 	}
+	readScriptForCacheKey(t, abs)
 	cmd := exec.Command("bash", append([]string{abs}, args...)...) // #nosec G204 -- fixed scripts, test-generated arguments
 	cmd.Env = envv
 	cmd.Dir = dir
+	// Its own process group, always — not only for the tests that signal. Without it the script runs
+	// in the test binary's group, and anything that signals a group reaches `go test` itself: the
+	// fake that signals the drill's leader killed the whole test run with exit 144 before this line
+	// existed. A script under test should not be able to reach its harness.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if tty {
 		cmd.Stdin = openPTY(t)
 	}
@@ -205,6 +176,25 @@ func runDrill(t *testing.T, script string, args []string, env map[string]string,
 		run.code = exitErr.ExitCode()
 	}
 	return run
+}
+
+// readScriptForCacheKey opens the script so the go command counts it among this test's inputs, and
+// a stale PASS cannot survive an edit to it. The whole reasoning is at the top of this file; the
+// short version is that bash opening the script in another process is invisible to the test cache,
+// and the guards these scripts carry are the kind whose removal must never replay green.
+//
+// The assertion is small on purpose — its job is the read, not the check. It is here rather than
+// nothing at all because a function that opens a file and ignores it reads like something to delete,
+// and deleting it silently restores the replay.
+func readScriptForCacheKey(t *testing.T, abs string) {
+	t.Helper()
+	body, err := os.ReadFile(abs) // #nosec G304 -- one of the two script paths this file declares
+	if err != nil {
+		t.Fatalf("reading %s: %v", abs, err)
+	}
+	if !bytes.HasPrefix(body, []byte("#!/usr/bin/env bash")) {
+		t.Fatalf("%s does not start with the bash shebang; these tests run it with bash", abs)
+	}
 }
 
 func readIfPresent(path string) string {
@@ -336,6 +326,30 @@ func TestRecoveryDrill_RediscoversBeforeDeleting(t *testing.T) {
 	}
 	if !strings.Contains(run.output, "refusing to delete a volume whose name this script had to guess") {
 		t.Errorf("output did not name the refusal; got:\n%s", run.output)
+	}
+}
+
+// TestRecoveryDrill_WaitsForQdrantToComeBack is the one slow test in this file, and it costs a real
+// five seconds because the probe's retry interval is five seconds. It stays anyway.
+//
+// Every other test here runs with KNOWRAG_DRILL_UP_TIMEOUT=0, where the loop dies on the first
+// refusal — behaviour a single `knowrag schema apply || die` would reproduce exactly. So without
+// this case the retry is an untested guard, and it guards the NORMAL case: the container was
+// recreated seconds earlier, and a drill that gave up on the first probe would leave the index empty
+// over a Qdrant that was about to answer. That is the second-worst outcome this script has.
+//
+// ponytail: not sped up with a configurable interval. That knob would exist only for this test, and
+// a retry interval nobody tunes in production is not a setting.
+func TestRecoveryDrill_WaitsForQdrantToComeBack(t *testing.T) {
+	run := runDrill(t, recoveryDrillScript, []string{"--yes"}, map[string]string{
+		"FAKE_SCHEMA_FAIL_TIMES":   "1",
+		"KNOWRAG_DRILL_UP_TIMEOUT": "60",
+	}, true)
+	if run.code != 0 {
+		t.Fatalf("the drill gave up on a Qdrant that answered on the second try; output:\n%s", run.output)
+	}
+	if n := strings.Count(run.cliLog, "schema apply"); n < 2 {
+		t.Errorf("the probe ran %d time(s); a refusal has to be retried, not fatal; cli log:\n%s", n, run.cliLog)
 	}
 }
 

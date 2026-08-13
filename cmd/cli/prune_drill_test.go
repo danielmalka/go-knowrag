@@ -2,9 +2,12 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // The reports the fake CLI hands back, in internal/ingest/report.go's exact shape — orphanLines
@@ -115,6 +118,16 @@ func TestPruneDrill_RefusesAReportItDidNotSetUp(t *testing.T) {
 			"730 note(s): skipped=730\norphans: not scanned — the index snapshot could not be read, " +
 				"so this run cannot say whether any note was deleted",
 			"did not report pessoal/areas/nota.md as an orphan"},
+		// The window the exit status cannot close: a run that was interrupted after printing a report
+		// that otherwise passes every guard here — our note, alone, with its point count. The only
+		// thing separating it from a legitimate report is the phrase internal/ingest/report.go's
+		// String appends when Report.Interrupted is set, so that phrase is what gets read.
+		{"the ingestion was interrupted but printed a complete-looking report",
+			"730 note(s): skipped=729 — interrupted, the remaining notes were not started; " +
+				"the next run converges\n" +
+				"orphans: 1 note(s) deleted from the vault, 6 point(s) still indexed; run --prune --yes to remove\n" +
+				"  - pessoal/areas/nota.md (6 point(s), uid 7c9e6679-7425-40de-944b-e07fc1f90ae7)",
+			"describes a scan that never finished"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env, noteState := pruneFixture(t, map[string]string{"FAKE_INGEST_REPORT": tc.report})
@@ -219,6 +232,179 @@ func TestPruneDrill_FailsWhenTheIndexDoesNotComeBack(t *testing.T) {
 	}
 	if noteState() != "present" {
 		t.Errorf("the note is not on disk either")
+	}
+}
+
+// TestPruneDrill_RestoresTheNoteOnASignal delivers a REAL signal to the running drill, to the whole
+// process group, which is what a terminal Ctrl-C does. Every other failure path in this file is
+// simulated by an environment variable that forces an exit code; this one is the only place the
+// restore is proven against the event it was written for.
+//
+// The signal lands while the note is out of the vault: the fake ingest sleeps, and the test waits
+// for the stash file to exist before signalling, so a timing change cannot quietly turn this into a
+// test of the phases before the move.
+//
+// It is launched with Setpgid because os/exec would otherwise put the script in the test binary's
+// own process group, and signalling that group kills the test. That is also why this is a Go test
+// and not a shell one: a script backgrounded from a shell with `&` enters with SIGINT set to
+// SIG_IGN, and bash cannot trap a signal inherited as ignored — an experiment run that way reports
+// an INT trap that never fires and a script that sails past its dead child, both artifacts of the
+// launcher rather than facts about this drill.
+func TestPruneDrill_RestoresTheNoteOnASignal(t *testing.T) {
+	for _, sig := range []syscall.Signal{syscall.SIGINT, syscall.SIGTERM} {
+		t.Run(sig.String(), func(t *testing.T) {
+			dir := t.TempDir()
+			bin := filepath.Join(dir, "bin")
+			if err := os.MkdirAll(bin, 0o750); err != nil {
+				t.Fatalf("creating the fake bin dir: %v", err)
+			}
+			writeFake(t, bin, "ssh", fakeSSH)
+			writeFake(t, bin, "knowrag", fakeKnowrag)
+
+			vaultRoot := filepath.Join(dir, "vault")
+			if err := os.MkdirAll(filepath.Join(vaultRoot, "areas"), 0o750); err != nil {
+				t.Fatalf("creating the fixture vault: %v", err)
+			}
+			note := filepath.Join(vaultRoot, "areas", "nota.md")
+			if err := os.WriteFile(note, []byte("---\ntitle: nota\n---\n\ncorpo\n"), 0o600); err != nil {
+				t.Fatalf("writing the fixture note: %v", err)
+			}
+
+			state := filepath.Join(dir, "state")
+			env := map[string]string{
+				"PATH":                       bin + ":" + os.Getenv("PATH"),
+				"HOME":                       dir,
+				"FAKE_SSH_LOG":               filepath.Join(dir, "ssh.log"),
+				"FAKE_CLI_LOG":               filepath.Join(dir, "cli.log"),
+				"FAKE_STATS_COUNT":           filepath.Join(dir, "stats.count"),
+				"FAKE_PS_COUNT":              filepath.Join(dir, "ps.count"),
+				"FAKE_STATS_BEFORE":          "interno      points: 4210     uids: 730",
+				"FAKE_STATS_AFTER":           "interno      points: 4204     uids: 729",
+				"FAKE_INGEST_REPORT":         oneOrphanReport,
+				"FAKE_PRUNE_REPORT":          prunedReport,
+				"FAKE_INGEST_SLEEP":          "30",
+				"KNOWRAG_VAULT_PESSOAL_PATH": vaultRoot,
+				"KNOWRAG_DRILL_STATE_DIR":    state,
+			}
+			envv := make([]string, 0, len(env))
+			for k, v := range env {
+				envv = append(envv, k+"="+v)
+			}
+
+			abs, err2 := filepath.Abs(pruneDrillScript)
+			if err2 != nil {
+				t.Fatalf("resolving %s: %v", pruneDrillScript, err2)
+			}
+			readScriptForCacheKey(t, abs)
+
+			cmd := exec.Command("bash", abs, "--yes", "pessoal", "areas/nota.md") // #nosec G204 -- fixed script, fixture arguments
+			cmd.Env = envv
+			cmd.Dir = dir
+			cmd.Stdin = openPTY(t)
+			// An *os.File, deliberately, and not a strings.Builder. Given anything that is not a File,
+			// os/exec builds an os.Pipe and a goroutine copying out of it, and Wait blocks until that
+			// copy ends — which is when every holder of the write end has closed it. The fake's `sleep`
+			// grandchild inherits that end, so a Wait here would be waiting on the sleep rather than on
+			// the script, and this test hung for 90 s under parallel load before the file replaced the
+			// builder. A file has no such reader.
+			outPath := filepath.Join(dir, "drill.out")
+			outFile, err := os.Create(outPath) // #nosec G304 -- a path under t.TempDir()
+			if err != nil {
+				t.Fatalf("creating the output file: %v", err)
+			}
+			defer func() { _ = outFile.Close() }()
+			cmd.Stdout = outFile
+			cmd.Stderr = outFile
+			out := func() string { return readIfPresent(outPath) }
+			// Its own process group, so the signal below reaches the script and its children the way
+			// a terminal reaches a foreground job — and reaches nothing of this test's.
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+			if err := cmd.Start(); err != nil {
+				t.Fatalf("starting the drill: %v", err)
+			}
+
+			// Signal only once the note is actually out of the vault. Sleeping a fixed time here would
+			// make this a test of whatever phase happened to be running.
+			deadline := time.Now().Add(20 * time.Second)
+			for {
+				if _, err := os.Stat(note); os.IsNotExist(err) {
+					break
+				}
+				if time.Now().After(deadline) {
+					_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+					t.Fatalf("the drill never moved the note aside; output:\n%s", out())
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+
+			if err := syscall.Kill(-cmd.Process.Pid, sig); err != nil {
+				t.Fatalf("signalling the process group: %v", err)
+			}
+
+			// Bounded, because the interesting failure is "the signal did not stop it" and an unbounded
+			// Wait reports that as a suite that sits there for the length of the fake's sleep. A working
+			// signal returns here in milliseconds.
+			done := make(chan error, 1)
+			go func() { done <- cmd.Wait() }()
+			var waitErr error
+			select {
+			case waitErr = <-done:
+			case <-time.After(20 * time.Second):
+				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				<-done
+				t.Fatalf("the drill was still running 20s after %v; output:\n%s", sig, out())
+			}
+
+			if _, err := os.Stat(note); err != nil {
+				t.Fatalf("THE NOTE DID NOT COME BACK after %v: %v\noutput:\n%s", sig, err, out())
+			}
+			if waitErr == nil {
+				t.Errorf("the drill exited 0 after being interrupted; output:\n%s", out())
+			}
+			// The rule internal/ingest/prune.go enforces one layer down, restated here: a run that was
+			// stopped before it finished looking must never reach the deletion.
+			if strings.Contains(readIfPresent(filepath.Join(dir, "cli.log")), "--prune") {
+				t.Errorf("an interrupted drill went on to prune; cli log:\n%s",
+					readIfPresent(filepath.Join(dir, "cli.log")))
+			}
+		})
+	}
+}
+
+// TestPruneDrill_ASignalBetweenCommandsStopsTheDrill is the deterministic half of the signal
+// coverage, and it is the case that was actually broken.
+//
+// A trap handler is not a stop. Bash runs a pending trap at the next command boundary and then
+// RESUMES the script, so `trap restore INT TERM` — the handler with no exit — put the note back and
+// carried on into the next phase with the drill still running. The handlers exit for that reason.
+//
+// The window is hit deterministically here rather than by wall clock: the fake signals the process
+// group leader and returns 0, so bash is holding a pending signal at a command boundary with a
+// perfectly successful child. TestPruneDrill_RestoresTheNoteOnASignal covers the other window — a
+// signal landing while the child runs — and it catches this defect only about one run in twelve,
+// measured, which is why both exist.
+func TestPruneDrill_ASignalBetweenCommandsStopsTheDrill(t *testing.T) {
+	for name, sig := range map[string]string{"TERM": "TERM", "INT": "INT"} {
+		t.Run(name, func(t *testing.T) {
+			env, noteState := pruneFixture(t, map[string]string{
+				"FAKE_SIGNAL_LEADER":  sig,
+				"FAKE_STATS_SEQUENCE": "1",
+			})
+			run := runPruneDrill(t, []string{"--yes", "pessoal", "areas/nota.md"}, env, true)
+
+			if strings.Contains(run.output, "FAKE COULD NOT SIGNAL THE LEADER") {
+				t.Fatalf("the fake never delivered the signal, so this test proved nothing:\n%s", run.output)
+			}
+			if run.code == 0 {
+				t.Fatalf("the drill ran to completion through a %s; output:\n%s", sig, run.output)
+			}
+			if strings.Contains(run.cliLog, "--prune") {
+				t.Errorf("a signalled drill went on to prune; cli log:\n%s", run.cliLog)
+			}
+			if noteState() != "present" {
+				t.Errorf("the note did not come back")
+			}
+		})
 	}
 }
 

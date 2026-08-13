@@ -9,10 +9,30 @@
 # It is far simpler than scripts/recovery-drill.sh and follows the same rule: counts before, counts
 # after, and a difference is the verdict rather than a footnote.
 #
-# THE NOTE IS MOVED ASIDE, NOT DELETED, and it is moved back by a trap on every exit path including
-# a Ctrl-C. To the vault scan the two are the same event — the file is not there — so the drill gets
-# the real behaviour without asking anyone to delete something they wrote. The restore is also what
-# the last phase proves worked: the index has to come back to the exact numbers it started with.
+# THE NOTE IS MOVED ASIDE, NOT DELETED. To the vault scan the two are the same event — the file is
+# not there — so the drill gets the real behaviour without asking anyone to delete something they
+# wrote. The restore is also what the last phase proves worked: the index has to come back to the
+# exact numbers it started with.
+#
+# HOW THE NOTE GETS BACK, measured rather than assumed (cmd/cli/prune_drill_test.go delivers real
+# signals to the process group, which is what a terminal Ctrl-C does):
+#
+#   - `trap restore EXIT` is the whole mechanism, and it is the only trap installed. Ordinary
+#     failures reach it because every dangerous step below is behind `|| die` and `die` calls
+#     `exit 1`. Signals reach it because bash runs the EXIT trap when it dies of an untrapped one.
+#   - There is deliberately NO `INT`/`TERM` handler; the note next to the trap says what that cost
+#     when there was one. `restore` is idempotent anyway (`[ -f "$stash" ]`).
+#   - Dropping EXIT is caught by every failure path in cmd/cli/prune_drill_test.go, signals included.
+#
+# Two things this does NOT cover, both real:
+#
+#   - A signal inherited as ignored cannot be trapped at all (bash's rule, not this script's). A run
+#     started with `&` from a non-interactive shell, or under `nohup`, enters with SIGINT ignored;
+#     a group SIGINT then kills `knowrag` while this shell walks on with a zero status. The guards in
+#     phase 3 are what stop that from reaching the prune — they demand evidence in the report rather
+#     than accepting its absence, and one of them reads whether the report calls itself interrupted.
+#   - SIGKILL, which no trap sees. The stash path is printed and written to the transcript before the
+#     note moves, so the recovery is a `mv` the operator can read off either.
 #
 # WHAT THIS DRILL DOES NOT PROVE — also printed on every run:
 #   - that a note deleted *for real* behaves the same. It is the same event to vault.ScanVault, but
@@ -145,7 +165,20 @@ EOF
   [ -t 0 ] || die "stdin is not a terminal. This needs a human watching. Nothing was changed"
 
   stash="$KNOWRAG_DRILL_STATE_DIR/$run_id-$(basename "$note")"
-  trap restore EXIT INT TERM
+  # EXIT only, and the absence of INT and TERM here is the measured result of getting this wrong
+  # twice on 2026-08-13.
+  #
+  # bash runs the EXIT trap when it dies of a signal it has not trapped, so `trap restore EXIT`
+  # already covers Ctrl-C: no handler means bash takes the default action, dies, and restores on the
+  # way out. Adding `INT TERM` to this line bought nothing — a plant that removed them left every
+  # test green — and it cost a real defect, because a trap handler is not a stop: bash runs a pending
+  # trap at the next command boundary and then RESUMES the script. `trap restore INT TERM` therefore
+  # put the note back and carried on into the next phase with the drill still running, which
+  # cmd/cli/prune_drill_test.go caught as a run still alive 20 s after a SIGTERM.
+  #
+  # So the shape that is dangerous is specifically a signal handler that restores without exiting.
+  # Not having one cannot fail that way. If a handler is ever added here it has to end in `exit`.
+  trap restore EXIT
   mv "$note_path" "$stash" || die "could not move $note_path aside"
   say "== 2: $note is out of the vault (parked at $stash) =="
 
@@ -155,6 +188,24 @@ EOF
   local report
   report=$(knowrag ingest --tenant "$tenant" 2>&1) || die "the ingestion failed before anything was pruned: $report"
   printf '%s\n' "$report" | tee -a "$transcript"
+
+  # The exit status above is necessary and NOT sufficient, and this line is why. A group SIGINT can
+  # reach `knowrag` while leaving this shell running with a zero status — measured on 2026-08-13, in
+  # the case where the script was entered with SIGINT already ignored (backgrounded with `&` from a
+  # non-interactive shell, `nohup`, some runners): bash cannot trap a signal inherited as ignored, so
+  # neither the trap below nor `|| die` fires, and the run walks on to the prune.
+  #
+  # An empty or truncated report is caught by the greps that follow, because they demand evidence
+  # rather than accepting its absence. What they would NOT catch is the narrow window where the
+  # interrupt landed after a complete-looking report was printed. This closes it by reading what the
+  # report says about itself: internal/ingest/report.go's String appends this phrase to the summary
+  # whenever Report.Interrupted is set.
+  #
+  # It is the same rule internal/ingest/prune.go enforces one layer down for its own reasons: not
+  # having finished looking never authorizes deleting.
+  if printf '%s\n' "$report" | grep -qF 'interrupted, the remaining notes were not started'; then
+    die "the ingestion was interrupted, so its orphan list describes a scan that never finished. Nothing was pruned"
+  fi
   printf '%s\n' "$report" | grep -qF "  - $vault/$note (" \
     || die "the run did not report $vault/$note as an orphan. Nothing was pruned"
   # Exactly one. The count is on the summary line — "orphans: N note(s) deleted from the vault" —
@@ -194,7 +245,7 @@ EOF
 
   say "== 6: putting the note back =="
   restore
-  trap - EXIT INT TERM
+  trap - EXIT
   stash=""
   knowrag ingest --tenant "$tenant" >>"$transcript" 2>&1 || die "the restoring ingestion failed — $note is back on disk but not back in the index; rerun 'knowrag ingest --tenant $tenant'"
   take_stats "$restored_file" "after restoring"

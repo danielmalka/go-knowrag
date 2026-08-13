@@ -196,11 +196,21 @@ preflight() {
   fi
 
   # The strongest reconstruct-ability check available, and it is one command because the dry run
-  # already exercises every leg of the rebuild except the writing: cmd/cli/ingest.go's ingestScans
-  # runs embedder.Handshake before ingest.Orchestrate in EVERY mode, dry run included, and
-  # runIngest scans every configured vault and opens the same Qdrant connection a real run opens.
-  # So a green dry run means the embedder answered and confirmed its backend, every vault was
-  # readable and passed the scan contract, and Qdrant is reachable from this host.
+  # already exercises every leg of the rebuild except the writing. It proves more than "the
+  # connections open", and the three places to check that are worth naming:
+  #
+  #   - cmd/cli/ingest.go, ingestScans: embedder.Handshake runs before ingest.Orchestrate in EVERY
+  #     mode, dry run included, so the embedder answered AND confirmed the backend revision.
+  #   - cmd/cli/ingest.go, runIngest: every configured vault is scanned and has to pass the scan
+  #     contract, in every mode.
+  #   - internal/ingest/note.go, ProcessNote: `d.Store.ScrollByUID` sits ABOVE the `if d.DryRun`
+  #     that ends the note, and chunking above that calls the HTTP token counter. So a dry run is a
+  #     real round trip to Qdrant and to the embedder PER NOTE — roughly 730 of each — not one
+  #     connection opened at startup. A Qdrant that accepts a connection and then fails on reads is
+  #     caught here, which is the failure this preflight would otherwise have waved through.
+  #
+  # What it still does not prove is the write path: nothing is upserted, so a Qdrant that reads fine
+  # and refuses writes fails during phase 4, not here.
   say "  reconstruct-ability: running 'knowrag ingest --dry-run' (writes nothing) ..."
   if ! knowrag ingest --dry-run --tenant "$tenant" >>"$transcript" 2>&1; then
     check_fail "'knowrag ingest --dry-run' failed — the embedder, a vault or Qdrant is not in a state that could rebuild the index (transcript: $transcript)"
