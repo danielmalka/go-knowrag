@@ -178,6 +178,13 @@ func (s *mcpScopeScan) collectInputTypes(pkg *types.Package) {
 // The embedding walk is why this asks the resolved type rather than the written one: a
 // `struct{ SearchKnowledgeInput }` promotes every field of the input and declares no tag of its
 // own, so a reading of the declaration's shape sees an ordinary struct.
+//
+// The reach is wider than embedding, and the reason is in checkQueryLiteral rather than here: it
+// asks this about *every* identifier in the scope expression, including the selectors partway along
+// a chain. So an input parked behind a named field of a wrapper — `b.V.TenantID`, where V is the
+// input — is caught on V, whose own resolved type is the input, without this walk ever reaching it.
+// A review found that by attacking a generic wrapper this function alone would have let through.
+// Worth knowing before trusting this comment's first paragraph as the limit of what is covered.
 func (s *mcpScopeScan) carriesInput(t types.Type) bool {
 	return s.carriesInputDepth(t, 0)
 }
