@@ -113,7 +113,8 @@ var authoringPackages = map[string]string{
 // found five ways past them — a new package with an innocuous function name and a method declared in
 // another file of the package needed no watched name at all — and each fix was narrower than the hole
 // it closed. Moving the code into its own package made the defect unrepresentable, which is what
-// CLAUDE.md says to do when a plant will not go red, and left this: one walk, no list of symbols.
+// CLAUDE.md says to do when a plant will not go red, and left this: an import walk, no list of
+// symbols.
 //
 // internal/eval is on the forbidden list, and it is the edge this test could not have until the
 // golden-set file schema moved out of it. The authoring session has to read and append to that file,
@@ -123,6 +124,15 @@ var authoringPackages = map[string]string{
 // on record rather than unnoticed. internal/goldenset now holds the schema and imports no searcher, so
 // forbidding internal/eval here costs the session nothing — and the ability to forbid it is the proof
 // the split did what it was for.
+//
+// The residual, written down rather than left to be re-found. FindImporters reads direct imports, so
+// this covers the two directories in authoringPackages and not the rest of the session's transitive
+// closure, which today is internal/config, internal/schema and internal/vault (`go list -deps
+// ./internal/goldenauthor`). One of those gaining a searcher would reopen the route and nothing here
+// would say so. It is not covered because the alternative — forbidding internal/retrieval inside three
+// packages the whole module shares — constrains code that has nothing to do with authoring, to close a
+// hole nobody has opened. The check that would cover it without a list is an assertion over `go list
+// -deps`; it is a different test with a different cost, not a line to add to this one.
 func TestArch_GoldenAuthoringCannotReachTheIndex(t *testing.T) {
 	root := moduleRoot(t)
 
