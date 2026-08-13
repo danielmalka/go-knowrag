@@ -14,15 +14,18 @@
 # wrote. The restore is also what the last phase proves worked: the index has to come back to the
 # exact numbers it started with.
 #
-# HOW THE NOTE GETS BACK, measured rather than assumed (cmd/cli/prune_drill_test.go delivers real
-# signals to the process group, which is what a terminal Ctrl-C does):
+# HOW A SIGNAL STOPS THIS AND HOW THE NOTE GETS BACK, measured rather than assumed
+# (cmd/cli/prune_drill_test.go delivers real signals to the process group, which is what a terminal
+# Ctrl-C does). The two are separate traps because they are separate jobs:
 #
-#   - `trap restore EXIT` is the whole mechanism, and it is the only trap installed. Ordinary
-#     failures reach it because every dangerous step below is behind `|| die` and `die` calls
-#     `exit 1`. Signals reach it because bash runs the EXIT trap when it dies of an untrapped one.
-#   - There is deliberately NO `INT`/`TERM` handler; the note next to the trap says what that cost
-#     when there was one. `restore` is idempotent anyway (`[ -f "$stash" ]`).
-#   - Dropping EXIT is caught by every failure path in cmd/cli/prune_drill_test.go, signals included.
+#   - `trap interrupted INT TERM` is what stops the run. It is NOT optional and it is NOT symmetry
+#     with the EXIT trap: a bare SIGINT does not stop a bash script reliably. The comment on the
+#     trap has the mechanism and the measurement.
+#   - `trap restore EXIT` is what puts the note back. Ordinary failures reach it because every
+#     dangerous step below is behind `|| die` and `die` calls `exit 1`; signals reach it because
+#     `interrupted` calls `die` too, and because bash runs the EXIT trap when it dies of an
+#     untrapped signal. `restore` is idempotent (`[ -f "$stash" ]`).
+#   - Dropping either is caught by cmd/cli/prune_drill_test.go, signals included.
 #
 # Two things this does NOT cover, both real:
 #
@@ -90,6 +93,18 @@ done
 
 : "${KNOWRAG_DRILL_STATE_DIR:=.drill}"
 
+# Armado antes de `date`, que é o primeiro comando externo deste arquivo, e com o corpo escrito
+# inline em vez de chamar `interrupted`: bash executa as instruções de topo à medida que as lê, e
+# `interrupted` e `die` só existem algumas dezenas de linhas abaixo. Um trap que nomeia uma função
+# ainda não definida falha na hora do sinal e deixa o script seguir — pior que não ter trap nenhum.
+#
+# Por que existir tão cedo: um SIGINT que chegue enquanto um comando de primeiro plano roda e sai 0 é
+# descartado para sempre (jobs.c, wait_sigint_handler), e instalar o trap depois não o recupera. Nada
+# perigoso acontece nesta janela — nenhum `mv`, nenhuma poda —, mas sem isto o Ctrl-C do operador
+# sumiria em silêncio. main() reinstala o mesmo par de sinais apontando para `interrupted`, que aí já
+# existe e escreve no transcript.
+trap 'printf "ABORTED: interrupted by a signal\n" >&2; exit 1' INT TERM
+
 run_id="$(date -u +%Y%m%dT%H%M%SZ)"
 before_file="$KNOWRAG_DRILL_STATE_DIR/$run_id-prune-before.txt"
 after_file="$KNOWRAG_DRILL_STATE_DIR/$run_id-prune-after.txt"
@@ -132,7 +147,34 @@ restore() {
   fi
 }
 
+# The signal handler, and the reason it is one line that only stops the run.
+#
+# A BARE SIGINT DOES NOT STOP A BASH SCRIPT. When bash is waiting on an ordinary foreground command
+# and a SIGINT arrives, bash only records it, and re-raises it afterwards ONLY IF that command was
+# itself killed by SIGINT. A command that exits 0 takes the interrupt with it and the script walks
+# on — bash's rule (jobs.c, wait_sigint_handler), not this script's. Every step here is such a
+# command: the `mv` below, `knowrag stats`, `mkdir`, `date`. Measured on 2026-08-13 by
+# cmd/cli/prune_drill_test.go: a Ctrl-C landing on the `mv` was discarded and the run reached
+# `knowrag ingest --prune --yes` with the operator's interrupt behind it. SIGTERM does not behave
+# this way — bash acts on it at once — and is trapped alongside so both stop the drill identically.
+#
+# The handler does NOT restore. That split is the other measured result: on 2026-08-13 this line was
+# `trap restore INT TERM`, a handler that put the note back and did not exit, and a bash trap is not
+# a stop — bash runs it at the next command boundary and then RESUMES. The run carried on into the
+# next phase, which the same test caught as a drill still alive 20 s after a SIGTERM. A handler that
+# only calls `die` cannot fail that way, and `die` reaches `restore` through the EXIT trap.
+#
+# The message names no file on purpose. This trap is armed before `mkdir -p` has run, so a signal
+# early enough finds no transcript to point at, and `die` writes the ABORTED line to stderr either
+# way — which is the channel the operator is already looking at when they press Ctrl-C.
+interrupted() { die "interrupted by a signal"; }
+
 main() {
+  # Substitui o handler inline do topo por este, que escreve no transcript além do stderr. O de lá
+  # cobre a janela anterior a esta linha; este cobre o resto, e é o que os testes de sinal exercitam
+  # (cmd/cli/prune_drill_test.go).
+  trap interrupted INT TERM
+
   mkdir -p "$KNOWRAG_DRILL_STATE_DIR" || die "cannot create $KNOWRAG_DRILL_STATE_DIR"
 
   cat <<'EOF'
@@ -165,19 +207,13 @@ EOF
   [ -t 0 ] || die "stdin is not a terminal. This needs a human watching. Nothing was changed"
 
   stash="$KNOWRAG_DRILL_STATE_DIR/$run_id-$(basename "$note")"
-  # EXIT only, and the absence of INT and TERM here is the measured result of getting this wrong
-  # twice on 2026-08-13.
+  # EXIT and nothing else on this line: restoring is this handler's whole job. Stopping the run on a
+  # signal is `interrupted`'s, installed at the top of main — see the comment there for why a bare
+  # SIGINT does not stop a script and why the two must not be merged into one handler.
   #
-  # bash runs the EXIT trap when it dies of a signal it has not trapped, so `trap restore EXIT`
-  # already covers Ctrl-C: no handler means bash takes the default action, dies, and restores on the
-  # way out. Adding `INT TERM` to this line bought nothing — a plant that removed them left every
-  # test green — and it cost a real defect, because a trap handler is not a stop: bash runs a pending
-  # trap at the next command boundary and then RESUMES the script. `trap restore INT TERM` therefore
-  # put the note back and carried on into the next phase with the drill still running, which
-  # cmd/cli/prune_drill_test.go caught as a run still alive 20 s after a SIGTERM.
-  #
-  # So the shape that is dangerous is specifically a signal handler that restores without exiting.
-  # Not having one cannot fail that way. If a handler is ever added here it has to end in `exit`.
+  # `restore` still has to reach an untrapped death too: bash runs the EXIT trap when it dies of a
+  # signal it has not trapped, which is what covers SIGQUIT, SIGHUP, and a SIGINT that arrived while
+  # this shell had it inherited as ignored and could not trap it.
   trap restore EXIT
   mv "$note_path" "$stash" || die "could not move $note_path aside"
   say "== 2: $note is out of the vault (parked at $stash) =="
