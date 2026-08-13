@@ -15,17 +15,24 @@ vaults e áreas em configuração, sem editar Go — mas os **nomes das coleçõ
 literais compilados em `internal/schema/manifest.go`, e trocá-los é editar Go.
 
 > **Status: pipeline funcionando ponta a ponta, com os dois gates de performance passando.**
-> Ingestão, busca híbrida e o servidor MCP estão implementados e rodando contra um corpus real.
+> Ingestão, busca híbrida, CLI de operador e o servidor MCP estão implementados e rodando contra um
+> corpus real.
 >
 > Medido numa instalação real em 2026-08-11: 735 notas viram 3.690 pontos indexados; ingestão
-> completa em **6m50s** contra um orçamento de 30 min, e reingestão de um corpus inalterado em
-> **30,9 s** contra um orçamento de 60 s. Esse segundo número já foi 403 s: a causa não era o
-> chunking, como se supunha, e sim uma interação entre o algoritmo de Nagle e o delayed-ACK do Linux
-> numa conexão reusada com o serviço de embedding — resolvida com um `TCP_NODELAY` do lado Python.
-> Busca de query em ~70 ms (p99).
+> completa em **6m50s** contra um orçamento de 30 min. A reingestão de um corpus inalterado já foi
+> 403 s: a causa não era o chunking, como se supunha, e sim uma interação entre o algoritmo de Nagle
+> e o delayed-ACK do Linux numa conexão reusada com o serviço de embedding — resolvida com um
+> `TCP_NODELAY` do lado Python.
 >
-> Falta a CLI de operador (`S09`), parte dos modos de ingestão (`S06b` — o lock de execução
-> concorrente já entrou; `--only` e `--prune` não) e as stories de garantia e deploy (`S10`–`S12`).
+> Remedido em 2026-08-13 pelas duas ferramentas de medição que hoje moram no repositório
+> (`cmd/measure-ingest`, `cmd/measure-search`), contra o deploy real: reingestão no-op do comando
+> completo do operador em **33,7 s** contra o teto de 60 s (NFR-5), e busca com **p95 de 241 ms**
+> contra o teto de 3 s (NFR-1b). Números de um deploy só, produzidos por comando de operador — não
+> são benchmark deste projeto para a sua máquina.
+>
+> O que falta é conteúdo, não código: o golden set real — as perguntas que o `knowrag golden` existe
+> para colher — ainda não foi escrito, então **não há Recall@5 medido contra a base real**. O
+> instrumento inteiro existe e roda; o que falta é a pergunta, e ela só o dono pode escrever.
 
 > **Motivação: organização própria.** O projeto está totalmente disponível para inspiração e forks, fiquem à vontade para fazer suas cópias e alterar o que for preciso, pois ele está totalmente voltado para minha própria organização pessoal.
 > Disponibilizado para compreensão de uso de RAG e para portifolio próprio.
@@ -47,8 +54,8 @@ recuperação — trazer os poucos trechos certos, no momento da pergunta.
 `H1 → H2` no texto embedado, para o trecho carregar seu próprio contexto. Rodar duas vezes converge
 para o mesmo índice sobre as notas que existem: sem duplicatas e sem contagem crescente. A cauda de
 uma nota que **encolheu** é removida sozinha, em toda ingestão, logo depois do upsert confirmado.
-Os pontos de uma nota **apagada** não: nada compara o que está indexado com o que foi varrido, então
-eles ficam no índice sem detecção e sem aviso, e continuam saindo na busca.
+Os pontos de uma nota **apagada** são detectados e listados em toda rodada, e removidos só quando
+alguém pede — `--prune`, que é destrutivo e por isso opt-in. Ver órfão é o default; apagar não é.
 
 **Busca híbrida.** Cada trecho é indexado com vetor denso *e* esparso no mesmo passo. A consulta roda
 as duas buscas e funde os resultados por *Reciprocal Rank Fusion* — o denso pega paráfrase e sinônimo,
@@ -63,10 +70,11 @@ o protocolo é padrão, então qualquer agente que fale MCP consegue consumir. O
 entanto, não é uma porta aberta: cada instância nasce com a coleção e o tenant **fixados na própria
 configuração**, e quem pode consultar o quê é decisão de deploy.
 
-**Avaliação: metade entregue.** O plano é um golden set medindo Recall@5 e uma suíte adversarial de
-vazamento entre tenants, os dois como gates e não como relatório que alguém lê quando lembra — o
-**hermético**, sobre fixture sintético versionado, bloqueando merge no CI; o que roda contra a base e
-o deploy reais, em runner privado, bloqueando release. Assim o CI nunca precisa de acesso ao corpus.
+**Avaliação: os dois instrumentos existem e bloqueiam merge.** O plano é um golden set medindo
+Recall@5 e uma suíte adversarial de vazamento entre tenants, os dois como gates e não como relatório
+que alguém lê quando lembra — o **hermético**, sobre fixture sintético versionado, bloqueando merge
+no CI; o que roda contra a base e o deploy reais, em runner privado, bloqueando release. Assim o CI
+nunca precisa de acesso ao corpus.
 
 O lado do **recall está construído e ligado**: `internal/eval/` tem o loader do golden set, o runner
 determinístico, o intervalo de Wilson a 95% e o relatório, e o job hermético do CI roda
@@ -81,12 +89,25 @@ levaria o recall a 1.0, o que passa o piso. Quem exige 6/8 exatos, e confere o n
 não só pela suíte unitária, para que um check verde chamado `eval-golden-hermetic` signifique o que
 o nome diz sem depender de outro job existir.
 
-O que falta é **o número que importa** e a outra suíte. O golden set real e o baseline contra a base
-real são S10 T14–T16, e rodam fora do CI público; a suíte de isolamento é S11, e o job dela ainda
-reporta *pendente* em vez de medir. **Hoje bloqueiam merge: lint, a suíte unitária com `-race` e o
-gate hermético de recall.** O único teste de isolamento entre tenants que existe está atrás da tag
-`integration` (`internal/retrieval/integration_test.go`): roda à mão no runner privado, nunca no CI e
-nunca contra uma PR.
+**A suíte de isolamento também mede, e também bloqueia merge.** `knowrag eval --isolation` roda dez
+casos adversariais (`internal/eval/isolation/`) — vazamento entre tenants, tenant forjado no payload,
+injeção pelo texto da consulta, `private` e `archived`, o caminho privilegiado da CLI, o caminho de
+**escrita**, a amarração de escopo do servidor MCP e a fronteira de arquitetura. Ela constrói o
+próprio corpus e dirige o `internal/retrieval` de verdade contra ele, então não abre conexão, não
+precisa de embedder e não lê vault nenhum: o job `eval-isolation-hermetic` roda a cada push. Não tem
+nota nem score — um caso reprovado reprova a suíte, porque uma suíte de isolamento com nota é uma
+suíte que aceita vazar um pouco.
+
+**Hoje bloqueiam merge: lint, `make verify-deploy`, a suíte unitária com `-race`, o gate hermético de
+recall e o de isolamento.** Além deles existe um teste de isolamento atrás da tag `integration`
+(`internal/retrieval/integration_test.go`), que roda contra o Qdrant real no runner privado — nunca
+no CI e nunca contra uma PR.
+
+O que falta é **o número que importa**: o golden set real. As 60–90 perguntas contra a base real não
+existem, então não há Recall@5 medido deste deploy, e a escolha entre busca híbrida e densa continua
+sustentada por raciocínio e não por medição. Isso é conteúdo que só o dono produz — a pergunta
+precisa ser dele, e precisa ser escrita **antes** de qualquer resultado ser visto. É para isso que
+existe o [`knowrag golden`](#knowrag-golden).
 
 ## Como funciona
 
@@ -122,9 +143,19 @@ servidor**. É dessa divisão que saem duas das decisões de arquitetura do proj
 
 Os dois entrypoints são **finos por convenção**: toda a lógica de busca vive num único pacote, para
 não existirem a versão da busca do MCP e a versão da CLI, que divergem em seis meses. O teste de
-arquitetura no CI (`internal/archtest/boundary_test.go`) trava uma fronteira vizinha, e só ela:
-**nenhum pacote fora de `internal/store` importa o cliente do Qdrant**. Código de busca escrito fora
-do pacote de retrieval é pego por revisão, não por teste.
+arquitetura no CI (`internal/archtest/boundary_test.go`) trava duas fronteiras vizinhas: **nenhum
+pacote fora de `internal/store` importa o cliente do Qdrant**, e **o pacote de autoria do golden set
+não alcança o índice** (a segunda está explicada [mais abaixo](#knowrag-golden)). Código de busca
+escrito fora do pacote de retrieval, esse sim, é pego por revisão e não por teste.
+
+As duas são checadas sobre o **grafo de imports derivado do fonte**, não sobre uma lista de pastas
+escrita à mão. A diferença não é estilo: a versão anterior da segunda andava por um mapa de pacotes,
+e duas revisões a desmontaram por pontas opostas — uma apagou uma linha do mapa e a invariante
+desligou inteira com a suíte verde; a outra atacou o fecho transitivo que o mapa não percorria e
+achou dois buracos vivos, cada um compilando e passando. Lista que alguém mantém é lista que alguém
+esquece; fecho transitivo derivado a cada rodada não tem linha para apagar. Cada um dos dois testes
+carrega o próprio teste de não-vacuidade, porque teste de arquitetura verde é o que mais parece
+funcionar quando não olha para nada.
 
 ## Funcionalidades
 
@@ -133,11 +164,12 @@ do pacote de retrieval é pego por revisão, não por teste.
 | **Chunking com contexto** | Fronteira em `##`, breadcrumb `H1 → H2` embutido, clamp de tamanho em tokens, com piso e teto a calibrar contra o corpus real |
 | **Busca híbrida nativa** | Denso (1024-dim) + esparso, fundidos por RRF no próprio Qdrant |
 | **Ingestão incremental** | Só reprocessa o que mudou, comparando uma fingerprint por ponto |
-| **Poda da cauda** | A cauda de uma nota que encolheu é removida em toda ingestão, depois do upsert confirmado. Ponto de nota **apagada** não é detectado nem reportado — fica no índice |
+| **Poda da cauda** | A cauda de uma nota que encolheu é removida em toda ingestão, depois do upsert confirmado. Ponto de nota **apagada** é detectado e listado em toda rodada, e só apagado sob `--prune` |
 | **Convergência sob falha** | Interromper a ingestão no meio nunca tira uma nota da busca — o pior caso é um ponto extra, que a rodada seguinte limpa |
-| **Isolamento por integridade de código** | Nenhuma consulta sai do pacote de retrieval sem `tenant_id`. A suíte adversarial que verificaria isso como gate está especificada e não existe |
+| **Isolamento por integridade de código** | Nenhuma consulta sai do pacote de retrieval sem `tenant_id`, e uma suíte adversarial de dez casos verifica isso como gate no CI a cada push |
 | **Conteúdo marcado como não confiável** | Resultados chegam ao agente delimitados como dado, não instrução, com os delimitadores escapados no texto recuperado |
-| **CLI de operação** | Dois comandos: `schema apply` e `ingest`. Reindex, prune, avaliação e debug de busca não existem |
+| **CLI de operação** | Seis comandos: `schema`, `ingest`, `search`, `stats`, `eval` e `golden`. Reindex (`--full`), poda (`--prune`) e run filtrado (`--only`) são flags de `ingest` |
+| **Medição de NFR sob comando** | `cmd/measure-ingest` e `cmd/measure-search` rodam contra o deploy real, dão **veredito** contra o teto do requisito, e gravam relatório durável em `out/` |
 | **Metadados ricos** | Tipo, status, tags, visibilidade, caminho, datas e área derivada da estrutura de pastas, gravados no payload de cada trecho |
 | **Filtros de busca** | A ferramenta MCP expõe `area` e `type` (mais `query` e `top_k`). `vault` e `tags` existem só na API Go: nenhum caminho entregue chega neles. `status: archived` fica fora por default, e `visibility: private` não sai por caminho de consumo nenhum — as duas são políticas do pacote de busca, não filtros de quem chama |
 
@@ -204,7 +236,7 @@ individualmente contra quatro condições, e qualquer estado parcial converge na
 
 Três processos: o serviço de embedding (Python, precisa da GPU), o Qdrant (container), e os binários
 Go. O serviço de embedding é **residente** — carregar o modelo leva ~11 s, e um processo que carrega
-por consulta transformaria uma busca de 70 ms em uma de onze segundos.
+por consulta transformaria uma busca de algumas centenas de milissegundos em uma de onze segundos.
 
 Duas exigências do host de ingestão que abortam a rodada inteira se faltarem, e que não são
 processos:
@@ -228,8 +260,45 @@ autenticação.
 **Esse arquivo é de desenvolvimento local.** O Qdrant implantado tem o seu, em
 `deploy/docker-compose.yml`: mesma imagem pinada, sem porta em interface pública — o endereço de bind
 vem de `deploy/.env`, documentado em `deploy/.env.example`. `make verify-deploy` confere pino de
-imagem, endereço de bind e credencial obrigatória lendo o arquivo, sem precisar de Docker nem da
+imagem, endereço de bind e credenciais obrigatórias lendo o arquivo, sem precisar de Docker nem da
 máquina implantada, e o CI roda isso ao lado do linter.
+
+#### As duas chaves do Qdrant, e por que são duas
+
+O Qdrant implantado recebe **duas** credenciais, e nenhuma delas mora no repositório:
+
+| Variável em `deploy/.env` | Vira, no compose | Quem apresenta |
+|---|---|---|
+| `QDRANT_API_KEY` | `QDRANT__SERVICE__API_KEY` | a CLI administrativa, como `KNOWRAG_ADMIN_QDRANT_API_KEY` |
+| `QDRANT_READ_ONLY_API_KEY` | `QDRANT__SERVICE__READ_ONLY_API_KEY` | o servidor MCP, como `MCP_QDRANT_API_KEY` |
+
+```bash
+cp deploy/.env.example deploy/.env
+# duas chaves geradas independentemente — nunca a mesma string nas duas linhas
+openssl rand -base64 32   # QDRANT_API_KEY
+openssl rand -base64 32   # QDRANT_READ_ONLY_API_KEY
+```
+
+**Não é sobre quem alcança a máquina.** Essa pergunta — o que uma máquina comprometida na rede
+consegue tocar — foi decidida à parte, e uma chave read-only não mudaria a resposta dela. Esta é
+outra: **o que o processo do MCP consegue fazer com a credencial que carrega**. Ele roda semanas sem
+supervisão e responde com texto tirado de notas, que este código trata como entrada não confiável por
+desenho — todo resultado sai envelopado como dado, não instrução. Um processo nessa posição segurando
+uma chave que escreve tem raio de explosão estritamente maior que o mesmo processo segurando uma que
+não escreve, com a rede inteira confiável ou não.
+
+Quem enforça é o **Qdrant**, e é aí que está o valor. `internal/store` não expõe busca e
+`cmd/mcp-server` nunca chama caminho de escrita, mas as duas são convenções que este repositório
+mantém sozinho, por revisão. A chave read-only é a linha que sobrevive a alguém quebrá-las.
+
+**As duas têm de ser valores diferentes, e é nisso que o arranjo inteiro se apoia.** Preencher as
+duas com a mesma string não é uma versão mais fraca da separação — é a chave administrativa com um
+segundo nome, e o Qdrant concede escrita a quem a apresenta. Nada no `docker-compose.yml` consegue
+mostrar isso: para o Qdrant são duas chaves aceitas, e para quem lê o arquivo são duas referências de
+variável que parecem certas. Quem confere é o bloco 5 do `scripts/verify-deploy.sh`, lendo
+`deploy/.env` — e por isso **essa checagem não roda no CI**, onde o arquivo não existe. Ela roda na
+máquina que tem as chaves, que é a máquina onde dá para errar. O script diz `NOT CHECKED` em vez de
+ficar calado quando não encontra o arquivo.
 
 ### 2. Serviço de embedding
 
@@ -268,12 +337,13 @@ confiar no arquivo: `kill -9` no PID do serviço e checar que `/health` volta a 
 ```bash
 go build -o ~/bin/knowrag ./cmd/cli
 knowrag schema apply                 # idempotente: rodar de novo não escreve nada
-knowrag ingest --vault both --dry-run  # conta chunks sem gastar GPU nem escrever no Qdrant
+knowrag ingest --vault both --dry-run  # conta chunks e lista órfãos, sem GPU e sem escrever
 knowrag ingest --vault both
 ```
 
-`--dry-run` não é offline: o clamp conta tokens reais do BGE-M3 e se recusa a aproximar, então ele
-exige `EMBEDDER_ENDPOINT` e faz um `POST /tokenize` por chunk. O que ele economiza é a GPU e a
+`--dry-run` não é offline, e não é sequer desconectado. O clamp conta tokens reais do BGE-M3 e se
+recusa a aproximar, então ele exige `EMBEDDER_ENDPOINT` e faz um `POST /tokenize` por chunk; e ele
+**lê o índice**, para poder listar as notas que seriam podadas. O que ele economiza é a GPU e a
 escrita — uma contagem tirada de um contador aproximado reportaria um número de chunks que a rodada
 real não produz.
 
@@ -306,6 +376,20 @@ set -a; . scripts/drill.env; set +a
 ./scripts/prune-drill.sh --yes pessoal areas/nota.md     # apaga os pontos de uma nota e devolve
 ```
 
+O que vai dentro de `scripts/drill.env` — nenhum desses valores pode nascer num arquivo rastreado,
+que é por que o repositório guarda só o `.example`:
+
+| Variável | Obrigatória | Para quê |
+|---|---|---|
+| `KNOWRAG_DRILL_SSH` | sim | como alcançar a máquina que roda o Qdrant, na forma que o `ssh` aceitar. Um `Host` do seu `~/.ssh/config` é a melhor forma aqui: aí o endereço nunca sai daquele arquivo |
+| `KNOWRAG_DRILL_COMPOSE_DIR` | sim | o diretório **naquela máquina** de onde `docker compose down` e `up -d` são rodados. Não é o `deploy/` deste repositório |
+| `KNOWRAG_DRILL_STATE_DIR` | não | onde as contagens de antes/depois e o transcript são escritos. Default `.drill`, que está no `.gitignore` |
+| `KNOWRAG_DRILL_UP_TIMEOUT` | não | quantos segundos esperar o Qdrant responder depois da reconstrução antes de desistir e avisar que o índice está vazio. Default `300` |
+
+`KNOWRAG_DRILL_COMPOSE_DIR` apontar para outro lugar que não o `deploy/` daqui não é descuido: os
+dois arquivos divergiram no nome do volume, e é exatamente por isso que o drill descobre esse nome do
+container em execução em vez de ler qualquer um dos dois.
+
 **`recovery-drill.sh`** executa o que o runbook só descrevia: apaga o volume do Qdrant e reingere
 tudo. Em cinco fases, com aborto entre elas — pré-voo (embedder, vaults, disco, Qdrant; reprovar
 aqui **não destrói nada**), contagem antes gravada em arquivo, autorização, destruição e
@@ -337,7 +421,7 @@ do embedder, que ele nunca usa.
 | Variável | Para quê |
 |---|---|
 | `QDRANT_ENDPOINT` | `host:6334` — gRPC, o único protocolo que o código fala |
-| `KNOWRAG_ADMIN_QDRANT_API_KEY` | chave **administrativa** do Qdrant — a CLI aceita qualquer `--tenant` e qualquer `--collection`, então a credencial dela é a do operador. O servidor MCP lê `MCP_QDRANT_API_KEY` e nenhuma das duas cai para a outra |
+| `KNOWRAG_ADMIN_QDRANT_API_KEY` | chave **administrativa** do Qdrant — a CLI aceita qualquer `--tenant` e qualquer `--collection`, então a credencial dela é a do operador. O servidor MCP lê `MCP_QDRANT_API_KEY`, que é a [chave read-only](#as-duas-chaves-do-qdrant-e-por-que-são-duas), e nenhuma das duas cai para a outra |
 | `EMBEDDER_ENDPOINT` | URL do serviço de embedding, ex.: `http://127.0.0.1:7999` |
 | `DEFAULT_COLLECTION` | collection alvo |
 | `LOG_LEVEL` | opcional, default `info` |
@@ -374,22 +458,47 @@ As áreas e as exclusões vêm de configuração, não do código: re-incluir um
 linha de config. Pasta de 1º nível que não está nem em `AREAS` nem na lista de exclusão é **erro** —
 excluído é decisão declarada, desconhecido é erro.
 
-**Uma exclusão com barra ignora uma subárvore aninhada.** `EXCLUDE_FOLDERS=templates,area/sub/pasta`
-ignora a pasta `templates` de 1º nível e a pasta `area/sub/pasta`, e nada mais. É para o `.md` que
-nunca foi nota — briefing de sessão, export, README ao lado de um `index.html` — que cai dentro de
-uma área onde moram notas de verdade: sem isso, a única saída seria excluir a área inteira. A
-comparação é por **segmento de caminho**, nunca por prefixo de texto (`area/14` não ignora
-`area/14-interno`), é insensível a maiúsculas, e `\` do Windows vale como `/`.
+**Uma exclusão com barra ignora uma subárvore aninhada.** Uma entrada sem barra é nome de pasta de
+1º nível e continua sendo só isso — uma pasta `rascunhos/` aninhada fundo dentro da área `beta/`
+**não** é ignorada por uma entrada `rascunhos`. Uma entrada com barra é um caminho relativo à raiz do
+vault, e ignora aquela pasta e tudo abaixo dela:
+
+```bash
+KNOWRAG_VAULT_PESSOAL_EXCLUDE_FOLDERS=templates,alfa/projetos/site-export
+```
+
+Isso ignora `templates/` de 1º nível e `alfa/projetos/site-export/`, e nada mais.
+
+**O caso de uso é o `.md` que nunca foi nota.** Um briefing de sessão, um export, um `README.md` ao
+lado de um `index.html` — arquivos cuja extensão é acidente — caindo numa subpasta dentro de uma área
+onde moram notas de verdade. O sistema é fail-closed: um desses **aborta a ingestão inteira**, porque
+não passa no contrato de frontmatter, e antes desta forma a única saída era excluir a **área toda**,
+levando junto as notas boas. O erro hoje nomeia essa saída em vez de deixar o operador escolhendo
+entre indexar lixo e perder uma área.
+
+A comparação é de **caminho inteiro**, nunca de prefixo de texto: uma entrada `alfa/14` não casa uma
+pasta `alfa/14-interno`. É insensível a maiúsculas, normaliza Unicode para NFC (um nome acentuado
+vindo de macOS em NFD casaria com nada, silenciosamente), e `\` do Windows vale como `/`.
 
 ### Flags de `knowrag ingest`
 
 | Flag | Default | Para quê |
 |---|---|---|
 | `--vault` | `both` | um nome de `KNOWRAG_VAULTS`, ou `both` para todos |
-| `--dry-run` | desligado | varre e faz chunking, e para: nem embeda nem escreve |
+| `--dry-run` | desligado | avalia toda nota e relata o que uma rodada real faria, sem embedar e sem escrever. Lê o índice, então lista o que seria podado |
+| `--full` | desligado | reindexa toda nota, pulando o atalho de integridade que normalmente deixa a inalterada em paz |
+| `--only` | vazio | restringe a rodada às notas cujo `vault/path` casa um glob, ex.: `pessoal/areas/**` |
+| `--prune` | desligado | **apaga** os pontos das notas que sumiram do vault. Destrutivo e opt-in: sem ele os órfãos são listados e deixados quietos |
+| `--yes` | desligado | autoriza `--prune` sem perguntar. Obrigatório quando stdin não é terminal, onde não há ninguém para responder |
+| `--grace-period` | `30s` | quanto tempo uma nota já sendo escrita tem para terminar depois do primeiro Ctrl-C; o segundo Ctrl-C a derruba na hora |
+| `--json` | desligado | escreve o relatório da rodada como JSON no stdout e mais nada; o resumo do tokenizer vai para o stderr |
 | `--tenant` | `interno` | o `tenant_id` sob o qual todo ponto é escrito |
 | `--floor-tokens` | `256` | junta seções irmãs consecutivas abaixo desse tamanho |
 | `--ceiling-tokens` | `1024` | quebra a seção acima desse tamanho |
+
+**`--only` é recusado junto com `--prune`.** Uma rodada de subconjunto não consegue distinguir uma
+nota apagada de uma que ela simplesmente não visitou, e a poda que confundisse as duas apagaria o
+vault inteiro menos o glob.
 
 **Os três últimos entram no `point_hash`, e `--tenant` entra também no ID do ponto.** Mudar qualquer
 um deles não ajusta a próxima rodada: faz o índice inteiro deixar de bater e ser reescrito. Os
@@ -470,18 +579,102 @@ chunks com texto, pontuados por sobreposição de termos em vez de embeddings. U
 abre conexão, não precisa de embedder nem de GPU, e mede o *harness* de ponta a ponta — não a
 qualidade de busca deste deploy. Número saído dali não entra em baseline nenhum.
 
-**O golden tem harness e o isolamento não.** `--golden` mede; o job hermético do CI roda
-`knowrag eval --golden --corpus testdata/eval/hermetic/corpus.yaml` a cada push e reprova de
-verdade. O job checa duas coisas em passos separados: o fixture (6/8 exatos) e o limiar; ver acima. `--isolation` ainda recusa dizendo que S11 a constrói, e o job dela reporta *pendente*. Os
-dois passam por `scripts/ci/eval-gate.sh`, que só aceita "pendente" dos modos que ainda não têm
-harness — golden saiu dessa lista quando ganhou o dele.
+**Os dois modos têm harness, e os dois rodam no CI a cada push.** O job `eval-golden-hermetic` roda
+`knowrag eval --golden --corpus testdata/eval/hermetic/corpus.yaml`, checando duas coisas em passos
+separados: o fixture (6/8 exatos) e o limiar; ver acima. O job `eval-isolation-hermetic` roda
+`knowrag eval --isolation`, que constrói o próprio corpus e não abre conexão nenhuma. Os dois passam
+por `scripts/ci/eval-gate.sh`, que existe para distinguir "reprovou" de "não tem harness" — hoje
+nenhum dos dois modos consegue produzir a segunda resposta, e essa é a diferença entre este parágrafo
+e o que ele dizia até ontem.
+
+`--isolation` não aceita `--file`, `--corpus` nem `--min-recall`: a suíte não tem nota. Ou os dez
+casos passam, ou ela reprova.
+
+### `knowrag golden`
+
+O gate de recall precisa de perguntas, e perguntas ninguém gera: alguém escreve. Este comando é a
+sessão de autoria — ele sorteia uma nota, mostra o suficiente para você lembrar do que ela trata, e
+pede **uma** pergunta que aquela nota deveria responder. Anexa o que você escreveu ao golden set e
+sorteia a próxima.
+
+```bash
+export KNOWRAG_GOLDEN_AUTHOR="quem está escrevendo"   # cai para $USER se não existir
+knowrag golden                                        # anexa a docs/eval/golden-set.yaml
+knowrag golden --file caminho/para/outro-set.yaml
+```
+
+`--file` é a única flag. Não há `--json`: é uma conversa com uma pessoa, e envelope num stream que
+ninguém parseia é flag que só é exercitada por teste.
+
+**A sessão é incremental e retomável.** Ela lê o que já está no arquivo antes de começar, então uma
+nota que já ganhou pergunta numa sessão anterior não é sorteada de novo. Sai com `q` ou uma linha
+vazia depois de ter escrito alguma coisa; entra de volta amanhã de onde parou. `Enter` vazio pula a
+nota atual sem gravar nada.
+
+**Ele não sorteia uniformemente.** O sorteio vai para a **área mais carente** segundo a tabela
+`coverage:` do próprio golden set — a mesma ordem que o relatório de progresso imprime, derivada uma
+vez só, para "a área que o relatório diz estar mais curta" e "a área de onde vem o próximo cartão"
+serem o mesmo fato e não dois que podem discordar. Sem uma tabela `coverage:` utilizável o comando
+recusa antes de varrer os vaults, dizendo o que falta: a tabela é a única coisa que ele não pode
+inventar, porque quantas perguntas cada área precisa é decisão de quem escreveu as notas.
+
+Três recusas acontecem **antes** de qualquer varredura, que leva ~15 s: stdin que não é terminal (não
+há ninguém para responder, e esperar penduraria a rodada), golden set inexistente, e autor
+indeterminado. Um cron que invocasse isto por engano ouve "não há ninguém para responder" na hora, em
+vez de depois de gastar a varredura.
+
+**Ele nunca mostra resultado de busca, e essa é a razão de ele existir — não uma limitação.** Uma
+pergunta escrita depois de ver o que o índice devolve é uma pergunta ajustada, inconscientemente, até
+passar; um golden set feito assim mede a ferramenta que o produziu, não a recuperação. Por isso o
+comando não lê o índice: ele lê os vaults, e não precisa de Qdrant nem de embedder para rodar.
+
+**Essa invariante é sustentada por um teste de arquitetura, e a história de por quê vale mais que o
+teste.** A autoria morava em `cmd/cli`, onde todo caminho até o Qdrant é uma declaração irmã no
+`package main` e chamar uma não exige import nenhum. A regra era defendida por testes que liam o
+fonte — varredura de substring, allow-list de símbolos, análise de taint, checagem de métodos dos
+tipos que o comando segura. **Cinco revisões acharam cinco jeitos de passar por eles**, cada um de
+uma linha, e os dois últimos não precisavam de nome nenhum sob vigilância: um pacote novo com nome de
+função inocente, e um método declarado noutro arquivo do mesmo pacote. Cada correção era mais estreita
+que o buraco que fechava, e a seguinte precisaria de inferência de tipos.
+
+O conserto foi mover o código para `internal/goldenauthor`, onde a garantia passa a ser o **grafo de
+imports**. `TestArch_GoldenAuthoringCannotReachTheIndex` (`internal/archtest/boundary_test.go`) deriva
+o fecho transitivo do pacote a partir do fonte e pergunta se `internal/retrieval` ou `internal/store`
+estão nele. Ele não nomeia símbolo, arquivo, nem pasta além desses dois. Três dos cinco desvios
+deixaram de ser escrevíveis em vez de meramente ficarem vermelhos — o último deles exigiu separar
+`internal/goldenset` de `internal/eval`, porque enquanto o schema do arquivo e o gate que busca eram
+um pacote só, importar o primeiro trazia `eval.RunGolden` junto.
+
+Dito com precisão, porque a versão ampla é tentadora e falsa: escrever o desvio **ainda compila**. Go
+não tem como proibir um import a um pacote e permitir a outro. O que passou a custar é uma linha de
+import de um pacote que este não tem outra razão para querer — e essa linha é exatamente o que o teste
+percorre. Antes, não custava import nenhum e nada ficava vermelho.
+
+**O que a sessão imprime a cada pergunta é deliberado, e é curto de propósito.** Três linhas: a regra
+(*pergunte como perguntaria às 11 da noite, sem lembrar o nome do arquivo*), o critério (quanto mais
+longe a sua redação estiver da redação da nota, mais isso mede recuperação em vez de casamento de
+string) e **um** tipo de pergunta sugerido, rotacionado a cada turno. Uma tabela com os quatro tipos
+seria lida como referência e pulada; sugerir um enviesa, e o viés é o mecanismo, não efeito colateral
+— porque o viés contra o qual ele compete já existe: deixado à própria sorte, o autor escreve
+perguntas de fato preciso em série, que é o tipo que vem à cabeça olhando para uma nota e o menos
+informativo aqui, já que um fato preciso costuma dividir o termo raro com a nota e ser recuperado só
+por ele.
+
+Duas das seis sugestões do ciclo são "uma difícil", e isso não é acaso: um golden set de perguntas que
+a busca já acerta **satura**. A 95% de recall não sobra espaço para piorar, nenhuma mudança futura
+aparece como regressão, e o conjunto certifica que está tudo bem, para sempre. As perguntas que falham
+hoje são as informativas — cada uma é um defeito de recuperação com endereço.
+
+O `author` sai de `KNOWRAG_GOLDEN_AUTHOR` (ou `USER`) e a `date` de hoje. Os dois são documentação: o
+que prova que uma pergunta foi escrita antes do resultado que ela avalia é o histórico git do golden
+set, não um campo dentro dele.
 
 ### Servidor MCP (`knowrag-mcp`)
 
 | Variável | Para quê |
 |---|---|
 | `MCP_QDRANT_ENDPOINT` | `host:6334` |
-| `MCP_QDRANT_API_KEY` | chave do Qdrant |
+| `MCP_QDRANT_API_KEY` | a chave **read-only** do Qdrant — a de `QDRANT_READ_ONLY_API_KEY`, [nunca a administrativa](#as-duas-chaves-do-qdrant-e-por-que-são-duas). Nenhuma das duas cai para a outra |
 | `MCP_EMBEDDER_ENDPOINT` | URL do serviço de embedding |
 | `MCP_COLLECTION` | collection consultada |
 | `MCP_TENANT_ID` | tenant de toda busca |
@@ -504,6 +697,79 @@ parte, na configuração do servidor.
 > e não do assunto, e nomeia esta variável para o operador. Ao acrescentar ou renomear uma área em
 > qualquer vault, atualize `MCP_AREAS` na mesma passada.
 
+## Medir os NFRs contra o deploy real
+
+Dois binários à parte, em `cmd/measure-ingest` e `cmd/measure-search`. Nenhum dos dois roda em CI e
+nenhum dos dois roda sozinho: é o operador que os aponta para o próprio deploy, pelas mesmas variáveis
+de ambiente que a CLI já lê (`QDRANT_ENDPOINT`, `KNOWRAG_ADMIN_QDRANT_API_KEY`, `EMBEDDER_ENDPOINT`,
+`DEFAULT_COLLECTION`, `KNOWRAG_VAULTS`).
+
+**Os dois dão veredito, não número cru.** Cada um carrega o teto do requisito como literal, compara,
+e imprime `passed` ou `FAILED` — porque um número solto na tela é uma coisa que alguém tem de lembrar
+de comparar com alguma coisa, e ninguém lembra. Os dois também gravam **relatório durável em JSON**,
+por default em `out/measure-<qual>-<timestamp>.json`, com o número, a decomposição, o teto e o
+carimbo de tempo. `out/` está no `.gitignore`: os relatórios descrevem o vault e a infraestrutura de
+quem rodou.
+
+```bash
+go build -o ~/bin/measure-ingest ./cmd/measure-ingest
+go build -o ~/bin/measure-search ./cmd/measure-search
+
+measure-ingest --tenant <TENANT>
+measure-search --tenant <TENANT> --query "sua pergunta aqui" --query "outra pergunta" -n 50
+```
+
+### `measure-ingest` — NFR-5
+
+Roda **uma ingestão incremental completa e real** contra o Qdrant e o embedder implantados — lock,
+varredura, embed/escrita/detecção de órfão — e cronometra tudo ponta a ponta contra o teto de 60 s. O
+que ele reporta além do total é a decomposição em três fases (`lock_acquire`, `vault_scan`,
+`orchestrate`) mais o **não contabilizado**: total menos a soma das três. Essa sobra é impressa em vez
+de dissolvida na última fase, para que um custo que este instrumento ainda não cronometra apareça como
+lacuna visível.
+
+| Flag | Default | Para quê |
+|---|---|---|
+| `--vault` | vazio (todos) | qual vault de `KNOWRAG_VAULTS` ingerir |
+| `--tenant` | `interno` | o `tenant_id` sob o qual escrever e pelo qual travar o escopo |
+| `--out` | `out/measure-ingest-<ts>.json` | onde gravar o relatório durável |
+
+**Ele recusa dar veredito se a rodada não foi no-op.** O NFR-5 é sobre uma reingestão que **não muda
+nada**; se alguma nota foi reprocessada, a rodada embedou e escreveu, e o relógio não responde a
+pergunta que o requisito faz. Nesse caso ele imprime `NOT MEASURED — N de M nota(s) foram
+reprocessadas` em vez de `passed` ou `FAILED`, e manda rodar de novo: a **segunda** rodada sobre um
+vault inalterado é a que o requisito descreve. Isso existe porque o harness já reportou `FAILED` numa
+rodada com 43 notas reprocessadas — o número estava certo e respondia a uma pergunta que ninguém
+tinha feito. Rode uma vez para convergir o corpus, e meça na seguinte.
+
+### `measure-search` — NFR-1b
+
+Roda um lote de buscas híbridas reais, decompõe cada uma nas pernas de embedding da consulta, Qdrant
+e overhead, e reporta p50/p95/p99 de cada coluna mais o total, contra o teto do NFR-1 (p95 ≤ 3 s,
+p99 ≤ 5 s). Concorrência 1, sequencial, que é a condição de medição do próprio requisito — um
+benchmark disparando em paralelo mediria um sistema diferente do que o teto descreve.
+
+| Flag | Default | Para quê |
+|---|---|---|
+| `--query` | — | texto de consulta; **repetível**, e pelo menos uma é obrigatória |
+| `--tenant` | — | **obrigatória**; o `tenant_id` de toda a busca |
+| `-n` | `30` | quantas consultas rodar no total, ciclando pela lista de `--query` em ordem |
+| `--collection` | `DEFAULT_COLLECTION` | a collection consultada |
+| `--out` | `out/measure-search-<ts>.json` | onde gravar o relatório durável |
+
+O veredito é sempre sobre o **total** medido independentemente, nunca sobre a soma de um subconjunto
+das pernas: um overhead lento sozinho reprova, e há teste provando que uma versão construída de
+`embed + qdrant` passaria no caso que essa reprova.
+
+**Ele avisa quando a amostra é pequena demais para o percentil significar o que parece.** O rank é
+nearest-rank, então o p99 cai na última amostra para todo `n` até 100: com `-n 30`, "p99" e "a pior
+que a gente viu" são o mesmo número, e um outlier é a estatística inteira. O p95 cruza a mesma linha
+em `n = 20`. O número continua valendo — é um teto real sobre o que foi observado — mas impresso ao
+lado de p50 e p95 ele empresta a aparência de resolução dos vizinhos, e quem lesse um p99 passando
+sobre 30 consultas estaria lendo **uma** consulta. Por isso o relatório imprime a frase junto do
+veredito, em vez de deixar o leitor derivá-la. Os dois limiares saem da fórmula do rank, não de
+convenção escolhida aqui.
+
 ## Quando a ingestão acontece
 
 **Só quando você roda o comando.** Não há gatilho, watcher de sistema de arquivos, daemon nem cron:
@@ -518,8 +784,9 @@ GPU e rede para indexar texto que ainda vai mudar.
 texto do chunk, os metadados, a config do pipeline e a config confirmada do embedder. Uma nota cujos
 pontos batem é pulada sem escrever nada, então a segunda execução sobre um vault inalterado não
 reembeda — apenas verifica. A consequência prática é que **você não precisa saber o que mudou**:
-rode o comando e ele descobre. Verificar 735 notas inalteradas custou 30,9 s na instalação medida: o
-estado indexado do tenant é lido de uma vez, num snapshot só, e não por uma consulta por nota.
+rode o comando e ele descobre. Verificar um corpus inalterado custou **33,7 s** na instalação medida,
+contra o teto de 60 s: o estado indexado do tenant é lido de uma vez, num snapshot só, e não por uma
+consulta por nota. Esse número é o que o [`measure-ingest`](#measure-ingest--nfr-5) produz.
 
 **O caminho normal é rodar quando fizer sentido para você** — depois de uma sessão de escrita, antes
 de uma pesquisa importante, ou por um agendador seu (`cron`, `systemd timer`, Task Scheduler)
@@ -530,8 +797,13 @@ certa é quem escreve as notas.
 lock local do sistema operacional (`flock`) identificado por endpoint do Qdrant + collection +
 tenant. A segunda execução no mesmo escopo é recusada na hora, com **código de saída 3** — separado
 do `1` genérico justamente para um agendador distinguir "a anterior ainda está rodando" de "quebrou".
-Nada é escrito e nada é lido do vault nessa recusa. `--dry-run` não toma lock: ele não escreve e nem
-chega a abrir conexão com o Qdrant.
+Nada é escrito e nada é lido do vault nessa recusa.
+
+**`--dry-run` não toma lock, e hoje isso é escolha e não consequência.** Ele lê o índice — é assim
+que lista o que seria podado — mas não escreve nada, então não tem nada próprio a proteger. O que uma
+ingestão concorrente lhe custa é um snapshot que envelhece no meio do relatório, ou seja, um número
+errado numa tela; a razão pela qual o caminho de escrita não pode aceitar isso, que é duas rodadas
+apagando os pontos uma da outra, não se aplica a uma rodada que não emite delete nenhum.
 
 O lock é liberado pelo kernel quando o processo morre, qualquer que seja a causa — matar uma
 ingestão travada não deixa nada para limpar à mão.
@@ -540,8 +812,8 @@ ingestão travada não deixa nada para limpar à mão.
 > até o Qdrant consegue rodar uma segunda ingestão sobre o mesmo escopo, e nada no sistema impede.
 > A topologia prevista tem um executor só; isso é um acordo, não uma garantia técnica.
 
-Não existe ainda ingestão parcial (`--only <glob>`) nem remoção de órfãos sob comando (`--prune`) —
-os dois estão especificados e ainda não implementados.
+A ingestão parcial (`--only <glob>`) e a remoção de órfãos sob comando (`--prune`) existem, e as duas
+são mutuamente exclusivas: ver a [tabela de flags](#flags-de-knowrag-ingest).
 
 ## O que suas notas precisam ter
 
