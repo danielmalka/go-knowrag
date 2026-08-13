@@ -344,7 +344,7 @@ do embedder, que ele nunca usa.
 | `KNOWRAG_VAULTS` | os vaults desta instalação, separados por vírgula — ex.: `pessoal,trabalho` |
 | `KNOWRAG_VAULT_<NOME>_PATH` | raiz do vault no disco |
 | `KNOWRAG_VAULT_<NOME>_AREAS` | pastas de 1º nível que são `area` válida neste vault, separadas por vírgula |
-| `KNOWRAG_VAULT_<NOME>_EXCLUDE_FOLDERS` | pastas de 1º nível ignoradas, separadas por vírgula |
+| `KNOWRAG_VAULT_<NOME>_EXCLUDE_FOLDERS` | pastas ignoradas, separadas por vírgula — nome simples (1º nível) ou caminho relativo à raiz do vault, que ignora a subárvore inteira |
 | `KNOWRAG_VAULT_<NOME>_EXCLUDE_ROOT_FILES` | arquivos `.md` na raiz ignorados, separados por vírgula |
 
 `KNOWRAG_VAULTS` é a lista mestra: nada é lido de um vault que não está nela. Uma variável
@@ -373,6 +373,13 @@ No arquivo YAML os vaults ficam num mapa aninhado sob `vaults:`, com as mesmas c
 As áreas e as exclusões vêm de configuração, não do código: re-incluir uma pasta excluída é uma
 linha de config. Pasta de 1º nível que não está nem em `AREAS` nem na lista de exclusão é **erro** —
 excluído é decisão declarada, desconhecido é erro.
+
+**Uma exclusão com barra ignora uma subárvore aninhada.** `EXCLUDE_FOLDERS=templates,area/sub/pasta`
+ignora a pasta `templates` de 1º nível e a pasta `area/sub/pasta`, e nada mais. É para o `.md` que
+nunca foi nota — briefing de sessão, export, README ao lado de um `index.html` — que cai dentro de
+uma área onde moram notas de verdade: sem isso, a única saída seria excluir a área inteira. A
+comparação é por **segmento de caminho**, nunca por prefixo de texto (`area/14` não ignora
+`area/14-interno`), é insensível a maiúsculas, e `\` do Windows vale como `/`.
 
 ### Flags de `knowrag ingest`
 

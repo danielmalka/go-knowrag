@@ -38,9 +38,23 @@ func stripBOM(raw []byte) []byte {
 	return raw
 }
 
+// errNoFrontmatter carries a way out and the other two do not, and the asymmetry is the point: a
+// file with no block at all is usually a file that was never a note — a design brief, an export, a
+// README dropped next to an `index.html`, whose `.md` is an accident — while a block that is present
+// and wrong is usually a real note with a defect. The two need different actions from the operator,
+// and before this the run said the same kind of sentence about both and then aborted the whole
+// ingestion (D-40).
+//
+// The setting it points at is spelled `exclude_folders` / EXCLUDE_FOLDERS in
+// internal/config/config.go; the nested-path form it promises is Exclusions.Folders in walk.go.
+// Adding frontmatter to the offending file is the wrong fix and is not offered: it turns a build
+// artifact into a note and puts it in the index competing with what the owner wrote.
 var (
-	errFieldMissing      = errors.New("required by PRD-contrato §2.4, missing or empty")
-	errNoFrontmatter     = errors.New("file does not start with a `---` frontmatter block")
+	errFieldMissing  = errors.New("required by PRD-contrato §2.4, missing or empty")
+	errNoFrontmatter = errors.New(
+		"file does not start with a `---` frontmatter block, so it is probably not a note; " +
+			"if it is not, add its folder to this vault's `exclude_folders` setting, which takes a " +
+			"nested path such as `area/sub/folder` and skips that subtree whole")
 	errUnterminatedBlock = errors.New("frontmatter block is never closed by a `---` line")
 )
 
