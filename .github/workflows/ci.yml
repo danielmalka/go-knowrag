@@ -33,11 +33,11 @@ jobs:
   # at length: a check that reports nothing every time is indistinguishable from a check that is
   # passing, and it stays that way on the push that breaks it.
   #
-  # What they run against today is a command whose harness does not exist, so they report pending
-  # rather than red — a permanently failing gate is one everybody learns to scroll past. The
-  # distinction is made by scripts/ci/eval-gate.sh, which fails on every outcome except that one,
-  # and the pending branch stops being taken by itself the day the harness lands. Neither job needs
-  # a TODO, because neither has anything left to remember.
+  # Both measure. That was not always true: they used to run against a command with no harness and
+  # report pending rather than red, because a permanently failing gate is one everybody learns to
+  # scroll past. scripts/ci/eval-gate.sh still makes that distinction, and the list of modes allowed
+  # to answer "pending" is now empty — so every failure here is a failure. The branch stays for the
+  # case that created it, a mode added before its harness is written.
   eval-golden-hermetic:
     runs-on: ubuntu-latest
     steps:
