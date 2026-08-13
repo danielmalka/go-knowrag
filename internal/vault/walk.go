@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 // Exclusions is one vault's exclusion configuration, per PRD-contrato §2.4b. Both lists are data
@@ -89,7 +91,7 @@ func walkVault(root string, ex Exclusions) (paths []string, violations []error, 
 			}
 			// rel, not d.Name(): the whole path is what the entry is compared against, which is what
 			// keeps a bare name first-level-only and a slashed entry pinned to one subtree.
-			if _, excluded := folders[strings.ToLower(rel)]; excluded {
+			if _, excluded := folders[foldName(rel)]; excluded {
 				return fs.SkipDir
 			}
 			return nil
@@ -99,7 +101,7 @@ func walkVault(root string, ex Exclusions) (paths []string, violations []error, 
 			return nil
 		}
 		if name, first := isFirstLevel(rel); first {
-			if _, excluded := rootFiles[strings.ToLower(name)]; excluded {
+			if _, excluded := rootFiles[foldName(name)]; excluded {
 				return nil
 			}
 		}
@@ -140,15 +142,29 @@ func folderSet(entries []string) map[string]struct{} {
 		if len(segments) == 0 {
 			continue
 		}
-		set[strings.ToLower(strings.Join(segments, "/"))] = struct{}{}
+		set[foldName(strings.Join(segments, "/"))] = struct{}{}
 	}
 	return set
 }
 
+// foldName is the one spelling every comparison in this file goes through, on both sides: the
+// configured entry and the name the filesystem reports.
+//
+// strings.ToLower alone was not enough, and the gap is invisible until it bites. It case-folds and
+// does not normalise: "é" written as one rune (NFC) and as "e" plus a combining accent (NFD) stay
+// different strings through it. Apple's filesystems hand back NFD; a value typed into a config file
+// or pasted from a browser is usually NFC. An accented folder would then be configured as excluded
+// and not excluded, with no error — the same silence that let D-40 break ingestion for two days,
+// only inverted: the non-note file comes back into the index instead of aborting the run.
+//
+// Both vaults are ASCII today, so this buys nothing right now. It is here because the cost of
+// finding out is a silent wrong index, and NFC of ASCII is the same ASCII.
+func foldName(s string) string { return strings.ToLower(norm.NFC.String(s)) }
+
 func lowerSet(names []string) map[string]struct{} {
 	set := make(map[string]struct{}, len(names))
 	for _, n := range names {
-		set[strings.ToLower(n)] = struct{}{}
+		set[foldName(n)] = struct{}{}
 	}
 	return set
 }

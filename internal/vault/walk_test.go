@@ -382,3 +382,45 @@ func TestScanVault_SymlinkContentIsNeverRead(t *testing.T) {
 		}
 	}
 }
+
+// TestWalkVault_ExclusionMatchesAcrossUnicodeNormalisation covers the gap a reviewer found: the
+// comparison case-folded but did not normalise, so an accented folder spelled NFD on disk and NFC in
+// the configuration was configured as excluded and not excluded, silently.
+//
+// The fixture writes the directory in one normalisation and configures the other, in both
+// directions, because normalising only one side would pass one of the two.
+func TestWalkVault_ExclusionMatchesAcrossUnicodeNormalisation(t *testing.T) {
+	const (
+		nfc = "referências"  // ê as one rune
+		nfd = "referências" // e + combining circumflex
+	)
+
+	for _, tc := range []struct{ name, onDisk, configured string }{
+		{"disk NFD, config NFC", nfd, nfc},
+		{"disk NFC, config NFD", nfc, nfd},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			dir := filepath.Join(root, "research", tc.onDisk)
+			if err := os.MkdirAll(dir, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "not-a-note.md"), []byte("no frontmatter here"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			paths, violations, err := walkVault(root, Exclusions{Folders: []string{"research/" + tc.configured}})
+			if err != nil {
+				t.Fatalf("walking: %v", err)
+			}
+			if len(violations) != 0 {
+				t.Errorf("excluded subtree reported %d violation(s): %v", len(violations), violations)
+			}
+			for _, p := range paths {
+				if strings.Contains(p, "not-a-note") {
+					t.Errorf("file inside the excluded subtree came back: %s", p)
+				}
+			}
+		})
+	}
+}
