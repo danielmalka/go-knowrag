@@ -243,9 +243,25 @@ func TestPruneDrill_FailsWhenTheIndexDoesNotComeBack(t *testing.T) {
 // simulated by an environment variable that forces an exit code; this one is the only place the
 // restore is proven against the event it was written for.
 //
-// The signal lands while the note is out of the vault: the fake ingest sleeps, and the test waits
-// for the stash file to exist before signalling, so a timing change cannot quietly turn this into a
-// test of the phases before the move.
+// The signal lands while the note is out of the vault AND the ingestion is already running: the
+// fake ingest creates FAKE_INGEST_STARTED immediately before it sleeps (fakeKnowrag,
+// drill_fakes_test.go), and this test waits for that file rather than for the note's absence.
+//
+// WHY IT WAITS FOR THAT AND NOT FOR THE STASH, which is what it did until 2026-08-13 and what made
+// it fail about once in every thirteen runs. The note disappears the moment `mv` renames it, and at
+// that moment the drill's process group holds nothing but the drill's own shell — the ingestion has
+// not been forked yet. A group signal delivered there kills nobody, so no child ever returns early,
+// and bash cannot run a trap until the command it is waiting on comes back. Measured: those runs
+// stop at 30.02 s, the exact length of the fake's sleep, with `exit status 1` from the drill's own
+// handler and no `--prune` in the CLI log. The script is doing the only thing a shell can do; the
+// test was signalling a process group whose membership was still being built.
+//
+// So the two windows the old test hit by luck are covered on purpose instead, and deterministically:
+// TestPruneDrill_ASignalDuringAnOrdinaryCommandStopsTheDrill for a signal taken during a foreground
+// command that succeeds, TestPruneDrill_ASignalBetweenCommandsStopsTheDrill for one pending at a
+// command boundary. What is left here is the case neither can fake — a real signal to a real process
+// group with a real child dying of it — and once FAKE_INGEST_STARTED exists there is always such a
+// child, so the drill stops in milliseconds or something is wrong.
 //
 // It is launched with Setpgid because os/exec would otherwise put the script in the test binary's
 // own process group, and signalling that group kills the test. That is also why this is a Go test
@@ -286,6 +302,7 @@ func TestPruneDrill_RestoresTheNoteOnASignal(t *testing.T) {
 				"FAKE_INGEST_REPORT":         oneOrphanReport,
 				"FAKE_PRUNE_REPORT":          prunedReport,
 				"FAKE_INGEST_SLEEP":          "30",
+				"FAKE_INGEST_STARTED":        filepath.Join(dir, "ingest.started"),
 				"KNOWRAG_VAULT_PESSOAL_PATH": vaultRoot,
 				"KNOWRAG_DRILL_STATE_DIR":    state,
 			}
@@ -326,18 +343,28 @@ func TestPruneDrill_RestoresTheNoteOnASignal(t *testing.T) {
 				t.Fatalf("starting the drill: %v", err)
 			}
 
-			// Signal only once the note is actually out of the vault. Sleeping a fixed time here would
-			// make this a test of whatever phase happened to be running.
+			// Signal only once the ingestion is running, for the reason in this test's header: before
+			// that the process group is still being assembled, and a signal to it kills nobody.
+			// Sleeping a fixed time here would make this a test of whatever phase happened to be
+			// running.
 			deadline := time.Now().Add(20 * time.Second)
 			for {
-				if _, err := os.Stat(note); os.IsNotExist(err) {
+				if _, err := os.Stat(filepath.Join(dir, "ingest.started")); err == nil {
 					break
 				}
 				if time.Now().After(deadline) {
 					_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-					t.Fatalf("the drill never moved the note aside; output:\n%s", out())
+					t.Fatalf("the drill never reached the ingestion; output:\n%s", out())
 				}
 				time.Sleep(20 * time.Millisecond)
+			}
+			// And the note really is out of the vault at that point. The wait above is on a later
+			// event than the move, so this cannot be false today — it is here so that reordering the
+			// phases fails loudly instead of quietly turning this into a test of the wrong window.
+			if _, err := os.Stat(note); err == nil {
+				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				t.Fatalf("the ingestion started with the note still in the vault, so this would be a "+
+					"test of the phases before the move; output:\n%s", out())
 			}
 
 			if err := syscall.Kill(-cmd.Process.Pid, sig); err != nil {
@@ -406,6 +433,59 @@ func TestPruneDrill_ASignalBetweenCommandsStopsTheDrill(t *testing.T) {
 			}
 			if noteState() != "present" {
 				t.Errorf("the note did not come back")
+			}
+		})
+	}
+}
+
+// TestPruneDrill_ASignalDuringAnOrdinaryCommandStopsTheDrill is the deterministic cover for the
+// window that made TestPruneDrill_RestoresTheNoteOnASignal fail about once in every thirteen runs,
+// and it is the case that was actually broken.
+//
+// A BARE SIGINT DOES NOT STOP A BASH SCRIPT. While bash waits on an ordinary foreground command it
+// only records an arriving SIGINT, and re-raises it afterwards ONLY IF that command was itself
+// killed by SIGINT; a command that exits 0 takes the interrupt with it and the script walks on. The
+// rule is bash's own (jobs.c, wait_sigint_handler), and scripts/prune-drill.sh is nothing but such
+// commands. Measured on 2026-08-13: a Ctrl-C landing on the drill's `mv` — which is exactly where
+// the sibling test aims, since it signals the instant the note leaves the vault — was swallowed,
+// and the run went on to call `knowrag ingest --tenant interno --prune --yes` with the operator's
+// interrupt behind it. That is the deletion this whole procedure exists to keep behind a decision.
+// `trap interrupted INT TERM` is what closes it.
+//
+// The window is reached here without a clock: the fake signals the drill's shell from inside the
+// FIRST `knowrag stats` and then exits 0, which is that shape exactly. That count runs before
+// anything has moved, so a drill that honoured the signal never touched the vault at all.
+//
+// SIGTERM shares the loop although bash does NOT discard it — measured the same day, it acts on a
+// SIGTERM at once. It is here to notice the two signals drifting apart, and it is what fails if the
+// trap is ever narrowed to INT alone.
+func TestPruneDrill_ASignalDuringAnOrdinaryCommandStopsTheDrill(t *testing.T) {
+	for _, sig := range []string{"INT", "TERM"} {
+		t.Run(sig, func(t *testing.T) {
+			env, noteState := pruneFixture(t, map[string]string{"FAKE_SIGNAL_LEADER_STATS": sig})
+			run := runPruneDrill(t, []string{"--yes", "pessoal", "areas/nota.md"}, env, true)
+
+			if strings.Contains(run.output, "FAKE COULD NOT SIGNAL THE LEADER") {
+				t.Fatalf("the fake never delivered the signal, so this test proved nothing:\n%s", run.output)
+			}
+			if run.code == 0 {
+				t.Fatalf("the drill ran to completion through a %s; output:\n%s", sig, run.output)
+			}
+			if strings.Contains(run.cliLog, "--prune") {
+				t.Errorf("a signalled drill went on to prune; cli log:\n%s", run.cliLog)
+			}
+			// Stronger than "it did not prune": the signal landed before the vault was touched, so a
+			// drill that honoured it never reached an ingestion either. Without this line a run that
+			// swallowed the signal and merely failed later — on the restored counts, say — would still
+			// satisfy every other assertion here.
+			if strings.Contains(run.cliLog, "ingest") {
+				t.Errorf("the drill went past the count it was signalled during; cli log:\n%s", run.cliLog)
+			}
+			if noteState() != "present" {
+				t.Errorf("the note left the vault on a run signalled before the move")
+			}
+			if !strings.Contains(run.output, "interrupted by a signal") {
+				t.Errorf("the drill did not say it was interrupted; output:\n%s", run.output)
 			}
 		})
 	}

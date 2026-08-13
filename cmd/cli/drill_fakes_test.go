@@ -46,12 +46,27 @@ exit 0
 // counts three times — before, after the prune, after the note is restored — and its full cycle
 // only closes if the third read is back where the first was.
 const fakeKnowrag = `#!/usr/bin/env bash
+# signal_leader delivers $1 to the drill's own bash — the process-group leader — and shouts if it
+# could not. A fake that silently fails to signal turns the test that asked for it into a green
+# no-op, which is the shape this repository has been bitten by.
+signal_leader() {
+  leader=$(ps -o pgid= -p $$ | tr -d ' ')
+  kill -"$1" "$leader" 2>/dev/null || printf 'FAKE COULD NOT SIGNAL THE LEADER\n' >&2
+}
 printf '%s\n' "$*" >>"$FAKE_CLI_LOG"
 case "$1" in
   stats)
     n=$(cat "$FAKE_STATS_COUNT" 2>/dev/null || printf 0)
     n=$((n + 1))
     printf '%s' "$n" >"$FAKE_STATS_COUNT"
+    # FAKE_SIGNAL_LEADER_STATS=INT|TERM signals the leader from inside the FIRST count and then
+    # exits 0, which is the window a bare SIGINT is discarded in: bash waiting on an ordinary
+    # foreground command that succeeds (jobs.c, wait_sigint_handler). It is the same window the
+    # drill's own ` + "`mv`" + ` occupies, reached without a clock. FAKE_SIGNAL_LEADER below covers the
+    # other one — a signal pending at a command boundary.
+    if [ "$n" = 1 ] && [ -n "${FAKE_SIGNAL_LEADER_STATS-}" ]; then
+      signal_leader "$FAKE_SIGNAL_LEADER_STATS"
+    fi
     if [ "$n" = 1 ]; then printf '%s\n' "$FAKE_STATS_BEFORE"
     elif [ "$n" = 2 ]; then printf '%s\n' "$FAKE_STATS_AFTER"
     elif [ "${FAKE_STATS_SEQUENCE:-0}" = 1 ]; then printf '%s\n' "$FAKE_STATS_BEFORE"
@@ -68,7 +83,16 @@ case "$1" in
   ingest)
     # Slow only for the plain ingest, which is the phase that holds the note out of the vault: it is
     # the window a signal has to land in for TestPruneDrill_RestoresTheNoteOnASignal to mean anything.
-    if [ "${2:-}" != "--dry-run" ] && [ -n "${FAKE_INGEST_SLEEP-}" ]; then sleep "$FAKE_INGEST_SLEEP"; fi
+    #
+    # FAKE_INGEST_STARTED names a file this fake creates immediately before it goes to sleep. It is
+    # what makes that test deterministic: once the file exists this process exists too, in the drill's
+    # process group, with SIGINT and SIGTERM at their defaults — so a group signal from then on always
+    # kills something, and the drill's shell always reaches a command boundary at once. Signalling any
+    # earlier is signalling a group whose membership is still being built.
+    if [ "${2:-}" != "--dry-run" ] && [ -n "${FAKE_INGEST_SLEEP-}" ]; then
+      if [ -n "${FAKE_INGEST_STARTED-}" ]; then : >"$FAKE_INGEST_STARTED"; fi
+      sleep "$FAKE_INGEST_SLEEP"
+    fi
     if [ "${2:-}" = "--dry-run" ]; then
       if [ "${FAKE_DRYRUN_FAIL:-0}" = 1 ]; then printf 'embedder handshake failed\n' >&2; exit 1; fi
       printf '730 note(s): skipped=730\norphans: none\n'; exit 0
@@ -82,10 +106,7 @@ case "$1" in
     # a wall-clock signal from the test hits about one time in twelve. Signalling the whole group
     # instead would kill this fake too, and bash would see a child killed by a signal: the other
     # window, the one that was never broken.
-    if [ -n "${FAKE_SIGNAL_LEADER-}" ]; then
-      leader=$(ps -o pgid= -p $$ | tr -d ' ')
-      kill -"$FAKE_SIGNAL_LEADER" "$leader" 2>/dev/null || printf 'FAKE COULD NOT SIGNAL THE LEADER\n' >&2
-    fi
+    if [ -n "${FAKE_SIGNAL_LEADER-}" ]; then signal_leader "$FAKE_SIGNAL_LEADER"; fi
     printf '%s\n' "${FAKE_INGEST_REPORT-730 note(s): upserted=730}"; exit 0 ;;
 esac
 exit 0
