@@ -52,6 +52,7 @@ func DefaultSuite(root string) Suite {
 		PrivateVisibilityCase(),
 		ArchivedExclusionCase(),
 		PrivilegedPathCase(),
+		WritePathTenantCase(),
 		ArchitectureBoundaryCase(root),
 	}}
 }

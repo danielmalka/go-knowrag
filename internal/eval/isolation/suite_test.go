@@ -105,9 +105,15 @@ func TestReport_HasNoScoreField(t *testing.T) {
 // overclaim in the one place overclaiming is most expensive.
 //
 // The second list is the other half of the same honesty, and it is the half a reader cannot recover
-// on their own: every case drives one entry point, so a green isolation gate can coexist with a leak
-// on the write path or in `stats`, and whoever reads PASS has to be told that without going to read
-// the suite.
+// on their own: the suite drives two entry points, so a green isolation gate can coexist with a leak
+// in `stats` or in the tenant the MCP server binds, and whoever reads PASS has to be told that
+// without going to read the suite.
+//
+// The list is checked against the paragraph it belongs to, not against the whole summary, and that
+// split is what stops this test from becoming the lock on a stale claim. The write path moved from
+// the second list to the first when WritePathTenantCase was added: a check for "internal/ingest
+// appears somewhere in the summary" would have stayed green through that move and gone on requiring
+// the report to disclaim what it now proves.
 func TestReport_SummaryStatesWhatItDoesNotProve(t *testing.T) {
 	summary := Suite{Cases: []Case{passing("a")}}.Run(t.Context()).Summary()
 
@@ -116,16 +122,34 @@ func TestReport_SummaryStatesWhatItDoesNotProve(t *testing.T) {
 			t.Errorf("the summary does not mention %q:\n%s", want, summary)
 		}
 	}
+
+	proves, gaps, split := strings.Cut(summary, "Untouched by every case above")
+	if !split {
+		t.Fatalf("the summary no longer separates what it proves from what it leaves untouched, so "+
+			"neither list can be checked against the paragraph it belongs to:\n%s", summary)
+	}
 	for _, want := range []string{
-		"internal/ingest",       // the write path
 		"cmd/mcp-server",        // the tenant the server binds at startup
 		"stats",                 // counts every tenant when none is named, by design
 		"offset 0",              // pagination is never exercised
 		"FilterMatchesAnything", // and neither is the filter probe
 	} {
-		if !strings.Contains(summary, want) {
+		if !strings.Contains(gaps, want) {
 			t.Errorf("the summary does not name %q as outside the suite, so a reader takes PASS for "+
 				"a claim about it:\n%s", want, summary)
+		}
+	}
+	// The write path is proven now, so it has to be claimed and must not still be disclaimed. Both
+	// halves are required: the first alone would pass over a summary that said it twice and in
+	// opposite directions, which is worse than either sentence on its own.
+	if !strings.Contains(proves, "internal/ingest") {
+		t.Errorf("the summary does not say the write path is proven, so a reader who needs to know "+
+			"whether ingestion is covered cannot find out from PASS:\n%s", summary)
+	}
+	for _, gone := range []string{"internal/ingest", "write path"} {
+		if strings.Contains(gaps, gone) {
+			t.Errorf("the summary still names %q among the things a PASS says nothing about, after "+
+				"WritePathTenantCase started proving it:\n%s", gone, summary)
 		}
 	}
 

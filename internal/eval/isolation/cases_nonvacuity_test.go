@@ -379,13 +379,14 @@ func TestDefaultSuite_RegistersEveryCase(t *testing.T) {
 		"private is never returned",
 		"archived is returned only when asked for",
 		"privileged",
+		"write path",
 		"architecture",
 	} {
 		if !slices.ContainsFunc(names, func(n string) bool { return strings.Contains(n, want) }) {
 			t.Errorf("no case in DefaultSuite mentions %q; it is not being run: %v", want, names)
 		}
 	}
-	if len(names) != 8 {
+	if len(names) != 9 {
 		t.Errorf("DefaultSuite has %d case(s): %v. A case added without a line here is a case whose "+
 			"absence from this list is the only thing that would have flagged it", len(names), names)
 	}
@@ -417,8 +418,9 @@ func sentinelFor(t *testing.T, tenantID string) error {
 	return err
 }
 
-// searchDrivenCases is every case that reaches the store. The architecture case is excluded: it
-// scans source and never searches, so a leaking store says nothing about it.
+// searchDrivenCases is every case that reaches the store through Searcher.Search. The architecture
+// case is excluded: it scans source and never searches, so a leaking store says nothing about it.
+// So is the write case, which never searches either — its harness is cases_write_nonvacuity_test.go.
 func searchDrivenCases() []Case {
 	return []Case{
 		CrossTenantCase(),
@@ -430,3 +432,43 @@ func searchDrivenCases() []Case {
 		PrivilegedPathCase(),
 	}
 }
+
+// TestEveryCase_IsCoveredByANonVacuityHarness closes the gap the two lists above would otherwise
+// leave between them.
+//
+// The harnesses in this package iterate hand-maintained lists, and a case that appears in none of
+// them is a case whose assertions can all be switched off with the package green — which is the
+// defect this whole file was written to answer. Splitting the suite into a second entry point made
+// that reachable for the first time: before the write case there was one list, and a case missing
+// from it also failed TestDefaultSuite_RegistersEveryCase's count.
+//
+// The architecture case is the one deliberate omission, named rather than skipped by shape: it scans
+// source, drives neither a store nor an ingestion, and has two failure harnesses of its own above
+// (TestArchitectureCase_FiresOnAViolatingTree and TestArchitectureCase_FailsWhenItCannotScan).
+func TestEveryCase_IsCoveredByANonVacuityHarness(t *testing.T) {
+	covered := map[string]bool{ArchitectureBoundaryCase("").Name: true}
+	for _, c := range searchDrivenCases() {
+		covered[c.Name] = true
+	}
+	for _, c := range writeDrivenCases() {
+		covered[c.Name] = true
+	}
+
+	var shipped []string
+	for _, c := range DefaultSuite("").Cases {
+		shipped = append(shipped, c.Name)
+		if !covered[c.Name] {
+			t.Errorf("the case %q is in DefaultSuite and in no non-vacuity harness, so every "+
+				"assertion inside it could be deleted with this package still green", c.Name)
+		}
+		delete(covered, c.Name)
+	}
+	for name := range covered {
+		t.Errorf("the harnesses drive a case %q that DefaultSuite does not ship, so what they prove "+
+			"is not what the CLI runs: %v", name, shipped)
+	}
+}
+
+// writeDrivenCases is every case that drives an ingestion. Its harness is
+// cases_write_nonvacuity_test.go.
+func writeDrivenCases() []Case { return []Case{WritePathTenantCase()} }
