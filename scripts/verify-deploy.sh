@@ -7,8 +7,11 @@
 # CI and on any checkout. What it therefore cannot tell you is whether the deployed instance matches
 # this file; that is what redeploying from it is for.
 #
-# Takes a path so a test can point it at a deliberately broken copy. A verification script that has
-# never been shown failing is a verification script nobody has verified.
+# Takes a path so a test can point it at a deliberately broken copy: cmd/cli/verify_deploy_test.go
+# writes one fixture per failure branch this file defines below, runs this script against each as a
+# subprocess with `bash scripts/verify-deploy.sh <fixture>`, and asserts on the exit code and the
+# FAIL message. It also runs this script, unmodified, against the real deploy/docker-compose.yml as
+# its passing case.
 set -uo pipefail
 
 compose="${1:-deploy/docker-compose.yml}"
