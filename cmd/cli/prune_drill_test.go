@@ -6,10 +6,11 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/danielmalka/go-knowrag/internal/ingest"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/danielmalka/go-knowrag/internal/ingest"
 )
 
 // The reports the fake CLI hands back, in internal/ingest/report.go's exact shape — orphanLines

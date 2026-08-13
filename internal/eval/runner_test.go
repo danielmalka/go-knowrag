@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/danielmalka/go-knowrag/internal/goldenset"
 	"github.com/danielmalka/go-knowrag/internal/retrieval"
 )
 
@@ -45,12 +46,29 @@ func (f *fakeSearcher) Search(_ context.Context, q retrieval.Query) ([]retrieval
 	return answer, nil
 }
 
+// The fixture UIDs. Fixed literals rather than uuid.New(), so a failure prints the same value on
+// every run and a diff of the test output means something.
+//
+// The same three literals are declared in internal/goldenset/goldenset_test.go, and that duplication
+// is the deliberate answer to the one fixture the split left shared. Everything else the schema tests
+// use — writeGoldenSet, loadFixture, readSet, coverageOnly, aQuestion, testTable, questionsFor —
+// moved with them and is used nowhere else; these three constants are all that both sides need. Three
+// UUID literals in two test files cost less than a third package existing only to hold them, and less
+// than an exported test helper in production code.
+const (
+	uidA = "11111111-1111-4111-8111-111111111111"
+	uidB = "22222222-2222-4222-8222-222222222222"
+	uidC = "33333333-3333-4333-8333-333333333333"
+)
+
 func result(uid string, chunk int, score float32) retrieval.Result {
 	return retrieval.Result{UID: uid, ChunkIndex: chunk, Score: score, Text: "chunk text", Untrusted: true}
 }
 
-func question(text, uid string, chunk *int) GoldenQuestion {
-	return GoldenQuestion{Question: text, UID: uid, ChunkIndex: chunk, Area: "alfa", Author: "owner", Date: "2026-08-11"}
+func question(text, uid string, chunk *int) goldenset.GoldenQuestion {
+	return goldenset.GoldenQuestion{
+		Question: text, UID: uid, ChunkIndex: chunk, Area: "alfa", Author: "owner", Date: "2026-08-11",
+	}
 }
 
 func intPtr(n int) *int { return &n }
@@ -67,7 +85,7 @@ func TestRunGolden_HitAndMiss(t *testing.T) {
 	}
 
 	cases := map[string]struct {
-		question GoldenQuestion
+		question goldenset.GoldenQuestion
 		want     bool
 	}{
 		"expected uid inside the top 5":           {question("q1", uidC, nil), true},
@@ -81,7 +99,7 @@ func TestRunGolden_HitAndMiss(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			s := &fakeSearcher{answers: [][]retrieval.Result{top5}}
-			results, err := RunGolden(t.Context(), s, []GoldenQuestion{tc.question}, runConfig(5))
+			results, err := RunGolden(t.Context(), s, []goldenset.GoldenQuestion{tc.question}, runConfig(5))
 			if err != nil {
 				t.Fatalf("RunGolden: %v", err)
 			}
@@ -103,12 +121,12 @@ func TestRunGolden_SearcherErrorIsCapturedAndTheRunContinues(t *testing.T) {
 	s := &fakeSearcher{perQuery: map[string][]retrieval.Result{"ok": {result(uidA, 0, 0.9)}}}
 	failing := &fakeSearcher{err: boom}
 
-	good, err := RunGolden(t.Context(), s, []GoldenQuestion{question("ok", uidA, nil)}, runConfig(5))
+	good, err := RunGolden(t.Context(), s, []goldenset.GoldenQuestion{question("ok", uidA, nil)}, runConfig(5))
 	if err != nil {
 		t.Fatalf("RunGolden: %v", err)
 	}
 	bad, err := RunGolden(t.Context(), failing,
-		[]GoldenQuestion{question("first", uidA, nil), question("second", uidB, nil)}, runConfig(5))
+		[]goldenset.GoldenQuestion{question("first", uidA, nil), question("second", uidB, nil)}, runConfig(5))
 	if err != nil {
 		t.Fatalf("RunGolden returned a run-level error for a per-question failure: %v", err)
 	}
@@ -139,7 +157,8 @@ func TestRunGolden_SearcherErrorIsCapturedAndTheRunContinues(t *testing.T) {
 func TestRunGolden_AsksTheProductionQuery(t *testing.T) {
 	s := &fakeSearcher{answers: [][]retrieval.Result{{result(uidA, 0, 0.9)}}}
 
-	if _, err := RunGolden(t.Context(), s, []GoldenQuestion{question("q", uidA, nil)}, runConfig(5)); err != nil {
+	one := []goldenset.GoldenQuestion{question("q", uidA, nil)}
+	if _, err := RunGolden(t.Context(), s, one, runConfig(5)); err != nil {
 		t.Fatalf("RunGolden: %v", err)
 	}
 	if len(s.queries) != 1 {
@@ -183,7 +202,8 @@ func TestRunGolden_ModeReachesEveryQuery(t *testing.T) {
 	cfg.Mode = retrieval.SearchModeDenseOnly
 	s := &fakeSearcher{answers: [][]retrieval.Result{{result(uidA, 0, 0.9)}}}
 
-	if _, err := RunGolden(t.Context(), s, []GoldenQuestion{question("a", uidA, nil), question("b", uidB, nil)}, cfg); err != nil {
+	two := []goldenset.GoldenQuestion{question("a", uidA, nil), question("b", uidB, nil)}
+	if _, err := RunGolden(t.Context(), s, two, cfg); err != nil {
 		t.Fatalf("RunGolden: %v", err)
 	}
 	for i, q := range s.queries {
@@ -194,12 +214,12 @@ func TestRunGolden_ModeReachesEveryQuery(t *testing.T) {
 }
 
 func TestRunGolden_RefusesToMeasureNothing(t *testing.T) {
-	q := []GoldenQuestion{question("q", uidA, nil)}
+	q := []goldenset.GoldenQuestion{question("q", uidA, nil)}
 	s := &fakeSearcher{}
 
 	cases := map[string]struct {
 		searcher  Searcher
-		questions []GoldenQuestion
+		questions []goldenset.GoldenQuestion
 		k         int
 	}{
 		"no searcher":  {nil, q, 5},
@@ -224,7 +244,7 @@ func TestRunGolden_RefusesToMeasureNothing(t *testing.T) {
 func TestRunGolden_NonUUIDIsNotSilentlyRanked(t *testing.T) {
 	t.Run("expected uid", func(t *testing.T) {
 		s := &fakeSearcher{answers: [][]retrieval.Result{{result(uidA, 0, 0.9)}}}
-		results, err := RunGolden(t.Context(), s, []GoldenQuestion{question("q", "not-a-uuid", nil)}, runConfig(5))
+		results, err := RunGolden(t.Context(), s, []goldenset.GoldenQuestion{question("q", "not-a-uuid", nil)}, runConfig(5))
 		if err != nil {
 			t.Fatalf("RunGolden: %v", err)
 		}
@@ -242,7 +262,7 @@ func TestRunGolden_NonUUIDIsNotSilentlyRanked(t *testing.T) {
 	// eval has no opinion about points it did not ask for.
 	t.Run("returned point is simply not a match", func(t *testing.T) {
 		s := &fakeSearcher{answers: [][]retrieval.Result{{result("point-7", 0, 0.9)}}}
-		results, err := RunGolden(t.Context(), s, []GoldenQuestion{question("q", uidA, nil)}, runConfig(5))
+		results, err := RunGolden(t.Context(), s, []goldenset.GoldenQuestion{question("q", uidA, nil)}, runConfig(5))
 		if err != nil {
 			t.Fatalf("RunGolden: %v", err)
 		}
@@ -273,7 +293,7 @@ func TestRunGolden_ReturnsTheSearchersOrderUntouched(t *testing.T) {
 	want := joinUIDs(answer)
 	s := &fakeSearcher{answers: [][]retrieval.Result{slices.Clone(answer)}}
 
-	results, err := RunGolden(t.Context(), s, []GoldenQuestion{question("q", uidA, nil)}, runConfig(5))
+	results, err := RunGolden(t.Context(), s, []goldenset.GoldenQuestion{question("q", uidA, nil)}, runConfig(5))
 	if err != nil {
 		t.Fatalf("RunGolden: %v", err)
 	}
@@ -326,7 +346,8 @@ func TestRunGolden_TieAtTheCutIsFlaggedNotSmoothedOver(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			s := &fakeSearcher{answers: [][]retrieval.Result{tc.answer}}
-			results, err := RunGolden(t.Context(), s, []GoldenQuestion{question("q", tc.expected, nil)}, runConfig(tc.k))
+			qs := []goldenset.GoldenQuestion{question("q", tc.expected, nil)}
+			results, err := RunGolden(t.Context(), s, qs, runConfig(tc.k))
 			if err != nil {
 				t.Fatalf("RunGolden: %v", err)
 			}
@@ -351,7 +372,7 @@ func TestRunGolden_OverAnsweringSearcherCannotWidenTheWindow(t *testing.T) {
 	}
 	s := &fakeSearcher{answers: [][]retrieval.Result{answer}}
 
-	results, err := RunGolden(t.Context(), s, []GoldenQuestion{question("q", uidC, nil)}, runConfig(5))
+	results, err := RunGolden(t.Context(), s, []goldenset.GoldenQuestion{question("q", uidC, nil)}, runConfig(5))
 	if err != nil {
 		t.Fatalf("RunGolden: %v", err)
 	}
@@ -394,7 +415,7 @@ func TestRunGolden_CancelledRunSaysItWasCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
-	questions := make([]GoldenQuestion, 0, 8)
+	questions := make([]goldenset.GoldenQuestion, 0, 8)
 	for i := range 8 {
 		questions = append(questions, question("question "+string(rune('a'+i)), uidA, nil))
 	}
@@ -433,7 +454,7 @@ func TestRunGolden_AlreadyCancelledContextAsksNothing(t *testing.T) {
 	cancel()
 
 	s := &fakeSearcher{answers: [][]retrieval.Result{{result(uidA, 0, 0.9)}}}
-	results, err := RunGolden(ctx, s, []GoldenQuestion{question("q", uidA, nil)}, runConfig(5))
+	results, err := RunGolden(ctx, s, []goldenset.GoldenQuestion{question("q", uidA, nil)}, runConfig(5))
 
 	if err == nil {
 		t.Fatal("a run on a dead context reported no error")
@@ -451,7 +472,7 @@ func TestRunGolden_AlreadyCancelledContextAsksNothing(t *testing.T) {
 // first question — and the two tests above would still pass.
 func TestRunGolden_LiveContextIsNotTreatedAsCancelled(t *testing.T) {
 	s := &fakeSearcher{answers: [][]retrieval.Result{{result(uidA, 0, 0.9)}}}
-	questions := []GoldenQuestion{question("a", uidA, nil), question("b", uidA, nil), question("c", uidA, nil)}
+	questions := []goldenset.GoldenQuestion{question("a", uidA, nil), question("b", uidA, nil), question("c", uidA, nil)}
 
 	results, err := RunGolden(t.Context(), s, questions, runConfig(5))
 	if err != nil {

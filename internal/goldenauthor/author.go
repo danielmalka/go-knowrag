@@ -18,26 +18,21 @@
 // local type declared in a file that already imported retrieval. Each fix was narrower than the hole
 // it closed, and the next one would have needed type inference.
 //
-// Here the guarantee is the import graph. This package imports internal/vault and internal/eval and
-// nothing else of this module; it cannot import internal/retrieval or internal/store, and there is
-// no sibling file in its package that can. TestArch_GoldenAuthoringCannotReachTheIndex
-// (internal/archtest) is the whole check, and it is one FindImporters call over one directory with no
-// list of symbols, files or packages in it. Three of the five bypasses became impossible to write
+// Here the guarantee is the import graph. This package imports internal/vault and
+// internal/goldenset and nothing else of this module; it cannot import internal/retrieval,
+// internal/store or internal/eval, and there is no sibling file in its package that can.
+// TestArch_GoldenAuthoringCannotReachTheIndex (internal/archtest/boundary_test.go) is the whole
+// check, and it is one FindImporters call per forbidden package over one directory, with no list of
+// symbols, files or packages of its own. Three of the five bypasses became impossible to write
 // rather than merely red, which is what CLAUDE.md says to aim for when a plant will not go red.
 //
-// **One route is still open, and it is written here rather than left to be re-found.** internal/eval
-// is two things in one package: the golden-set file schema this code needs, and the gate that
-// searches. Importing it for the first brings the second, so eval.LoadCorpus + eval.NewCorpusSearcher
-// + eval.RunGolden compile from this package today and would return real hits over a local corpus
-// file. What that is not is a route to the deployment's index — no Qdrant, no embedder, and no corpus
-// path this command ever holds — so it takes three deliberate calls to obviously-named functions
-// inside a package whose only job is authoring, rather than the one careless line every earlier
-// bypass needed.
-//
-// Closing it means splitting the file schema (goldenset.go, coverage.go, authoring.go) out of
-// internal/eval into a package that imports no searcher. That is the right end state and it is not
-// done here: nine of internal/eval's test files share the fixtures those three declare, so the move
-// re-homes test scaffolding across two packages and is a change of its own, not a rider on this one.
+// The last of the five was closed by the split that created internal/goldenset. internal/eval used
+// to be two things in one package — the golden-set file schema this code needs, and the gate that
+// searches — so importing it for the first brought the second: eval.LoadCorpus,
+// eval.NewCorpusSearcher and eval.RunGolden compiled from here and returned real hits over a local
+// corpus file. The schema now lives in internal/goldenset, which imports no searcher, and
+// internal/eval is on the forbidden list of the test above. Writing that bypass is no longer a
+// question of discipline: the names are not in scope.
 //
 // What is left in cmd/cli is a cobra wrapper thin enough to read in one screen.
 package goldenauthor
@@ -53,7 +48,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/danielmalka/go-knowrag/internal/eval"
+	"github.com/danielmalka/go-knowrag/internal/goldenset"
 	"github.com/danielmalka/go-knowrag/internal/vault"
 )
 
@@ -210,20 +205,20 @@ func isTerminal(f *os.File) bool {
 // to debug, it is the first step nobody has taken — and the coverage table is the part this package
 // cannot invent: which areas exist and how many questions each needs is the owner's, and writing a
 // guess into it would aim every session at the wrong thing.
-func openSet(path string) (eval.GoldenSet, error) {
-	set, err := eval.ReadGoldenSet(path)
+func openSet(path string) (goldenset.GoldenSet, error) {
+	set, err := goldenset.ReadGoldenSet(path)
 	if err != nil {
-		if errors.Is(err, eval.ErrGoldenSetMissing) {
-			return eval.GoldenSet{}, fmt.Errorf("%w: no golden set at %s. Create it with a "+
+		if errors.Is(err, goldenset.ErrGoldenSetMissing) {
+			return goldenset.GoldenSet{}, fmt.Errorf("%w: no golden set at %s. Create it with a "+
 				"`coverage:` table first — the table is what says how many questions each area "+
 				"needs, and this command has nothing to aim at without it "+
-				"(internal/eval/coverage.go, CoverageTable)", ErrRefused, path)
+				"(internal/goldenset/coverage.go, CoverageTable)", ErrRefused, path)
 		}
-		return eval.GoldenSet{}, fmt.Errorf("%w: %v", ErrRefused, err)
+		return goldenset.GoldenSet{}, fmt.Errorf("%w: %v", ErrRefused, err)
 	}
 
-	// The same predicate AppendQuestion applies before it writes (internal/eval/authoring.go), called
-	// through the same method so the two can never disagree about what a usable table is.
+	// The same predicate AppendQuestion applies before it writes (internal/goldenset/authoring.go),
+	// called through the same method so the two can never disagree about what a usable table is.
 	//
 	// It is not a duplicate of that guard, and the difference is what the operator gets. This one runs
 	// before the vaults are scanned and says what to fix; without it a zero-byte file — which decodes
@@ -231,7 +226,7 @@ func openSet(path string) (eval.GoldenSet, error) {
 	// prints an empty progress report and exits, which reads as "there is nothing left to ask" from a
 	// tool that never looked. The one in AppendQuestion is what makes it true rather than tidy.
 	if err := set.Coverage.Validate(); err != nil {
-		return eval.GoldenSet{}, fmt.Errorf("%w: the golden set at %s declares no usable coverage "+
+		return goldenset.GoldenSet{}, fmt.Errorf("%w: the golden set at %s declares no usable coverage "+
 			"table, so this session would have no area to draw from and no target to fill: %v",
 			ErrRefused, path, err)
 	}
@@ -332,7 +327,7 @@ func session(
 	in io.Reader,
 	path string,
 	cards []noteCard,
-	set eval.GoldenSet,
+	set goldenset.GoldenSet,
 	who, date string,
 	draw func(int) int,
 ) error {
@@ -352,11 +347,12 @@ func session(
 	// rather than questions saved, so skipping a note still advances the suggestion — otherwise a run
 	// of skips would offer the same kind over and over.
 	turn := 0
-	// The loop condition is the table's ceiling: a MaxTotal of zero is "no maximum" (coverage.go,
-	// CoverageGroup), and nothing downstream would refuse the extra entries — ValidateCoverage only
-	// warns at run time — so this is the one place that number stops anything.
+	// The loop condition is the table's ceiling: a MaxTotal of zero is "no maximum"
+	// (internal/goldenset/coverage.go, CoverageGroup), and nothing downstream would refuse the extra
+	// entries — ValidateCoverage only warns at run time — so this is the one place that number stops
+	// anything.
 	for set.Coverage.MaxTotal == 0 || len(set.Questions) < set.Coverage.MaxTotal {
-		card, ok := drawNote(cards, eval.CoverageStatus(set.Questions, set.Coverage), asked, draw)
+		card, ok := drawNote(cards, goldenset.CoverageStatus(set.Questions, set.Coverage), asked, draw)
 		if !ok {
 			break
 		}
@@ -382,14 +378,14 @@ func session(
 			continue
 		}
 
-		q := eval.GoldenQuestion{
+		q := goldenset.GoldenQuestion{
 			Question: text,
 			UID:      card.UID,
 			Area:     card.Area,
 			Author:   who,
 			Date:     date,
 		}
-		if err := eval.AppendQuestion(path, q); err != nil {
+		if err := goldenset.AppendQuestion(path, q); err != nil {
 			return err
 		}
 		set.Questions = append(set.Questions, q)
@@ -408,7 +404,9 @@ func session(
 // the first area with a candidate is what makes "the area the progress report says is shortest" and
 // "the area the next card comes from" the same fact rather than two that can disagree. Areas the
 // table declares full are already last there and are skipped outright.
-func drawNote(cards []noteCard, status []eval.AreaStatus, asked map[string]bool, draw func(int) int) (noteCard, bool) {
+func drawNote(
+	cards []noteCard, status []goldenset.AreaStatus, asked map[string]bool, draw func(int) int,
+) (noteCard, bool) {
 	for _, area := range status {
 		if area.Full() {
 			continue
@@ -429,12 +427,12 @@ func drawNote(cards []noteCard, status []eval.AreaStatus, asked map[string]bool,
 
 // printProgress writes where the set stands, in CoverageStatus's order — neediest first, so what to
 // do next is the first line rather than something to find in a table of twenty areas.
-func printProgress(out io.Writer, path string, set eval.GoldenSet) error {
+func printProgress(out io.Writer, path string, set goldenset.GoldenSet) error {
 	if _, err := fmt.Fprintf(out, "golden set %s: %d question(s), target %d-%d\n",
 		path, len(set.Questions), set.Coverage.MinTotal, set.Coverage.MaxTotal); err != nil {
 		return fmt.Errorf("writing the progress report: %w", err)
 	}
-	for _, area := range eval.CoverageStatus(set.Questions, set.Coverage) {
+	for _, area := range goldenset.CoverageStatus(set.Questions, set.Coverage) {
 		standing := "ok"
 		switch {
 		case area.Needs() > 0:

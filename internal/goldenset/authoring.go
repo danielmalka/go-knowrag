@@ -1,4 +1,4 @@
-package eval
+package goldenset
 
 import (
 	"bytes"
@@ -27,9 +27,9 @@ const defaultQuestionIndent = "  "
 // authoring sessions, would re-emit the coverage table the author typed by hand, and would reorder
 // the file the day a field is added to GoldenQuestion. Appending leaves every prior byte where it
 // was, so a `git diff` after a session shows the entries that were added and nothing else — which is
-// what makes the per-entry attribution in provenance.go legible: `git log -S` is searching for the
-// question text, and a run that rewrapped the file would move every other entry's introducing commit
-// to today.
+// what makes the per-entry attribution in internal/eval/provenance.go legible: `git log -S` is
+// searching for the question text, and a run that rewrapped the file would move every other entry's
+// introducing commit to today.
 //
 // The cost of appending is that it only produces valid YAML while `questions:` is the last top-level
 // key and its entries are the last thing in the file. Two things stand in front of that, and they
@@ -64,7 +64,7 @@ func AppendQuestion(path string, q GoldenQuestion) error {
 	// #nosec G304 -- the path is the golden set the operator named, the same one LoadGoldenSet reads.
 	current, err := os.ReadFile(path)
 	if err != nil {
-		return fmt.Errorf("eval: reading the golden set at %s: %w", path, err)
+		return fmt.Errorf("goldenset: reading the golden set at %s: %w", path, err)
 	}
 	set, err := decodeGoldenSet(current, path)
 	if err != nil {
@@ -81,7 +81,7 @@ func AppendQuestion(path string, q GoldenQuestion) error {
 	// protecting the function, which is the failure mode this repository catalogues (CLAUDE.md), and
 	// it protects no other caller — a bulk import, a harness, a script.
 	if verr := set.Coverage.Validate(); verr != nil {
-		return fmt.Errorf("eval: refusing to append to %s, whose coverage table would govern "+
+		return fmt.Errorf("goldenset: refusing to append to %s, whose coverage table would govern "+
 			"nothing: %w", path, verr)
 	}
 
@@ -96,7 +96,7 @@ func AppendQuestion(path string, q GoldenQuestion) error {
 	// A file with no `questions:` key at all is fine: withBlockAppended writes the key at the end,
 	// which makes it last by construction.
 	if found && !last {
-		return fmt.Errorf("eval: `questions:` is not the last top-level key of %s, so an entry "+
+		return fmt.Errorf("goldenset: `questions:` is not the last top-level key of %s, so an entry "+
 			"appended to the end of the file would land under whatever follows it. Move `questions:` "+
 			"to the end and run this again — nothing was written", path)
 	}
@@ -113,7 +113,7 @@ func AppendQuestion(path string, q GoldenQuestion) error {
 	// matched by the indent detected above. It also runs the per-entry validation over q, which is why
 	// there is no separate check of q on the way in.
 	if _, err := decodeGoldenSet(candidate, path); err != nil {
-		return fmt.Errorf("eval: appending an entry to the end of %s would not parse, so nothing "+
+		return fmt.Errorf("goldenset: appending an entry to the end of %s would not parse, so nothing "+
 			"was written: %w", path, err)
 	}
 
@@ -124,14 +124,14 @@ func AppendQuestion(path string, q GoldenQuestion) error {
 	// #nosec G304 -- same path as the read above.
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
-		return fmt.Errorf("eval: opening the golden set at %s to append to it: %w", path, err)
+		return fmt.Errorf("goldenset: opening the golden set at %s to append to it: %w", path, err)
 	}
 	if _, err := f.Write(candidate[len(current):]); err != nil {
 		_ = f.Close()
-		return fmt.Errorf("eval: appending an entry to %s: %w", path, err)
+		return fmt.Errorf("goldenset: appending an entry to %s: %w", path, err)
 	}
 	if err := f.Close(); err != nil {
-		return fmt.Errorf("eval: closing %s after appending an entry: %w", path, err)
+		return fmt.Errorf("goldenset: closing %s after appending an entry: %w", path, err)
 	}
 	return nil
 }
@@ -194,7 +194,7 @@ func questionsLayout(data []byte) (found, last bool, indent string) {
 func questionBlock(q GoldenQuestion, indent string) ([]byte, error) {
 	raw, err := yaml.Marshal([]GoldenQuestion{q})
 	if err != nil {
-		return nil, fmt.Errorf("eval: rendering the entry as YAML: %w", err)
+		return nil, fmt.Errorf("goldenset: rendering the entry as YAML: %w", err)
 	}
 	var b bytes.Buffer
 	for _, line := range strings.Split(strings.TrimRight(string(raw), "\n"), "\n") {

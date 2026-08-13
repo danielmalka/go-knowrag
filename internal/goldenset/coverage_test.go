@@ -1,4 +1,4 @@
-package eval
+package goldenset
 
 import (
 	"strings"
@@ -20,7 +20,7 @@ func testTable() CoverageTable {
 }
 
 // questionsFor builds n questions in each named area. The text is unique per question because
-// EntryIdentity and git -S both key on it (provenance.go).
+// EntryIdentity and git -S both key on it (internal/eval/provenance.go).
 func questionsFor(counts map[string]int) []GoldenQuestion {
 	var out []GoldenQuestion
 	for _, area := range []string{"alfa", "beta", "gama", "delta", "epsilon"} {

@@ -12,7 +12,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/danielmalka/go-knowrag/internal/eval"
+	"github.com/danielmalka/go-knowrag/internal/goldenset"
 	"github.com/danielmalka/go-knowrag/internal/vault"
 )
 
@@ -68,10 +68,10 @@ func read(t *testing.T, path string) string {
 	return string(data)
 }
 
-func loadSet(t *testing.T, path string) eval.GoldenSet {
+func loadSet(t *testing.T, path string) goldenset.GoldenSet {
 	t.Helper()
 
-	set, err := eval.ReadGoldenSet(path)
+	set, err := goldenset.ReadGoldenSet(path)
 	if err != nil {
 		t.Fatalf("the golden set at %s did not load: %v\n%s", path, err, read(t, path))
 	}
@@ -216,9 +216,9 @@ func TestAuthorGolden_AppendsAcrossSessionsAndKeepsHandEdits(t *testing.T) {
 // strict decoding would reject on the *next* load, and a key it does declare but that nothing filled
 // is invisible once it is a zero value.
 //
-// chunk_index is absent on purpose. Absent means "any chunk of that uid counts" (goldenset.go), which
-// is the right answer for a question authored from a whole note — and asking the author for a chunk
-// index would be noise they cannot answer.
+// chunk_index is absent on purpose. Absent means "any chunk of that uid counts"
+// (internal/goldenset/goldenset.go), which is the right answer for a question authored from a whole
+// note — and asking the author for a chunk index would be noise they cannot answer.
 func TestAuthorGolden_WritesExactlyTheGoldenQuestionFields(t *testing.T) {
 	path := writeSet(t, goldenTable)
 
@@ -463,7 +463,7 @@ func TestAuthorGolden_RotatesTheSuggestedKind(t *testing.T) {
 }
 
 // TestProgressReport_NamesTheMixItDoesNotTrack. The report has to state the target and has to not
-// imply it is counting it: GoldenQuestion carries no difficulty (internal/eval/goldenset.go), so a
+// imply it is counting it: GoldenQuestion carries no difficulty (internal/goldenset/goldenset.go), so a
 // per-difficulty number here would be a figure nothing measured — the failure this repository names
 // as "not having looked must never render as having found nothing".
 func TestProgressReport_NamesTheMixItDoesNotTrack(t *testing.T) {
@@ -503,7 +503,7 @@ questions:
 
 // TestAuthorGolden_StopsAtTheTableMaximum keeps a session from writing past the top of the range the
 // table declares. Nothing downstream would refuse the entries — ValidateCoverage is a warning at run
-// time (coverage.go) — so this is the only place that number stops anything.
+// time (internal/goldenset/coverage.go) — so this is the only place that number stops anything.
 func TestAuthorGolden_StopsAtTheTableMaximum(t *testing.T) {
 	// Seven entries against a max_total of eight, so the session may write exactly one more.
 	body := unboundedAreas

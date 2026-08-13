@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/danielmalka/go-knowrag/internal/goldenset"
 	"github.com/danielmalka/go-knowrag/internal/retrieval"
 )
 
@@ -25,7 +26,9 @@ const (
 // Both runs take the identical RunConfig apart from Mode, so the only thing that differs between
 // the two reports is the ranking — same collection, same tenant, same K, same questions, same
 // order. Anything else varying would make the comparison a comparison of two setups.
-func CompareHybridVsDense(ctx context.Context, s Searcher, questions []GoldenQuestion, cfg RunConfig) (hybrid, dense Report, err error) {
+func CompareHybridVsDense(
+	ctx context.Context, s Searcher, questions []goldenset.GoldenQuestion, cfg RunConfig,
+) (hybrid, dense Report, err error) {
 	run := func(mode retrieval.SearchMode) (Report, error) {
 		modeCfg := cfg
 		modeCfg.Mode = mode

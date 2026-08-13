@@ -10,6 +10,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/danielmalka/go-knowrag/internal/goldenset"
 )
 
 // EntryIdentity is what makes a golden-set entry "the same question" across edits to the file.
@@ -19,7 +21,7 @@ import (
 // question rewrites the provenance of all the rest without a single question having changed. The
 // NUL separator is there so that ("ab", "c") and ("a", "bc") cannot hash the same — a UUID contains
 // no NUL, so the split point is unambiguous.
-func EntryIdentity(q GoldenQuestion) string {
+func EntryIdentity(q goldenset.GoldenQuestion) string {
 	sum := sha256.Sum256([]byte(q.Question + "\x00" + q.UID))
 	return hex.EncodeToString(sum[:])
 }
@@ -57,7 +59,9 @@ type StaleEntry struct {
 // The file-level commit comes back as a CommitInfo rather than a bare hash so callers have its
 // timestamp without a second git call — FlagStaleEntries needs an instant, and "the commit that
 // last touched the golden set" is the instant a run with no separate baseline compares against.
-func GoldenSetCommit(ctx context.Context, path string, questions []GoldenQuestion) (CommitInfo, map[string]CommitInfo, error) {
+func GoldenSetCommit(
+	ctx context.Context, path string, questions []goldenset.GoldenQuestion,
+) (CommitInfo, map[string]CommitInfo, error) {
 	dir := filepath.Dir(path)
 	if _, err := git(ctx, dir, "rev-parse", "--show-toplevel"); err != nil {
 		return CommitInfo{}, nil, fmt.Errorf("eval: %s is not inside a git repository, so the golden "+
@@ -132,8 +136,10 @@ func FlagStaleEntries(perEntry map[string]CommitInfo, baselineCommitTime time.Ti
 }
 
 // ResolveStale turns flagged identities back into readable entries for the report.
-func ResolveStale(flagged []string, perEntry map[string]CommitInfo, questions []GoldenQuestion) []StaleEntry {
-	byIdentity := make(map[string]GoldenQuestion, len(questions))
+func ResolveStale(
+	flagged []string, perEntry map[string]CommitInfo, questions []goldenset.GoldenQuestion,
+) []StaleEntry {
+	byIdentity := make(map[string]goldenset.GoldenQuestion, len(questions))
 	for _, q := range questions {
 		byIdentity[EntryIdentity(q)] = q
 	}

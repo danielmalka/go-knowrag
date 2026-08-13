@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/danielmalka/go-knowrag/internal/goldenset"
 	"github.com/danielmalka/go-knowrag/internal/retrieval"
 )
 
@@ -63,7 +64,7 @@ type Report struct {
 	GoldenSetCommit string       `json:"golden_set_commit,omitempty"`
 	Stale           []StaleEntry `json:"stale,omitempty"`
 
-	// CoverageWarning is ValidateCoverage's output when the run went ahead anyway (S10 open
+	// CoverageWarning is goldenset.ValidateCoverage's output when the run went ahead anyway (S10 open
 	// question 4: warn at run time, strict at authoring time).
 	CoverageWarning string `json:"coverage_warning,omitempty"`
 }
@@ -199,7 +200,7 @@ func renderProvenance(b *strings.Builder, r Report) {
 	}
 }
 
-func chunkSuffix(q GoldenQuestion) string {
+func chunkSuffix(q goldenset.GoldenQuestion) string {
 	if q.ChunkIndex == nil {
 		return " (any chunk)"
 	}

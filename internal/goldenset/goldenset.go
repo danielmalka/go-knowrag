@@ -1,4 +1,21 @@
-package eval
+// Package goldenset is the golden-set file: its schema, the reader that validates it, the coverage
+// table that governs it, and the append that adds one entry to it.
+//
+// It is a package apart from internal/eval, and the reason is an import edge rather than tidiness.
+// internal/goldenauthor is the interactive session in which the owner writes the questions, and it
+// must have no way to obtain a search result — a question written after seeing what retrieval returns
+// is a question tuned until it passes, and a golden set of those measures the tool that produced it.
+// While the schema and the gate shared one package, importing the schema brought the gate: authoring
+// code could call eval.LoadCorpus, eval.NewCorpusSearcher and eval.RunGolden and get real hits over a
+// corpus file. Nothing here imports a searcher, so that no longer compiles, and
+// TestArch_GoldenAuthoringCannotReachTheIndex (internal/archtest/boundary_test.go) is what keeps it
+// that way — it forbids internal/eval to internal/goldenauthor, which is only possible because the
+// schema left.
+//
+// So the rule for anything added here: this package may not import internal/retrieval,
+// internal/store or internal/eval, directly or through a new dependency. Measuring belongs on the
+// other side of that line, in internal/eval.
+package goldenset
 
 import (
 	"bytes"
@@ -18,14 +35,14 @@ import (
 // yet", the second is "the one you have is broken", and both used to surface as the same wall of
 // YAML error text. errors.Is(err, fs.ErrNotExist) also holds — the underlying os error is wrapped —
 // so a caller may match on either.
-var ErrGoldenSetMissing = errors.New("eval: golden set not found")
+var ErrGoldenSetMissing = errors.New("goldenset: golden set not found")
 
 // GoldenQuestion is one question and the note that answers it.
 //
 // UID is a string rather than a uuid.UUID because it is what the YAML holds and because a hand-
 // built question in a test should not have to import uuid to say "this is not a UUID". LoadGoldenSet
 // proves it parses; the runner re-checks it before searching, because RunGolden also serves
-// hand-built questions that never went through the loader (runner.go).
+// hand-built questions that never went through the loader (internal/eval/runner.go).
 type GoldenQuestion struct {
 	Question string `yaml:"question" json:"question"`
 	UID      string `yaml:"uid" json:"uid"`
@@ -37,8 +54,8 @@ type GoldenQuestion struct {
 	Area string `yaml:"area" json:"area"`
 
 	// Author and Date are required and are documentation, not evidence. Authoring order is proven
-	// by git history (provenance.go), never by these two fields — a date typed into a file the
-	// author also controls proves nothing about when the entry landed.
+	// by git history (internal/eval/provenance.go), never by these two fields — a date typed into a
+	// file the author also controls proves nothing about when the entry landed.
 	Author string `yaml:"author" json:"author"`
 	Date   string `yaml:"date" json:"date"`
 }
@@ -73,7 +90,7 @@ func LoadGoldenSet(path string) (GoldenSet, error) {
 		return GoldenSet{}, err
 	}
 	if len(set.Questions) == 0 {
-		return GoldenSet{}, fmt.Errorf("eval: the golden set at %s declares no questions — an empty "+
+		return GoldenSet{}, fmt.Errorf("goldenset: the golden set at %s declares no questions — an empty "+
 			"golden set measures nothing and must not be run as if it did", path)
 	}
 	return set, nil
@@ -96,7 +113,7 @@ func ReadGoldenSet(path string) (GoldenSet, error) {
 			return GoldenSet{}, fmt.Errorf("%w at %s: nothing was measured, and an eval with no "+
 				"questions is not an eval that passed: %w", ErrGoldenSetMissing, path, err)
 		}
-		return GoldenSet{}, fmt.Errorf("eval: reading the golden set at %s: %w", path, err)
+		return GoldenSet{}, fmt.Errorf("goldenset: reading the golden set at %s: %w", path, err)
 	}
 	return decodeGoldenSet(data, path)
 }
@@ -109,10 +126,10 @@ func decodeGoldenSet(data []byte, path string) (GoldenSet, error) {
 
 	var set GoldenSet
 	if derr := dec.Decode(&set); derr != nil && !errors.Is(derr, io.EOF) {
-		return GoldenSet{}, fmt.Errorf("eval: parsing the golden set at %s: %w", path, derr)
+		return GoldenSet{}, fmt.Errorf("goldenset: parsing the golden set at %s: %w", path, derr)
 	}
 	if err := validateQuestions(set.Questions); err != nil {
-		return GoldenSet{}, fmt.Errorf("eval: the golden set at %s is invalid: %w", path, err)
+		return GoldenSet{}, fmt.Errorf("goldenset: the golden set at %s is invalid: %w", path, err)
 	}
 	return set, nil
 }

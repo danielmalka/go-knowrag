@@ -11,6 +11,7 @@ import (
 	"github.com/danielmalka/go-knowrag/internal/clicmd"
 	"github.com/danielmalka/go-knowrag/internal/config"
 	"github.com/danielmalka/go-knowrag/internal/eval"
+	"github.com/danielmalka/go-knowrag/internal/goldenset"
 )
 
 // evalMode is one gate. Both have the same shape so the command picks one and then knows nothing
@@ -96,7 +97,7 @@ func newEvalCmd(cfg *config.Config, modes evalModes, connect clicmd.Connect) *co
 				// operator named a path and nothing on the far side will change, so a scheduler
 				// that retried the identical command line would retry it forever. Same reading as
 				// exitUsage's own comment in main.go.
-				if errors.Is(err, eval.ErrGoldenSetMissing) {
+				if errors.Is(err, goldenset.ErrGoldenSetMissing) {
 					err = clicmd.Usage("%v", err)
 				}
 				if jsonOut {

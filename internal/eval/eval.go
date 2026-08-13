@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/danielmalka/go-knowrag/internal/eval/isolation"
+	"github.com/danielmalka/go-knowrag/internal/goldenset"
 	"github.com/danielmalka/go-knowrag/internal/retrieval"
 )
 
@@ -100,7 +101,7 @@ type Outcome struct {
 //
 // They are named for the gate rather than for the run, and that is to leave S10 and S11 the names
 // their own documents already spend. S10's task document specifies
-// `RunGolden(ctx, Searcher, []GoldenQuestion, RunConfig) ([]QuestionResult, error)` in this package
+// `RunGolden(ctx, Searcher, []goldenset.GoldenQuestion, RunConfig) ([]QuestionResult, error)` in this package
 // — a harness that measures and reports per question. Had this stub been called RunGolden, S10's
 // first commit would have had to delete it before it could add its own, and the collision would
 // have surfaced as a build failure in somebody else's story. Two names, two jobs: `*Gate` is the
@@ -123,7 +124,7 @@ func GoldenGate(ctx context.Context, opts Options) (Outcome, error) {
 			ErrNoSearcher, opts.Searcher != nil, opts.GoldenSetPath)
 	}
 
-	set, err := LoadGoldenSet(opts.GoldenSetPath)
+	set, err := goldenset.LoadGoldenSet(opts.GoldenSetPath)
 	if err != nil {
 		return Outcome{}, err
 	}
@@ -144,7 +145,7 @@ func GoldenGate(ctx context.Context, opts Options) (Outcome, error) {
 	report := Aggregate(results)
 	report.K = k
 	report.Mode = retrieval.SearchModeHybrid.String()
-	if cerr := ValidateCoverage(set.Questions, set.Coverage); cerr != nil {
+	if cerr := goldenset.ValidateCoverage(set.Questions, set.Coverage); cerr != nil {
 		// Warn, do not fail: coverage is an authoring gate, not a run-time one (S10 open question 4,
 		// decided). The warning rides in the report so it reaches the operator who ran the eval.
 		report.CoverageWarning = cerr.Error()
@@ -170,7 +171,9 @@ func GoldenGate(ctx context.Context, opts Options) (Outcome, error) {
 // The baseline instant is the golden-set file's own last commit, so what gets flagged is every
 // entry introduced after the file was last committed — that is, entries that exist only in the
 // working tree. S10 T15 passes the real baseline run's time instead, once one exists.
-func attachProvenance(ctx context.Context, report *Report, path string, questions []GoldenQuestion) {
+func attachProvenance(
+	ctx context.Context, report *Report, path string, questions []goldenset.GoldenQuestion,
+) {
 	file, perEntry, err := GoldenSetCommit(ctx, path, questions)
 	if err != nil {
 		return

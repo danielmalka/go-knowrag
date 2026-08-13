@@ -63,15 +63,39 @@ func TestArch_QdrantCheckerIsNotVacuous(t *testing.T) {
 	}
 }
 
-// indexPackages are the two packages through which anything in this module reaches the index:
-// internal/retrieval builds and runs the query, internal/store holds the client.
-var indexPackages = []string{
+// searchingPackages are every package in this module from which a search result can be obtained.
+//
+// The first two are the index itself: internal/retrieval builds and runs the query, internal/store
+// holds the Qdrant client. The third is internal/eval, and it is the one that has to be named
+// explicitly because it reaches no deployment: it holds the golden gate and, with it, LoadCorpus,
+// NewCorpusSearcher and RunGolden (internal/eval/corpus.go, internal/eval/runner.go), which answer
+// with real hits over a local corpus file and no Qdrant at all. A result is a result — a question
+// written after seeing one is tuned either way — so the list is "anything that searches", not
+// "anything that dials the database".
+var searchingPackages = []string{
 	"github.com/danielmalka/go-knowrag/internal/retrieval",
 	"github.com/danielmalka/go-knowrag/internal/store",
+	"github.com/danielmalka/go-knowrag/internal/eval",
 }
 
-// authoringPackage writes the golden set that `eval --golden` measures against.
-const authoringPackage = "internal/goldenauthor"
+// authoringPackages are the packages the authoring session is made of, each mapped to an import it
+// has by construction.
+//
+// Two entries, not one, because FindImporters reads the direct imports of the files under a single
+// directory: a check on internal/goldenauthor alone proves only that the session imports no searcher,
+// and internal/goldenset gaining one would hand the route straight back. internal/goldenset exists
+// precisely because internal/eval was both schema and gate (see the package doc in
+// internal/goldenset/goldenset.go); keeping it clean is what the split bought.
+//
+// The value is the non-vacuity anchor for that directory's walk, and every walk needs its own. A
+// wrong root, a renamed package or a moved file makes a walk pass over nothing and go on passing
+// forever, and the anchor is what turns that into a failure: the session reads notes through
+// internal/vault, and the schema validates area slugs through internal/config, so neither import can
+// go away without the package losing its job.
+var authoringPackages = map[string]string{
+	"internal/goldenauthor": "github.com/danielmalka/go-knowrag/internal/vault",
+	"internal/goldenset":    "github.com/danielmalka/go-knowrag/internal/config",
+}
 
 // TestArch_GoldenAuthoringCannotReachTheIndex is invariant 2, and it is the whole of what keeps the
 // golden set worth measuring.
@@ -91,43 +115,42 @@ const authoringPackage = "internal/goldenauthor"
 // it closed. Moving the code into its own package made the defect unrepresentable, which is what
 // CLAUDE.md says to do when a plant will not go red, and left this: one walk, no list of symbols.
 //
-// The residual is written down rather than papered over, and it is demonstrated rather than
-// suspected: internal/goldenauthor imports internal/eval for the golden-set file schema, and
-// internal/eval also holds the gate, so eval.LoadCorpus + eval.NewCorpusSearcher + eval.RunGolden
-// compile from there and return real hits over a local corpus file. This test does not catch that,
-// by construction — internal/eval is a legitimate import and an exception list is what this
-// invariant exists to avoid having.
-//
-// What it is not is a route to the deployment's index: no Qdrant, no embedder, and no corpus path
-// that command ever holds. Closing it means splitting the file schema out of internal/eval, which is
-// its own change — see the package doc in internal/goldenauthor/author.go for the cost.
+// internal/eval is on the forbidden list, and it is the edge this test could not have until the
+// golden-set file schema moved out of it. The authoring session has to read and append to that file,
+// so it has to import the schema; while the schema and the gate were one package, importing the first
+// brought eval.LoadCorpus, eval.NewCorpusSearcher and eval.RunGolden, which compile without Qdrant and
+// return real hits over a local corpus file. That was the last of the five bypasses, and it was open
+// on record rather than unnoticed. internal/goldenset now holds the schema and imports no searcher, so
+// forbidding internal/eval here costs the session nothing — and the ability to forbid it is the proof
+// the split did what it was for.
 func TestArch_GoldenAuthoringCannotReachTheIndex(t *testing.T) {
-	dir := filepath.Join(moduleRoot(t), authoringPackage)
+	root := moduleRoot(t)
 
-	for _, pkg := range indexPackages {
-		violations, err := FindImporters(dir, pkg, nil)
+	for authoring, known := range authoringPackages {
+		dir := filepath.Join(root, authoring)
+
+		for _, pkg := range searchingPackages {
+			violations, err := FindImporters(dir, pkg, nil)
+			if err != nil {
+				t.Fatalf("walking %s for %s: %v", dir, pkg, err)
+			}
+			for _, v := range violations {
+				t.Errorf("%s/%s imports %q. The authoring session must have no route to a search "+
+					"result: it asks for a question about a note, and a question written after seeing "+
+					"what a search returns is a question tuned until it passes", authoring, v, pkg)
+			}
+		}
+
+		// Non-vacuity for this walk, in the same loop so a package added above cannot arrive without
+		// one. See authoringPackages for what the anchor is and why every directory needs its own.
+		seen, err := FindImporters(dir, known, nil)
 		if err != nil {
-			t.Fatalf("walking %s for %s: %v", dir, pkg, err)
+			t.Fatalf("walking %s for %s: %v", dir, known, err)
 		}
-		for _, v := range violations {
-			t.Errorf("%s/%s imports %q. The authoring session must have no route to the index: it "+
-				"asks for a question about a note, and a question written after seeing what a search "+
-				"returns is a question tuned until it passes", authoringPackage, v, pkg)
+		if len(seen) == 0 {
+			t.Fatalf("the walk of %s found no file importing %q, which that package needs to do its "+
+				"job at all — so the checks above are looking at nothing", dir, known)
 		}
-	}
-
-	// Non-vacuity, and it has to be about this walk rather than about FindImporters in general: a
-	// wrong directory, a renamed package or a moved file makes the loop above pass over nothing and go
-	// on passing forever. internal/vault is what the session reads notes from, so it is imported here
-	// by construction — if the walk cannot see that, it is seeing nothing.
-	const known = "github.com/danielmalka/go-knowrag/internal/vault"
-	seen, err := FindImporters(dir, known, nil)
-	if err != nil {
-		t.Fatalf("walking %s for %s: %v", dir, known, err)
-	}
-	if len(seen) == 0 {
-		t.Fatalf("the walk of %s found no file importing %q, which the session needs to read notes "+
-			"at all — so the check above is looking at nothing", dir, known)
 	}
 }
 

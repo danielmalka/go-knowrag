@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/danielmalka/go-knowrag/internal/goldenset"
 	"github.com/danielmalka/go-knowrag/internal/retrieval"
 )
 
@@ -59,8 +60,8 @@ type RunConfig struct {
 // and read back: an `error` field would round-trip as null and a run that failed on ten questions
 // would reload as a run that did not.
 type QuestionResult struct {
-	Question GoldenQuestion `json:"question"`
-	Hit      bool           `json:"hit"`
+	Question goldenset.GoldenQuestion `json:"question"`
+	Hit      bool                     `json:"hit"`
 	// Tied marks a hit whose place in the answer was decided among equally-scored candidates, so it
 	// may not reproduce on the next run against the same index. See tiedAtTheCut.
 	Tied bool `json:"tied,omitempty"`
@@ -84,7 +85,9 @@ func (r QuestionResult) Measured() bool { return r.Error == "" }
 //
 // A searcher error on one question is recorded on that question and the run continues, because the
 // alternative is a whole eval thrown away by one flaky call and no way to see which one it was.
-func RunGolden(ctx context.Context, s Searcher, questions []GoldenQuestion, cfg RunConfig) ([]QuestionResult, error) {
+func RunGolden(
+	ctx context.Context, s Searcher, questions []goldenset.GoldenQuestion, cfg RunConfig,
+) ([]QuestionResult, error) {
 	switch {
 	case s == nil:
 		return nil, errors.New("eval: RunGolden has no Searcher, so nothing would be measured")
@@ -112,7 +115,7 @@ func RunGolden(ctx context.Context, s Searcher, questions []GoldenQuestion, cfg 
 	return out, nil
 }
 
-func runOne(ctx context.Context, s Searcher, q GoldenQuestion, cfg RunConfig) QuestionResult {
+func runOne(ctx context.Context, s Searcher, q goldenset.GoldenQuestion, cfg RunConfig) QuestionResult {
 	res := QuestionResult{Question: q}
 
 	if _, err := uuid.Parse(q.UID); err != nil {
@@ -165,7 +168,7 @@ func runOne(ctx context.Context, s Searcher, q GoldenQuestion, cfg RunConfig) Qu
 // least two returned results, one of them the expected note. Flagging a note merely because it
 // landed at rank K would fire on most hits at the boundary and turn this section into one nobody
 // reads — which is the way a warning stops working.
-func tiedAtTheCut(results []retrieval.Result, q GoldenQuestion, k int) bool {
+func tiedAtTheCut(results []retrieval.Result, q goldenset.GoldenQuestion, k int) bool {
 	if len(results) == 0 || len(results) < k {
 		return false
 	}
@@ -186,7 +189,7 @@ func tiedAtTheCut(results []retrieval.Result, q GoldenQuestion, k int) bool {
 
 // answers reports whether one result is the note the question expected. An entry with no
 // chunk_index accepts any chunk of that uid; an entry with one accepts that chunk alone.
-func answers(q GoldenQuestion, r retrieval.Result) bool {
+func answers(q goldenset.GoldenQuestion, r retrieval.Result) bool {
 	if r.UID != q.UID {
 		return false
 	}
