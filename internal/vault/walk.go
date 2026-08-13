@@ -19,14 +19,14 @@ type Exclusions struct {
 	// Folders are folder paths skipped in silence, each compared against the whole path relative to
 	// the vault root. A bare name stays first-level-only — the list names areas, so a `resources/`
 	// nested deep inside `research/` is NOT excluded by an entry for "resources". An entry that
-	// carries slashes names one nested subtree and excludes exactly it: `arcanto/14-internal-work`
+	// carries slashes names one nested subtree and excludes exactly it: `area/sub/folder`
 	// skips that folder and everything under it, and nothing else.
 	//
 	// The nested form exists because a `.md` that was never a note — a design-session briefing,
 	// sibling to an `index.html`, whose extension is an accident — lands inside an area that holds
 	// real notes. Without it the only way to skip that one folder was to exclude the whole area
 	// (D-40). Comparison is whole-path, so it is by path segment and never by string prefix:
-	// `arcanto/14` does not exclude `arcanto/14-internal-work`.
+	// `area/sub` does not exclude `area/sub-other`.
 	Folders []string
 	// RootFiles are `.md` file names at the vault root skipped in silence — vault infrastructure
 	// (agent instructions, a project index) that exists and will keep existing, so rejecting it
@@ -129,7 +129,7 @@ func isFirstLevel(rel string) (string, bool) {
 // walkVault compares a relative directory path against.
 //
 // Backslashes fold into slashes, and empty segments — leading, trailing, doubled — are dropped, so
-// `\Arcanto\14-internal-work\` and `arcanto/14-internal-work` are one entry. Both spellings reach
+// `\Arcanto\14-internal-work\` and `area/sub/folder` are one entry. Both spellings reach
 // here verbatim: internal/config/config.go only splits the setting on commas and trims spaces, so
 // an operator who pasted a path out of Windows Explorer would otherwise have configured something
 // that matches nothing while looking configured.

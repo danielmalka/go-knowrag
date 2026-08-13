@@ -41,3 +41,7 @@ internal/schema/applied_state.json.tmp-*
 # real deployment — note counts and a timing profile of the dono's own vault/infrastructure — so it
 # is never committed, same reasoning as docs/ (CLAUDE.md).
 /out/
+
+# A lista de termos privados que scripts/check-leaks.sh confere. Nunca versionada: uma lista de
+# "nunca escreva estas palavras" num repositório público publica as palavras.
+.leakterms

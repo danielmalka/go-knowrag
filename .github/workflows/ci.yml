@@ -18,6 +18,11 @@ jobs:
       # Beside the linter because it is the same kind of check: static, fast, and about a property
       # nobody notices losing. It reads deploy/docker-compose.yml and needs no infrastructure.
       - run: make verify-deploy
+      # Same reasoning, one file over: this repository is public and its own rules about what may not
+      # be written into a tracked file held for months and then did not. The private-name half needs
+      # a list that cannot live here, so CI checks shapes — disk paths, addresses, e-mail — and says
+      # which half it skipped.
+      - run: make check-leaks
 
   test:
     runs-on: ubuntu-latest

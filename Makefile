@@ -1,4 +1,4 @@
-.PHONY: test lint build test-integration test-embedder cover verify-deploy
+.PHONY: check-leaks test lint build test-integration test-embedder cover verify-deploy
 
 # Interpreter of the virtualenv that has FlagEmbedding installed — the same variable
 # knowrag-embedder.env already defines for the systemd unit, so an installed machine exports it
@@ -73,6 +73,12 @@ lint:
 # the properties it guards are the ones a hurried edit removes without anything else noticing.
 verify-deploy:
 	./scripts/verify-deploy.sh
+
+# Refuses private material in tracked files. The shape half needs nothing and runs in CI; the names
+# half needs .leakterms, which is gitignored and therefore absent there — the script says so out loud
+# instead of passing quietly. See its header for why the list cannot live in this repository.
+check-leaks:
+	./scripts/check-leaks.sh
 
 build:
 	go build -o bin/mcp-server ./cmd/mcp-server
