@@ -800,3 +800,32 @@ func TestToolDescription_ListsOnlyThisInstancesAreas(t *testing.T) {
 		}
 	}
 }
+
+// TestEmbedProfile_IsNotTheOperatorProfile guards a difference, which is the opposite of what most
+// tests here do, and it exists because the three copies of the operator profile were just collapsed
+// into embed.OperatorProfile (internal/embed/config.go). The obvious next tidy-up is to point this
+// one at it too, and that would be wrong.
+//
+// A search has somebody waiting on it and its own p95 is a requirement (NFR-1 in PRD.md), not
+// something it measures. The operator profile spends 30 s confirming a backend before a 30-minute
+// ingestion; spending that on a query would blow the search budget by an order of magnitude.
+//
+// So this asserts the two are different and names the field that matters. If a future change makes
+// them equal, that change has to come through here and say why.
+func TestEmbedProfile_IsNotTheOperatorProfile(t *testing.T) {
+	const endpoint = "http://127.0.0.1:7999"
+	mcp := embedProfile(endpoint)
+	operator := embed.OperatorProfile(endpoint)
+
+	if mcp == operator {
+		t.Fatal("the MCP profile is now identical to the operator profile; a query cannot afford " +
+			"the ingestion's confirmation budget (PRD.md NFR-1)")
+	}
+	if mcp.VerifyTimeout >= operator.VerifyTimeout {
+		t.Errorf("MCP VerifyTimeout %v is not tighter than the operator's %v — a search waits on it",
+			mcp.VerifyTimeout, operator.VerifyTimeout)
+	}
+	if mcp.Timeout >= operator.Timeout {
+		t.Errorf("MCP Timeout %v is not tighter than the operator's %v", mcp.Timeout, operator.Timeout)
+	}
+}

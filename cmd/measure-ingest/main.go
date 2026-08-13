@@ -196,15 +196,7 @@ func runOrchestrate(ctx context.Context, cfg *config.Config, tenant string, scan
 	if err != nil {
 		return ingest.Report{}, err
 	}
-	// Same profile shape as cmd/cli/ingest.go's embedProfile.
-	embedder, err := embed.NewServiceEmbedder(embed.Profile{
-		Endpoint:      cfg.EmbedderEndpoint,
-		Timeout:       2 * time.Minute,
-		VerifyTimeout: 30 * time.Second,
-		BatchSize:     32,
-		MaxConcurrent: 2,
-		MaxRetries:    3,
-	}, transport)
+	embedder, err := embed.NewServiceEmbedder(embed.OperatorProfile(cfg.EmbedderEndpoint), transport)
 	if err != nil {
 		return ingest.Report{}, err
 	}

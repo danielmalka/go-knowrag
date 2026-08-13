@@ -161,14 +161,7 @@ func dialSearcher(cfg *config.Config) (*retrieval.Searcher, func(), error) {
 	// Same shape as cmd/cli/ingest.go's embedProfile: a one-shot operator command with nobody
 	// waiting on a p99 of its own connection setup, so the generous timeouts there are appropriate
 	// here too — this tool's own p95/p99 are what it measures, not what it is bound by.
-	embedder, err := embed.NewServiceEmbedder(embed.Profile{
-		Endpoint:      cfg.EmbedderEndpoint,
-		Timeout:       2 * time.Minute,
-		VerifyTimeout: 30 * time.Second,
-		BatchSize:     32,
-		MaxConcurrent: 2,
-		MaxRetries:    3,
-	}, transport)
+	embedder, err := embed.NewServiceEmbedder(embed.OperatorProfile(cfg.EmbedderEndpoint), transport)
 	if err != nil {
 		release()
 		return nil, nil, err
