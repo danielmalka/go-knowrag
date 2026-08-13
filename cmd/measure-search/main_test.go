@@ -28,7 +28,7 @@ func TestRun_MissingTenant_RefusedBeforeConfigOrNetwork(t *testing.T) {
 
 func TestRun_MissingQuery_Refused(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"--tenant", "malka"}, &stdout, &stderr)
+	code := run([]string{"--tenant", "tenant-a"}, &stdout, &stderr)
 	if code != 2 {
 		t.Fatalf("exit code = %d, want 2", code)
 	}
@@ -43,7 +43,7 @@ func TestRun_NoBackendConfigured_FailsCleanly(t *testing.T) {
 		_ = os.Unsetenv(v)
 	}
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"--tenant", "malka", "--query", "renewal terms"}, &stdout, &stderr)
+	code := run([]string{"--tenant", "tenant-a", "--query", "renewal terms"}, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1", code)
 	}

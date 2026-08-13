@@ -32,7 +32,7 @@ func (d delayExecutor) ExecuteQuery(_ context.Context, _ SearchRequest) ([]Score
 }
 
 func validTimedQuery() Query {
-	return Query{Collection: "interno", TenantID: "malka", Text: "renewal terms", TopK: 5}
+	return Query{Collection: "interno", TenantID: "tenant-a", Text: "renewal terms", TopK: 5}
 }
 
 // TestSearchTimed_LegsAttributeToTheRightStage is the load-bearing assertion: a slow embedder must

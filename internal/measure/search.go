@@ -49,10 +49,39 @@ func EvaluateSearch(legs []retrieval.Timing, p95Gate, p99Gate time.Duration) Sea
 	}
 }
 
+// Resolution is the sentence a percentile needs when the sample is small, or the empty string when
+// it does not.
+//
+// Nearest-rank puts p99 at index ceil(0.99*n)-1, so every n up to 100 puts it on the last sample:
+// "p99" and "the worst one we saw" are the same number, and one outlier is the whole statistic. The
+// number is still worth reporting — it is a real ceiling on what was observed — but printed beside
+// p50 and p95 it borrows their appearance of resolution, and an operator reading a passing p99 off
+// 30 queries would be reading one query.
+//
+// p95 crosses the same line at n=20. Both thresholds follow from the rank formula in
+// percentile.go rather than from a convention chosen here.
+func (r SearchReport) Resolution() string {
+	switch {
+	case r.N <= 0:
+		return ""
+	case r.N <= 20:
+		return fmt.Sprintf("p95 and p99 are both the slowest of the %d queries — "+
+			"at this sample size they are one observation, not a distribution", r.N)
+	case r.N <= 100:
+		return fmt.Sprintf("p99 is the slowest of the %d queries — at this sample size it is one "+
+			"observation, not a distribution", r.N)
+	}
+	return ""
+}
+
 func (r SearchReport) String() string {
 	verdict := "FAILED"
 	if r.Pass {
 		verdict = "passed"
+	}
+	note := ""
+	if res := r.Resolution(); res != "" {
+		note = "\nnote: " + res
 	}
 	return fmt.Sprintf(
 		"NFR-1b search latency decomposition, n=%d queries (PRD.md NFR-1: p95<=%s p99<=%s)\n"+
@@ -60,7 +89,7 @@ func (r SearchReport) String() string {
 			"  qdrant   %s\n"+
 			"  overhead %s\n"+
 			"  total    %s\n"+
-			"verdict: %s",
-		r.N, r.P95Gate, r.P99Gate, r.Embed, r.Qdrant, r.Overhead, r.Total, verdict,
+			"verdict: %s%s",
+		r.N, r.P95Gate, r.P99Gate, r.Embed, r.Qdrant, r.Overhead, r.Total, verdict, note,
 	)
 }

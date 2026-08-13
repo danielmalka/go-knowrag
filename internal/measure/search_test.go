@@ -1,6 +1,7 @@
 package measure
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -89,5 +90,43 @@ func TestEvaluateSearch_EmptyRun(t *testing.T) {
 	// command's job, tested in cmd/measure-search.
 	if !r.Pass {
 		t.Errorf("Pass = false for an empty run, want true (the vacuous case the caller must refuse before it prints)")
+	}
+}
+
+// TestSearchReport_SaysWhenThePercentileIsOneObservation covers the gap a reviewer named: at the
+// sample size this tool defaults to, p99 is the slowest single query, and printed beside p50 it
+// borrows an appearance of resolution it does not have.
+//
+// The thresholds are not free choices — they follow from nearest-rank in percentile.go, so a change
+// to that formula has to come back here.
+func TestSearchReport_SaysWhenThePercentileIsOneObservation(t *testing.T) {
+	for _, tc := range []struct {
+		n        int
+		wantNote bool
+		mustSay  string
+	}{
+		{n: 30, wantNote: true, mustSay: "p99 is the slowest"},
+		{n: 20, wantNote: true, mustSay: "p95 and p99 are both the slowest"},
+		{n: 100, wantNote: true, mustSay: "p99 is the slowest"},
+		{n: 101, wantNote: false},
+		{n: 0, wantNote: false},
+	} {
+		r := SearchReport{N: tc.n}
+		got := r.Resolution()
+		if tc.wantNote && got == "" {
+			t.Errorf("n=%d: no resolution note, but p99 is a single observation there", tc.n)
+		}
+		if !tc.wantNote && got != "" {
+			t.Errorf("n=%d: got note %q, but the sample is large enough for p99 to mean a rank", tc.n, got)
+		}
+		if tc.mustSay != "" && !strings.Contains(got, tc.mustSay) {
+			t.Errorf("n=%d: note %q does not say %q", tc.n, got, tc.mustSay)
+		}
+	}
+
+	// The note has to reach the operator, not just exist on the struct.
+	out := SearchReport{N: 30, Pass: true}.String()
+	if !strings.Contains(out, "one observation") {
+		t.Errorf("the rendered report does not carry the resolution note:\n%s", out)
 	}
 }
