@@ -36,14 +36,30 @@ Duas consequências práticas:
 
 Reabre quando o **fato** que sustentou a decisão mudar — não quando alguém reler o texto antigo.
 
-## O endurecimento de rede e credenciais é decisão permanente, não adiamento
+## O endurecimento de rede é decisão permanente — e credencial não é tudo a mesma pergunta
 
 Foi tirado de escopo em 2026-08-11 e **aceito em definitivo em 2026-08-13**: não há ACL restrita por
-destino nem separação de credenciais, e isso é escolha informada, com a medição na mesa (detalhes em
-`docs/`). Não proponha esse trabalho como parte de outra tarefa, e não o registre como débito com
-gatilho na S12 — a S12 não é mais o gatilho.
+destino, e a credencial que a ingestão usa é a administrativa mesma. Escolha informada, com a medição
+na mesa (detalhes em `docs/`). Não proponha esse trabalho como parte de outra tarefa, e não o
+registre como débito com gatilho na S12 — a S12 não é mais o gatilho. O que reabre é **uma segunda
+máquina não confiável na rede**. Nada mais.
 
-O que reabre o assunto é **uma segunda máquina não confiável na rede**. Nada mais.
+**Mas "separação de credenciais" nomeia duas coisas diferentes, e só uma delas foi dispensada.** A
+distinção custou uma revisão para aparecer, e este parágrafo existe para ela não se perder de novo:
+
+| | Pergunta | Estado |
+|---|---|---|
+| Raio de explosão desktop→VPS | *se a máquina que ingere for comprometida, o que ela alcança?* | **dispensado** — a rede é confiável por decisão |
+| Escopo admin vs. read-only | *o que o processo pode fazer com a chave que carrega?* | **implementado** — o MCP tem chave read-only |
+
+A segunda não é uma versão menor da primeira, e nenhuma decisão sobre a rede a responde. O servidor
+MCP roda semanas sem supervisão respondendo com texto tirado de notas — que este código trata como
+entrada não confiável por desenho, envelopando todo resultado. Uma chave que escreve nas mãos desse
+processo é raio maior que uma que não escreve, com a rede inteira confiável.
+
+Quem enforça é o Qdrant, e é aí que está o valor: `internal/store` não expõe busca e `cmd/mcp-server`
+não chama caminho de escrita, mas as duas são convenções que este repositório mantém sozinho. A chave
+read-only é a linha que sobrevive a alguém quebrá-las.
 
 ## `docs/` fica fora do git, e isso é decisão fechada
 

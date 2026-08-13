@@ -105,8 +105,23 @@ if [ ! -f "$env_file" ]; then
   printf 'NOT CHECKED: whether the two keys are different values — %s does not exist here.\n' "$env_file"
   printf '             This check runs on the machine that holds the keys, not in CI.\n'
 else
-  admin_value=$(grep -E '^QDRANT_API_KEY=' "$env_file" | head -1 | cut -d= -f2-)
-  readonly_value=$(grep -E '^QDRANT_READ_ONLY_API_KEY=' "$env_file" | head -1 | cut -d= -f2-)
+  # Read a value the way docker compose reads it, not the way a first guess reads it. Both of these
+  # were bypasses: the check reported success while the deployed Qdrant held one credential twice.
+  #
+  #   - `tail -1`, not `head -1`: on a duplicated key compose takes the last line. Reading the first
+  #     compares a value that is not in effect — which is what an operator rotating a key and leaving
+  #     the old line behind produces.
+  #   - quotes stripped: compose treats KEY="x" and KEY=x as the same value x. Comparing them raw
+  #     makes two identical credentials look like two different ones, which is precisely the
+  #     comparison this block exists to make.
+  #   - carriage returns stripped: this repository is developed on WSL and edited from Windows, where
+  #     a file can arrive with CRLF endings and every value silently gains a trailing \r.
+  dotenv_value() {
+    grep -E "^(export[[:space:]]+)?$1=" "$env_file" | tail -1 |
+      sed -E "s/^(export[[:space:]]+)?$1=//; s/\r$//; s/^\"(.*)\"$/\1/; s/^'(.*)'$/\1/"
+  }
+  admin_value=$(dotenv_value QDRANT_API_KEY)
+  readonly_value=$(dotenv_value QDRANT_READ_ONLY_API_KEY)
   # Values are compared, never printed: this script's output goes to CI logs and terminals.
   if [ -z "$admin_value" ] || [ -z "$readonly_value" ]; then
     fail "$env_file leaves QDRANT_API_KEY or QDRANT_READ_ONLY_API_KEY empty — compose would refuse to start, and an empty value is not a key"

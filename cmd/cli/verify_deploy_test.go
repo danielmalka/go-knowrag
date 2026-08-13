@@ -188,6 +188,51 @@ func TestVerifyDeploy_KeyPairChecks(t *testing.T) {
 		}
 	})
 
+	// The two keys are the same *credential* in each of these, and every one of them slipped past an
+	// earlier version of check 5 that compared the raw text after the first `=`. They are here as
+	// separate cases rather than one because they fail for unrelated reasons, and fixing one says
+	// nothing about the others.
+	//
+	// What makes them bypasses rather than cosmetics is that docker compose resolves each pair to a
+	// single value: it strips surrounding quotes, and on a duplicated key it takes the last line. So
+	// the deployed Qdrant holds one credential under two names while the script reports success —
+	// the exact state check 5 exists to refuse.
+	for _, tc := range []struct {
+		name string
+		env  string
+	}{
+		{"same key, quoted on one side", "QDRANT_API_KEY=\"shared-key-fixture\"\nQDRANT_READ_ONLY_API_KEY=shared-key-fixture\n"},
+		{"same key, single-quoted on one side", "QDRANT_API_KEY='shared-key-fixture'\nQDRANT_READ_ONLY_API_KEY=shared-key-fixture\n"},
+		{"same key, admin declared twice", "QDRANT_API_KEY=rotated-away-fixture\nQDRANT_API_KEY=shared-key-fixture\nQDRANT_READ_ONLY_API_KEY=shared-key-fixture\n"},
+		// Only the first line carries the carriage return, and that asymmetry is the whole case: with
+		// CRLF on both lines the two raw values differ by the same trailing \r and compare equal
+		// anyway, so a fixture written that way passes without the stripping it means to exercise. A
+		// file half-edited from Windows is what produces the mixed shape.
+		{"same key, CRLF on one line only", "QDRANT_API_KEY=shared-key-fixture\r\nQDRANT_READ_ONLY_API_KEY=shared-key-fixture\n"},
+		{"same key, export prefix on one side", "export QDRANT_API_KEY=shared-key-fixture\nQDRANT_READ_ONLY_API_KEY=shared-key-fixture\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := tc.env
+			code, output := runVerifyDeploy(t, compose, &env)
+			if code == 0 {
+				t.Fatalf("verify-deploy.sh accepted an .env whose two keys resolve to one credential; output:\n%s", output)
+			}
+			if !strings.Contains(output, "sets both keys to the same value") {
+				t.Errorf("output did not name the equal-keys failure; got:\n%s", output)
+			}
+		})
+	}
+
+	// Genuinely different keys must still pass, which is what stops the cases above from being
+	// answered by a check that just always fails.
+	t.Run("genuinely different keys pass", func(t *testing.T) {
+		env := "QDRANT_API_KEY=\"admin-key-fixture\"\nQDRANT_READ_ONLY_API_KEY=readonly-key-fixture\n"
+		code, output := runVerifyDeploy(t, compose, &env)
+		if code != 0 {
+			t.Fatalf("verify-deploy.sh rejected two genuinely different keys; output:\n%s", output)
+		}
+	})
+
 	// The one case in this file where a missing check must NOT fail the script: no .env exists next
 	// to the fixture, which is CI's own situation (deploy/.env is gitignored), and check 5 is
 	// documented to print NOT CHECKED and move on rather than fail closed.
