@@ -120,8 +120,14 @@ type handshakeResponse struct {
 	Sparse            map[string]string `json:"sparse"`
 }
 
-// dtypeNames maps torch's dtype spelling to the vocabulary ADR-001 §4 row 7 fixes
-// (fp32 | fp16 | int8). The translation lives here, at the wire, for one reason: this value goes
+// dtypeNames maps torch's dtype spelling to the spelling this codebase hashes, and **this map is
+// where that set is decided** — nothing here is quoting another file. ADR-001 §4 row 7 pins one
+// value, fp16, and enumerates no vocabulary; it stopped enumerating when D-03 closed on 2026-08-09.
+// The sentence that used to sit here claimed the row fixed `fp32 | fp16 | int8`, which named a value
+// no torch dtype maps to and omitted `bf16`, which the map right below emits.
+//
+// fp32 and bf16 exist so that a backend which switched precision diverges under a stable name
+// instead of under torch's. The translation lives here, at the wire, for one reason: this value goes
 // into point_hash, so it must not change the day the server's spelling does. An unrecognised dtype
 // passes through unchanged, so it diverges loudly against the pin instead of being flattened to ""
 // and reported as "the backend did not tell us".
