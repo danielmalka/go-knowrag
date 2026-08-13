@@ -1,8 +1,10 @@
 package eval
 
 import (
+	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -206,6 +208,63 @@ func TestAppendQuestion_KeepsWorkingOnACRLFFile(t *testing.T) {
 	}
 	if got := len(loadFixture(t, readSet(t, path)).Questions); got != 3 {
 		t.Errorf("the set holds %d entr(ies), want 3:\n%q", got, readSet(t, path))
+	}
+}
+
+// TestAppendQuestion_ConcurrentAppendsAllLand is the evidence under the design decision, which until
+// now was only an argument.
+//
+// AppendQuestion deliberately does not write through a temporary file and a rename, and the reason it
+// gives is that a rename publishes a whole file: two sessions appending at once would end with one
+// silently overwriting the other's entry. That reasoning is only worth the paragraph it occupies if
+// the thing it prefers actually holds, so this runs the case — N writers, one file, no lock — and
+// requires every entry to be there and the result to parse.
+//
+// What makes it work is that each writer appends only its own bytes, in one Write to an O_APPEND
+// descriptor, which POSIX makes atomic at this size. There is no read-modify-write of shared content
+// to interleave. Run under -race like everything else here.
+func TestAppendQuestion_ConcurrentAppendsAllLand(t *testing.T) {
+	const writers = 12
+
+	path := writeGoldenSet(t, coverageOnly)
+
+	var wg sync.WaitGroup
+	errs := make([]error, writers)
+	for i := range writers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// Distinct uids, so a lost entry is a missing uid rather than a count that happens to
+			// come out right.
+			uid := fmt.Sprintf("aaaaaaaa-aaaa-4aaa-8aaa-%012d", i)
+			errs[i] = AppendQuestion(path, aQuestion(fmt.Sprintf("question %d", i), uid, "alfa"))
+		}()
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("writer %d: %v\n%s", i, err, readSet(t, path))
+		}
+	}
+
+	set, err := LoadGoldenSet(path)
+	if err != nil {
+		t.Fatalf("the file did not parse after %d concurrent appends: %v\n%s",
+			writers, err, readSet(t, path))
+	}
+	if len(set.Questions) != writers {
+		t.Errorf("the set holds %d entr(ies) after %d concurrent appends:\n%s",
+			len(set.Questions), writers, readSet(t, path))
+	}
+	seen := map[string]bool{}
+	for _, q := range set.Questions {
+		seen[q.UID] = true
+	}
+	for i := range writers {
+		if uid := fmt.Sprintf("aaaaaaaa-aaaa-4aaa-8aaa-%012d", i); !seen[uid] {
+			t.Errorf("writer %d's entry (uid %s) is not in the file — an append was lost", i, uid)
+		}
 	}
 }
 

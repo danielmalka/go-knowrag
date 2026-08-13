@@ -709,49 +709,65 @@ func TestOpenGoldenSetForAuthoring_TellsTheTwoFailuresApart(t *testing.T) {
 //     here as the weak one so nobody mistakes it for the guarantee.
 var searchWords = []string{"Search", "Retriev", "Query", "Hit", "Recall"}
 
-// searchOnlyPackages are the packages that exist to talk to the index. golden.go reads the vaults; a
-// single import of either of these is the whole defect, whatever the symbol is called.
-var searchOnlyPackages = []string{
+// searchReachingImports are the packages through which this binary reaches the index. Everything that
+// searches goes through one of them: internal/retrieval builds and runs the query, internal/store
+// holds the client, internal/clicmd owns the Searcher interface and the Connect that produces one.
+//
+// This is a list of three, and it is the only hand-written list left in this test — everything else
+// below is derived from it. It is defensible where the two lists it replaced were not: those named
+// the *symbols* and *files* that happened to be on the route today, and grew stale the moment anybody
+// wrote a fourth file or a new package. This names the packages the route runs through, and a new
+// route has to run through one of them too.
+var searchReachingImports = []string{
 	"github.com/danielmalka/go-knowrag/internal/retrieval",
 	"github.com/danielmalka/go-knowrag/internal/store",
+	"github.com/danielmalka/go-knowrag/internal/clicmd",
 }
 
-// searchOwningFiles are the files of this same package that can reach a searcher. Being in package
-// main, everything they declare is callable from golden.go with no import at all — which is how the
-// first reviewer's exploit worked, using openEvalSearcher (cmd/cli/eval.go).
+// goldenAllowedSelectors is default-deny over golden.go's whole import block, and the "whole" is the
+// correction: it used to be keyed only on `eval` and `clicmd`, so a package outside those two was not
+// checked at all. A reviewer wrote internal/searchleak — one function forwarding to
+// retrieval.Searcher.Search — imported it here, and the test stayed green because searchleak was not
+// a key in this map. Now every non-stdlib import golden.go declares must appear as a key, whether or
+// not any selector is used, so a new package fails on the import alone.
 //
-// The check is on the declaring file, not on the name: renaming openEvalSearcher moves nothing, it is
-// still declared here and still refused. That is the difference between matching an edge and matching
-// a string.
-var searchOwningFiles = []string{"eval.go", "search.go"}
-
-// goldenAllowedSelectors is default-deny, and the direction is the point.
+// Within a package it is still default-deny by symbol, which is what keeps internal/eval usable:
+// that package holds Searcher, RunGolden, QuestionResult, GoldenGate and Options alongside the file
+// schema this command needs. A denylist would have to chase every symbol it ever grows.
 //
-// golden.go imports two packages that also carry search results — internal/eval holds Searcher,
-// RunGolden, QuestionResult, GoldenGate and Options, and internal/clicmd holds Searcher and Connect —
-// so a denylist would have to be kept current with every symbol either package ever grows. This lists
-// what golden.go may use instead. Anything else from either package fails, including something added
-// tomorrow under a name nobody predicted.
-//
-// Adding an entry here is a deliberate act: the question to answer first is whether the symbol can
-// carry, or produce, anything the index returned.
+// Adding anything here is a deliberate act, and the question to answer first is whether the symbol
+// can carry, or produce, anything the index returned. That is disciplined rather than proven: the
+// check is by name, not by type. Deriving it from types would mean reading every symbol's signature,
+// which is the brittle static analysis this repository avoids.
 var goldenAllowedSelectors = map[string][]string{
 	"eval": {
 		"GoldenQuestion", "GoldenSet", "AreaStatus",
 		"CoverageStatus", "ReadGoldenSet", "AppendQuestion", "ErrGoldenSetMissing",
 	},
 	"clicmd": {"Usage"},
+	"config": {"Config"},
+	"vault":  {"ScanResult", "Note"},
+	"cobra":  {"Command", "NoArgs"},
 }
 
 // TestGoldenCmd_CannotReachSearch is the dependency-edge half of the rule. See the numbered list
 // above for what it covers that the output allow-list does not.
+//
+// All three edges below are derived from searchReachingImports and from the real import graph.
+// Nothing here enumerates a symbol, a file or a package that happens to be on the route today — that
+// shape was got past three times, each time by writing something the list had not been updated for.
 func TestGoldenCmd_CannotReachSearch(t *testing.T) {
 	root := moduleRoot(t)
 	const goldenFile = "cmd/cli/golden.go"
 
-	// (a) The import edge. Reuses internal/archtest, which is where this module's other architecture
-	// invariant already lives, so there is one walker and one definition of "imports".
-	for _, pkg := range searchOnlyPackages {
+	// (a) golden.go's own imports. Reuses internal/archtest, which is where this module's other
+	// architecture invariant already lives, so there is one walker and one definition of "imports".
+	// clicmd is excluded here alone: golden.go imports it for clicmd.Usage, and which symbols it may
+	// take from it is (c)'s job.
+	for _, pkg := range searchReachingImports {
+		if strings.HasSuffix(pkg, "/clicmd") {
+			continue
+		}
 		violations, err := archtest.FindImporters(root, pkg, nil)
 		if err != nil {
 			t.Fatalf("walking %s for %s: %v", root, pkg, err)
@@ -772,13 +788,34 @@ func TestGoldenCmd_CannotReachSearch(t *testing.T) {
 	}
 
 	// (b) The same-package edge, which needs no import and is therefore the one a reader misses.
-	owned := declaredIn(t, filepath.Join(root, "cmd", "cli"), searchOwningFiles)
+	// Derived, not listed: see tainted.
+	owned := tainted(t, filepath.Join(root, "cmd", "cli"), filepath.Base(goldenFile))
 	if len(owned) == 0 {
-		t.Fatalf("no top-level declarations found in %v, so this half of the test is looking at "+
-			"nothing", searchOwningFiles)
+		t.Fatal("no declaration in cmd/cli was found to reach search, which cannot be true while " +
+			"`search` and `eval --golden` exist — this half of the test is looking at nothing")
 	}
 
-	// (c) The cross-package edge, default-deny. See goldenAllowedSelectors.
+	// (c) The cross-package edge, default-deny over every import and every symbol.
+	for _, imp := range golden.Imports {
+		path := strings.Trim(imp.Path.Value, `"`)
+		// Standard library, identified the usual way: no dot in the first path element. Nothing in it
+		// reaches this index, and listing every stdlib package golden.go uses would be a list that
+		// rots for no benefit.
+		if first, _, _ := strings.Cut(path, "/"); !strings.Contains(first, ".") {
+			continue
+		}
+		name := path[strings.LastIndex(path, "/")+1:]
+		if imp.Name != nil {
+			name = imp.Name.Name
+		}
+		if _, allowed := goldenAllowedSelectors[name]; !allowed {
+			t.Errorf("%s: golden.go imports %q, which has no entry in goldenAllowedSelectors. Every "+
+				"non-stdlib import has to be declared there with the symbols this file may take from "+
+				"it — an unlisted package is a route to anything it can reach, including the index",
+				fset.Position(imp.Pos()), path)
+		}
+	}
+
 	used := map[string]bool{}
 	selectors := 0
 	ast.Inspect(golden, func(n ast.Node) bool {
@@ -800,14 +837,16 @@ func TestGoldenCmd_CannotReachSearch(t *testing.T) {
 			return true
 		}
 		ident, ok := n.(*ast.Ident)
-		if !ok {
+		// The package clause is skipped by identity: `package main` is an *ast.Ident named "main",
+		// and so is the func main() declared in main.go, which reaches search like everything else
+		// that builds the command tree.
+		if !ok || ident == golden.Name {
 			return true
 		}
 		if where, isOwned := owned[ident.Name]; isOwned {
-			t.Errorf("%s: golden.go references %q, declared in %s — one of the files in this package "+
-				"that can reach a searcher. Package main needs no import, so this is a route to the "+
-				"index with nothing in the import block to show for it",
-				fset.Position(ident.Pos()), ident.Name, where)
+			t.Errorf("%s: golden.go references %q, declared in %s, which reaches search. Package main "+
+				"needs no import, so this is a route to the index with nothing in the import block to "+
+				"show for it", fset.Position(ident.Pos()), ident.Name, where)
 		}
 		for _, word := range searchWords {
 			if strings.Contains(ident.Name, word) {
@@ -833,40 +872,296 @@ func TestGoldenCmd_CannotReachSearch(t *testing.T) {
 	}
 }
 
-// declaredIn maps every top-level declaration name in the named files of dir to the file it came
-// from. Types, functions, methods' receivers aside, constants and variables all count: any of them is
-// reachable from another file of the same package.
-func declaredIn(t *testing.T, dir string, files []string) map[string]string {
+// TestEval_NoSearchOnTheTypesGoldenHolds closes the fourth bypass, which I built after the third fix
+// and which the checks above do not see.
+//
+// (c) watches selectors whose left side is a package: `eval.RunGolden`. It cannot watch
+// `set.Anything()`, because `set` is a value and knowing its type needs a type checker. So a method
+// added to internal/eval on one of the types golden.go legitimately holds — `func (g GoldenSet)
+// Fetch() []QuestionResult`, building its own searcher inside the package, which already imports
+// internal/retrieval — is callable from golden.go with no new import, no new package, and no watched
+// selector. It goes green.
+//
+// Package-level transitive reachability does not close it: internal/eval imports internal/retrieval
+// today, on purpose, because that is where the gate lives. Neither does an exception list. What
+// closes it is the same taint pass (b) uses, pointed at internal/eval and restricted to the types
+// golden.go can hold — those are derived from the allow-list by following struct fields, not listed.
+func TestEval_NoSearchOnTheTypesGoldenHolds(t *testing.T) {
+	dir := filepath.Join(moduleRoot(t), "internal", "eval")
+
+	held := typesReachableFrom(t, dir, goldenAllowedSelectors["eval"])
+	if len(held) < 3 {
+		t.Fatalf("only %d type(s) reachable from the allow-list: %v — golden.go holds GoldenSet, "+
+			"which reaches CoverageTable through a field, so this is looking at nothing", len(held), held)
+	}
+
+	reaches := tainted(t, dir, "")
+	fset := token.NewFileSet()
+	paths, err := filepath.Glob(filepath.Join(dir, "*.go"))
+	if err != nil {
+		t.Fatalf("globbing %s: %v", dir, err)
+	}
+
+	for _, path := range paths {
+		base := filepath.Base(path)
+		if strings.HasSuffix(base, "_test.go") {
+			continue
+		}
+		file, perr := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+		if perr != nil {
+			t.Fatalf("parsing %s: %v", base, perr)
+		}
+		reaching := reachingNames(file)
+
+		for _, d := range file.Decls {
+			fn, ok := d.(*ast.FuncDecl)
+			if !ok || fn.Recv == nil || len(fn.Recv.List) == 0 {
+				continue
+			}
+			receiver := receiverType(fn.Recv.List[0].Type)
+			if !held[receiver] {
+				continue
+			}
+			bad := namesReaching(fn, reaching)
+			if !bad {
+				for ref := range referencedNames(fn) {
+					if _, isTainted := reaches[ref]; isTainted {
+						bad = true
+						break
+					}
+				}
+			}
+			if bad {
+				t.Errorf("%s: %s.%s reaches search, and %s is a type golden.go holds — so golden.go "+
+					"could call it with no import and no package selector for any check to see",
+					fset.Position(fn.Pos()), receiver, fn.Name.Name, receiver)
+			}
+		}
+	}
+}
+
+// typesReachableFrom closes over struct fields from the named types, so "the types golden.go can
+// hold" is derived rather than listed: golden.go names GoldenSet, GoldenSet has a CoverageTable
+// field, CoverageTable has CoverageGroups, and a method on any of them is equally callable.
+func typesReachableFrom(t *testing.T, dir string, roots []string) map[string]bool {
 	t.Helper()
 
 	fset := token.NewFileSet()
-	owned := map[string]string{}
-	for _, name := range files {
-		file, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, parser.SkipObjectResolution)
-		if err != nil {
-			t.Fatalf("parsing %s: %v", name, err)
+	paths, err := filepath.Glob(filepath.Join(dir, "*.go"))
+	if err != nil {
+		t.Fatalf("globbing %s: %v", dir, err)
+	}
+
+	fields := map[string][]string{}
+	for _, path := range paths {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
 		}
-		for _, decl := range file.Decls {
-			switch d := decl.(type) {
-			case *ast.FuncDecl:
-				// Methods are excluded: their names are only reachable through a value of the
-				// receiver type, and the receiver type is itself in this map if it is declared here.
-				if d.Recv == nil {
-					owned[d.Name.Name] = name
+		file, perr := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+		if perr != nil {
+			t.Fatalf("parsing %s: %v", filepath.Base(path), perr)
+		}
+		ast.Inspect(file, func(n ast.Node) bool {
+			spec, ok := n.(*ast.TypeSpec)
+			if !ok {
+				return true
+			}
+			structType, isStruct := spec.Type.(*ast.StructType)
+			if !isStruct {
+				return true
+			}
+			for _, field := range structType.Fields.List {
+				// Every identifier in the field's type expression: this picks the element type out of
+				// `[]CoverageGroup` and `*int` alike, and a name that is not a local type simply never
+				// matches anything below.
+				for name := range referencedNames(field.Type) {
+					fields[spec.Name.Name] = append(fields[spec.Name.Name], name)
 				}
-			case *ast.GenDecl:
-				for _, spec := range d.Specs {
-					switch s := spec.(type) {
-					case *ast.TypeSpec:
-						owned[s.Name.Name] = name
-					case *ast.ValueSpec:
-						for _, ident := range s.Names {
-							owned[ident.Name] = name
-						}
-					}
+			}
+			return true
+		})
+	}
+
+	held := map[string]bool{}
+	var walk func(string)
+	walk = func(name string) {
+		if held[name] {
+			return
+		}
+		held[name] = true
+		for _, next := range fields[name] {
+			walk(next)
+		}
+	}
+	for _, root := range roots {
+		walk(root)
+	}
+	return held
+}
+
+// receiverType is the type name a method is declared on, with any pointer star removed.
+func receiverType(expr ast.Expr) string {
+	if star, ok := expr.(*ast.StarExpr); ok {
+		expr = star.X
+	}
+	if ident, ok := expr.(*ast.Ident); ok {
+		return ident.Name
+	}
+	return ""
+}
+
+// reachingNames maps a file's local identifiers for the search-reaching packages it imports.
+func reachingNames(file *ast.File) map[string]bool {
+	out := map[string]bool{}
+	for _, imp := range file.Imports {
+		p := strings.Trim(imp.Path.Value, `"`)
+		if !slices.Contains(searchReachingImports, p) {
+			continue
+		}
+		name := p[strings.LastIndex(p, "/")+1:]
+		if imp.Name != nil {
+			name = imp.Name.Name
+		}
+		out[name] = true
+	}
+	return out
+}
+
+// tainted returns every top-level declaration in dir that can reach search, mapped to its file, by
+// least fixed point over the package's own reference graph. except is the file under test, whose
+// declarations are the subject rather than the ruler.
+//
+// The seed is a declaration that names one of searchReachingImports directly. Everything that
+// references a tainted declaration becomes tainted, until nothing changes. That is what replaces the
+// hand-written list of two files: a reviewer added cmd/cli/leak_helper.go calling dialSearcher — a
+// third file, so the list did not know about it, and the test passed. Under this it is tainted at the
+// first round and golden.go referring to it fails, whatever the file or the function is called.
+//
+// Per declaration, not per file, and the distinction is what makes it usable: cmd/cli/ingest.go
+// imports internal/store, so a file-level rule would taint everything in it — including selectVaults
+// and scanVaults, which golden.go legitimately uses and which touch nothing but config and the vault
+// scanner.
+func tainted(t *testing.T, dir, except string) map[string]string {
+	t.Helper()
+
+	type decl struct {
+		file  string
+		names map[string]bool // what its body refers to
+		seed  bool
+	}
+
+	fset := token.NewFileSet()
+	paths, err := filepath.Glob(filepath.Join(dir, "*.go"))
+	if err != nil {
+		t.Fatalf("globbing %s: %v", dir, err)
+	}
+
+	decls := map[string]*decl{}
+	for _, path := range paths {
+		base := filepath.Base(path)
+		if base == except || strings.HasSuffix(base, "_test.go") {
+			continue
+		}
+		file, perr := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+		if perr != nil {
+			t.Fatalf("parsing %s: %v", base, perr)
+		}
+
+		// Which local identifier stands for a search-reaching package in this file.
+		reaching := reachingNames(file)
+
+		for _, d := range file.Decls {
+			for _, name := range topLevelNames(d) {
+				decls[name] = &decl{file: base, names: referencedNames(d), seed: namesReaching(d, reaching)}
+			}
+		}
+	}
+
+	out := map[string]string{}
+	for name, d := range decls {
+		if d.seed {
+			out[name] = d.file
+		}
+	}
+	// Least fixed point. The package is small enough that a naive re-scan per round costs nothing.
+	for changed := true; changed; {
+		changed = false
+		for name, d := range decls {
+			if _, already := out[name]; already {
+				continue
+			}
+			for ref := range d.names {
+				if _, isTainted := out[ref]; isTainted {
+					out[name] = d.file
+					changed = true
+					break
 				}
 			}
 		}
 	}
-	return owned
+	return out
+}
+
+// topLevelNames is what one declaration adds to the package scope. Methods are excluded: their names
+// are reachable only through a value of the receiver type, and the receiver type is itself in the map
+// if it is declared here.
+func topLevelNames(d ast.Decl) []string {
+	var out []string
+	switch v := d.(type) {
+	case *ast.FuncDecl:
+		if v.Recv == nil {
+			out = append(out, v.Name.Name)
+		}
+	case *ast.GenDecl:
+		for _, spec := range v.Specs {
+			switch s := spec.(type) {
+			case *ast.TypeSpec:
+				out = append(out, s.Name.Name)
+			case *ast.ValueSpec:
+				for _, ident := range s.Names {
+					out = append(out, ident.Name)
+				}
+			}
+		}
+	}
+	return out
+}
+
+// referencedNames is every identifier a declaration mentions, minus the selector halves — `Search` in
+// `s.Search(...)` names a method on some value, not a package-level declaration, and counting it
+// would make any struct field that shares a name with a tainted function look like a reference to it.
+func referencedNames(n ast.Node) map[string]bool {
+	selectors := map[*ast.Ident]bool{}
+	ast.Inspect(n, func(node ast.Node) bool {
+		if sel, ok := node.(*ast.SelectorExpr); ok {
+			selectors[sel.Sel] = true
+		}
+		return true
+	})
+
+	out := map[string]bool{}
+	ast.Inspect(n, func(node ast.Node) bool {
+		if ident, ok := node.(*ast.Ident); ok && !selectors[ident] {
+			out[ident.Name] = true
+		}
+		return true
+	})
+	return out
+}
+
+// namesReaching reports whether a declaration mentions one of the search-reaching packages by its
+// local name — `store.NewQdrantClient`, `clicmd.Connect`, `retrieval.Query`.
+func namesReaching(n ast.Node, reaching map[string]bool) bool {
+	found := false
+	ast.Inspect(n, func(node ast.Node) bool {
+		sel, ok := node.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		if pkg, isIdent := sel.X.(*ast.Ident); isIdent && reaching[pkg.Name] {
+			found = true
+		}
+		return true
+	})
+	return found
 }
