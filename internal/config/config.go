@@ -70,7 +70,10 @@ type VaultSettings struct {
 	// Areas names the first-level folders that are valid `area` values in this vault,
 	// comma-separated. Which areas exist is installation configuration, not contract (D-26).
 	Areas string `yaml:"areas"`
-	// ExcludeFolders names first-level folders skipped in silence, comma-separated.
+	// ExcludeFolders names folders skipped in silence, comma-separated. An entry is either a
+	// first-level folder name or a path relative to the vault root (`arcanto/14-internal-work`),
+	// which skips that subtree and only it. This package splits and trims; what a path means — case,
+	// separator, segment-not-prefix — is vault.Exclusions.Folders in internal/vault/walk.go.
 	ExcludeFolders string `yaml:"exclude_folders"`
 	// ExcludeRootFiles names root-level `.md` files skipped in silence, comma-separated.
 	ExcludeRootFiles string `yaml:"exclude_root_files"`

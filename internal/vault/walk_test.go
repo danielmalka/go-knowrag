@@ -86,10 +86,12 @@ func TestWalkVault_NamedExclusionList_SkipsSilently(t *testing.T) {
 	}
 }
 
-// TestWalkVault_NamedExclusionIsCaseInsensitiveAndFirstLevelOnly pins both halves of the named
-// rule. Case-insensitive because the real folder is `PowerAI` while the contract writes `powerai`.
-// First level only because the list names areas, not arbitrary subtrees — a `resources/` nested
-// inside `research/` is a different thing from the vault's top-level `resources/`.
+// TestWalkVault_NamedExclusionIsCaseInsensitiveAndFirstLevelOnly pins both halves of the *bare
+// name* rule, which nested entries did not change. Case-insensitive because the real folder is
+// `PowerAI` while the contract writes `powerai`. First level only because a bare name names an
+// area, not an arbitrary subtree — a `resources/` nested inside `research/` is a different thing
+// from the vault's top-level `resources/`, and reaching it takes the slashed form asserted in
+// TestWalkVault_NestedExclusionSkipsOneSubtree.
 func TestWalkVault_NamedExclusionIsCaseInsensitiveAndFirstLevelOnly(t *testing.T) {
 	root := writeTree(t, map[string]string{
 		"resources/top.md":                    "top",
@@ -103,6 +105,178 @@ func TestWalkVault_NamedExclusionIsCaseInsensitiveAndFirstLevelOnly(t *testing.T
 	want := []string{"research/ingles/resources/nested.md"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("walkVault() = %v, want %v", got, want)
+	}
+}
+
+// nestedTree is the shape D-40 is about: one folder, two levels down, holding an artifact whose
+// `.md` is an accident, inside an area that also holds real notes. Its neighbours exist to prove
+// what the exclusion must NOT reach — including `research/14`, whose name is a string prefix of
+// `research/14-internal-work`.
+func nestedTree() map[string]string {
+	return map[string]string{
+		"research/14-internal-work/landing/PACKET.md":  "briefing, never a note",
+		"research/14-internal-work/landing/index.html": "<html></html>",
+		"research/14-internal-work/real.md":            "a real note beside it",
+		"research/14/keep.md":                          "prefix neighbour, must survive",
+		"research/note.md":                             "a real note in the area",
+		"landing/top.md":                               "same leaf name at first level",
+	}
+}
+
+// TestWalkVault_NestedExclusionSkipsOneSubtree is the whole point of D-40: excluding the offending
+// folder must not cost the area that contains it.
+func TestWalkVault_NestedExclusionSkipsOneSubtree(t *testing.T) {
+	root := writeTree(t, nestedTree())
+
+	got, _, err := walkVault(root, Exclusions{Folders: []string{"research/14-internal-work/landing"}})
+	if err != nil {
+		t.Fatalf("walkVault returned an error: %v", err)
+	}
+	want := []string{
+		"landing/top.md",
+		"research/14/keep.md",
+		"research/14-internal-work/real.md",
+		"research/note.md",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("walkVault() = %v, want %v", got, want)
+	}
+}
+
+// TestWalkVault_NestedExclusionMatchesSegmentsNotPrefix is the trap a naive strings.HasPrefix
+// falls into: `research/14` is a real sibling folder AND a character-for-character prefix of
+// `research/14-internal-work`. Excluding one must leave the other whole, in both directions.
+func TestWalkVault_NestedExclusionMatchesSegmentsNotPrefix(t *testing.T) {
+	root := writeTree(t, nestedTree())
+
+	for _, tc := range []struct {
+		entry string
+		want  []string
+	}{
+		{
+			// The short sibling: excluding it must not swallow `14-internal-work`.
+			entry: "research/14",
+			want: []string{
+				"landing/top.md",
+				"research/14-internal-work/landing/PACKET.md",
+				"research/14-internal-work/real.md",
+				"research/note.md",
+			},
+		},
+		{
+			// The long one: excluding it must not swallow `research/14`.
+			entry: "research/14-internal-work",
+			want: []string{
+				"landing/top.md",
+				"research/14/keep.md",
+				"research/note.md",
+			},
+		},
+		{
+			// A leading segment on its own is not a subtree exclusion, and a trailing one is not a
+			// parent exclusion: only the whole path matches.
+			entry: "14-internal-work",
+			want: []string{
+				"landing/top.md",
+				"research/14/keep.md",
+				"research/14-internal-work/landing/PACKET.md",
+				"research/14-internal-work/real.md",
+				"research/note.md",
+			},
+		},
+	} {
+		t.Run(tc.entry, func(t *testing.T) {
+			got, _, err := walkVault(root, Exclusions{Folders: []string{tc.entry}})
+			if err != nil {
+				t.Fatalf("walkVault returned an error: %v", err)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("walkVault(exclude %q) = %v, want %v", tc.entry, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestWalkVault_NestedExclusionSpelling pins the two ways an operator can write the same entry and
+// still mean it. Case, because the vaults sit on a case-insensitive Windows filesystem while the
+// contract writes lowercase; the backslash, because a path pasted out of Explorer arrives with
+// them and internal/config/config.go passes the string through untouched apart from commas and
+// spaces. Each spelling must produce exactly what the canonical one produces.
+func TestWalkVault_NestedExclusionSpelling(t *testing.T) {
+	root := writeTree(t, nestedTree())
+
+	canonical, _, err := walkVault(root, Exclusions{Folders: []string{"research/14-internal-work/landing"}})
+	if err != nil {
+		t.Fatalf("walkVault (canonical): %v", err)
+	}
+
+	for _, entry := range []string{
+		`Research/14-Internal-Work/LANDING`,
+		`research\14-internal-work\landing`,
+		`/research/14-internal-work/landing/`,
+		`Research\14-Internal-Work\Landing\`,
+	} {
+		got, _, err := walkVault(root, Exclusions{Folders: []string{entry}})
+		if err != nil {
+			t.Fatalf("walkVault(%q): %v", entry, err)
+		}
+		if !reflect.DeepEqual(got, canonical) {
+			t.Errorf("walkVault(exclude %q) = %v, want %v (same as the canonical spelling)",
+				entry, got, canonical)
+		}
+	}
+}
+
+// TestScanVault_NonNoteInExcludedSubtreeDoesNotAbort is the occurrence D-40 was written from,
+// end to end: a `.md` with no frontmatter at all, two levels down, that broke every ingestion for
+// two days. Excluded, the scan must succeed AND still return the real notes of the same area —
+// a scan that skipped the whole area would also pass an "err == nil" assertion.
+func TestScanVault_NonNoteInExcludedSubtreeDoesNotAbort(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"research/14-internal-work/landing/PACKET.md": "# Session briefing\n\nno frontmatter here\n",
+		"research/keeper.md":                          trashNote,
+	})
+
+	ex := Exclusions{Folders: []string{"research/14-internal-work/landing"}}
+	result, err := ScanVault(root, lifeVault(), lifeAreas(), ex)
+	if err != nil {
+		t.Fatalf("ScanVault with the offending folder excluded: %v", err)
+	}
+	if len(result.Notes) != 1 || result.Notes[0].Path != "research/keeper.md" {
+		t.Fatalf("got notes %+v, want only research/keeper.md", result.Notes)
+	}
+
+	// Without the exclusion the same tree must still fail, or the test above proves nothing about
+	// the exclusion — it would pass just as well if the parser had stopped rejecting the file.
+	if _, err := ScanVault(root, lifeVault(), lifeAreas(), Exclusions{}); err == nil {
+		t.Fatal("ScanVault accepted a `.md` with no frontmatter block; want a refusal")
+	}
+}
+
+// TestFrontmatterError_NoBlockNamesTheWayOut guards the operator-facing half of D-40. The message
+// for "no block at all" must offer the exclusion, and must NOT go back to the bare sentence that
+// left an owner with a broken ingestion and nothing to act on — the absent wording is what keeps
+// the old text from creeping back.
+func TestFrontmatterError_NoBlockNamesTheWayOut(t *testing.T) {
+	_, err := parseFrontmatter("research/14-internal-work/landing/PACKET.md",
+		[]byte("# Session briefing\n\nno frontmatter here\n"))
+	if err == nil {
+		t.Fatal("parseFrontmatter accepted a file with no frontmatter block")
+	}
+	msg := err.Error()
+	for _, want := range []string{"probably not a note", "exclude_folders", "area/sub/folder"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message %q does not contain %q", msg, want)
+		}
+	}
+	// Frontmatter that is present and merely wrong is a real note with a defect, and must not be
+	// told to exclude its folder.
+	_, badErr := parseFrontmatter("research/note.md", []byte("---\nuid: nope\n---\nbody\n"))
+	if badErr == nil {
+		t.Fatal("parseFrontmatter accepted an invalid uid")
+	}
+	if strings.Contains(badErr.Error(), "exclude_folders") {
+		t.Errorf("an invalid-frontmatter message offers the exclusion way out: %q", badErr.Error())
 	}
 }
 
