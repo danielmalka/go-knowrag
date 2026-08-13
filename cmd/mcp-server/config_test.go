@@ -178,3 +178,42 @@ func TestConfig_LogValue_MasksAPIKey(t *testing.T) {
 		t.Errorf("masking swallowed the whole config, leaving nothing diagnosable:\n%s", buf.String())
 	}
 }
+
+// TestConfig_RedactsTheKeyOnBothRoutes covers the route this type was missing: it implemented
+// LogValue and not String, so fmt printed the credential in clear while the slog test above stayed
+// green. internal/store.Config and internal/config.Config both carry the pair; this one did not.
+//
+// Both value and pointer are exercised because the value receiver is the load-bearing part — a
+// pointer receiver would leave a Config formatted by copy unredacted, which is the shape this
+// project shipped once (internal/store/client.go).
+func TestConfig_RedactsTheKeyOnBothRoutes(t *testing.T) {
+	const secret = "super-secret-key"
+	cfg := Config{
+		Collection: "interno", TenantID: "tenant-a", QdrantEndpoint: "host:6334",
+		QdrantAPIKey: secret, EmbedderEndpoint: "http://127.0.0.1:7999", Areas: []string{"a"},
+	}
+
+	for _, tc := range []struct {
+		name string
+		out  string
+	}{
+		{"value %+v", fmt.Sprintf("%+v", cfg)},
+		{"pointer %+v", fmt.Sprintf("%+v", &cfg)},
+		// %s is not listed: for a Stringer it is the same route as %v, and staticcheck rejects
+		// spelling it out.
+		{"value %v", fmt.Sprintf("%v", cfg)},
+	} {
+		if strings.Contains(tc.out, secret) {
+			t.Errorf("%s leaked the API key: %s", tc.name, tc.out)
+		}
+		if !strings.Contains(tc.out, "[REDACTED]") {
+			t.Errorf("%s does not mark the key as redacted: %s", tc.name, tc.out)
+		}
+	}
+
+	// An unset key must stay distinguishable from a hidden one.
+	empty := Config{Collection: "interno"}
+	if strings.Contains(fmt.Sprintf("%+v", empty), "[REDACTED]") {
+		t.Error("an unset key was rendered as redacted, which hides that it is missing")
+	}
+}
