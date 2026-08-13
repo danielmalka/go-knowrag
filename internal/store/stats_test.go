@@ -146,6 +146,30 @@ func TestStats_EmptyPageWithAnOffset_IsAnErrorNotAPartialCount(t *testing.T) {
 	}
 }
 
+// TestStats_OffsetRepeats_IsAnErrorNotInfiniteLoop mirrors
+// TestClient_ScrollByUID_OffsetRepeats_IsAnErrorNotInfiniteLoop (D-38): a non-empty page whose next
+// offset is the same one this page was requested with looks like "more to fetch" by shape alone, and
+// continuing on that shape would re-issue the identical request forever. If this test hangs instead
+// of failing, the offset comparison regressed.
+func TestStats_OffsetRepeats_IsAnErrorNotInfiniteLoop(t *testing.T) {
+	stuck := qdrant.NewIDUUID("p2")
+	api := &fakePointAPI{
+		pages: [][]*qdrant.RetrievedPoint{
+			{statsPoint("p1", "uid-a")},
+			{statsPoint("p2", "uid-b")}, // non-empty, but the offset below never moves past `stuck`
+		},
+		offsets: []*qdrant.PointId{stuck, stuck},
+	}
+
+	got, err := newTestClient(t, api).Stats(context.Background(), testTenant)
+	if err == nil {
+		t.Fatalf("Stats returned %+v and no error for an offset that never advanced", got)
+	}
+	if got != (Stats{}) {
+		t.Errorf("Stats = %+v alongside an error; a stuck read must not be readable as a total", got)
+	}
+}
+
 // TestStats_ScrollFailure_IsReportedNotCountedAsZero is the same rule the orphan scan follows: not
 // having finished looking must never render as having found nothing.
 func TestStats_ScrollFailure_IsReportedNotCountedAsZero(t *testing.T) {

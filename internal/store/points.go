@@ -168,7 +168,7 @@ func (c *Client) ScrollByUID(ctx context.Context, tenantID string, uid uuid.UUID
 			}
 			out = append(out, rec)
 		}
-		done, err := scrollPageDone(page, next, fmt.Sprintf("scrolling %s/%s", c.collection, uid))
+		done, err := scrollPageDone(page, offset, next, fmt.Sprintf("scrolling %s/%s", c.collection, uid))
 		if err != nil {
 			return nil, err
 		}
@@ -179,25 +179,31 @@ func (c *Client) ScrollByUID(ctx context.Context, tenantID string, uid uuid.UUID
 	}
 }
 
-// scrollPageDone applies the one pagination stop condition Stats, ScrollByUID, and ScrollTenant all
-// share: stop when there is no offset to resume from, and refuse an empty page that still carries
-// one rather than reading it as the end. Continuing on that shape would re-issue the same request
-// forever; stopping in silence would report part of the collection as if it were all of it — and for
-// ScrollByUID and ScrollTenant that partial read feeds straight into the orphan candidate set
-// (ScanOrphans, internal/ingest/orphans.go) and the integrity check (internal/ingest/note.go), where
-// it looks like a smaller, still-plausible index rather than a wrong one.
+// scrollPageDone applies the two pagination stop conditions Stats, ScrollByUID, and ScrollTenant all
+// share: stop when there is no offset to resume from; otherwise refuse to continue on a page that
+// does not earn another request — either an empty page that still carries an offset, or an offset
+// that repeats the one just used. Both are read as errors, not silent end-of-scroll: stopping in
+// silence would report part of the collection as if it were all of it — and for ScrollByUID and
+// ScrollTenant that partial read feeds straight into the orphan candidate set (ScanOrphans,
+// internal/ingest/orphans.go) and the integrity check (internal/ingest/note.go), where it looks like
+// a smaller, still-plausible index rather than a wrong one. Continuing on a repeated offset instead
+// of erroring would not even produce a partial read — it would re-issue the same request forever,
+// which is the one failure in this family an operator would actually notice (the process never
+// returns), and the reason D-38 called it Low severity rather than Medium.
 //
-// Not reachable through Qdrant's documented behaviour — the offset comes back nil when there is
-// nothing after the page. It is checked because "not reachable" is a claim about a server this code
-// does not contain, and the cost of being wrong is a wrong answer that looks right.
+// Neither shape is reachable through Qdrant's documented behaviour — the offset comes back nil when
+// there is nothing after the page, and otherwise advances. Both are checked anyway because "not
+// reachable" is a claim about a server this code does not contain, and the cost of being wrong is a
+// hang or a wrong answer that looks right.
 //
 // The three callers share this exact decision and change together: touch the stop condition here,
 // not in one of them.
 //
-// read names what was being read, for the error message. It is not called `context` because this
-// file imports the context package, and a parameter by that name shadows it for anyone who later
-// needs a deadline in here.
-func scrollPageDone(page []*qdrant.RetrievedPoint, next *qdrant.PointId, read string) (bool, error) {
+// prevOffset is the offset the request that produced page and next was made with — nil on the first
+// page, where there is nothing to compare next against. read names what was being read, for the
+// error message. It is not called `context` because this file imports the context package, and a
+// parameter by that name shadows it for anyone who later needs a deadline in here.
+func scrollPageDone(page []*qdrant.RetrievedPoint, prevOffset, next *qdrant.PointId, read string) (bool, error) {
 	if next == nil {
 		return true, nil
 	}
@@ -205,6 +211,11 @@ func scrollPageDone(page []*qdrant.RetrievedPoint, next *qdrant.PointId, read st
 		return false, fmt.Errorf(
 			"%s: the scroll returned an empty page and an offset to continue from, so this read "+
 				"would report part of the collection as all of it", read)
+	}
+	if prevOffset != nil && pointID(next) == pointID(prevOffset) {
+		return false, fmt.Errorf(
+			"%s: the scroll's next offset (%s) is the same offset this page was requested with, so "+
+				"continuing would re-issue the same request forever", read, pointID(next))
 	}
 	return false, nil
 }
@@ -285,7 +296,7 @@ func (c *Client) Stats(ctx context.Context, tenantID string) (Stats, error) {
 		}
 		// The stop condition — and the empty-page-with-offset error the doc comment above promises —
 		// is scrollPageDone, shared with ScrollByUID and ScrollTenant.
-		done, err := scrollPageDone(page, next, fmt.Sprintf("counting %s", c.collection))
+		done, err := scrollPageDone(page, offset, next, fmt.Sprintf("counting %s", c.collection))
 		if err != nil {
 			return Stats{}, err
 		}
@@ -353,7 +364,8 @@ func (c *Client) ScrollTenant(ctx context.Context, tenantID string) (map[uuid.UU
 			}
 			out[id] = append(out[id], rec)
 		}
-		done, err := scrollPageDone(page, next, fmt.Sprintf("scrolling tenant %s in %s", tenantID, c.collection))
+		done, err := scrollPageDone(page, offset, next,
+			fmt.Sprintf("scrolling tenant %s in %s", tenantID, c.collection))
 		if err != nil {
 			return nil, err
 		}
