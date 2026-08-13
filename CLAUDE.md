@@ -11,10 +11,55 @@ infraestrutura, nome de host de rede privada. Quando um desses valores for neces
 ele entra por variável de ambiente e o repositório guarda só um `.example` com placeholder — é assim
 que `scripts/embedder-service/knowrag-embedder.env.example` existe.
 
-## O endurecimento da S12 está fora de escopo nesta fase
+## Decisão do dono fecha o item — e o documento é que está atrasado
 
-O endurecimento de rede e de credenciais previsto para a S12 está fora de escopo nesta fase (decisão
-de 2026-08-11; detalhes em `docs/`). Não proponha esse trabalho como parte de outra tarefa.
+Esta regra vem antes das outras porque foi a que mais gerou trabalho inútil. Quando o dono aceita um
+risco ou dispensa uma verificação, **o item está fechado**. Não é "postergado", não é "pendência com
+ressalva", não é "débito com gatilho". O documento que ainda o descreve como aberto está **atrasado
+em relação à decisão**, e o conserto é editar o documento — não trazer o assunto de volta para ele
+decidir outra vez.
+
+A confusão tem uma forma específica e recorrente: o texto normativo foi escrito **antes** da decisão,
+com a linguagem de quem ainda não sabia a resposta ("critério reprovando", "aguarda medição", "fora de
+escopo nesta fase"). Quem lê depois encontra essa linguagem e a reporta como bloqueio. Em 2026-08-13
+isso aconteceu com o critério 4 do ADR-003, com o limite de memória do Qdrant e com o D-35 — os três
+já decididos, os três apresentados ao dono como perguntas em aberto. A resposta dele foi que já
+estavam fechados, e ele estava certo.
+
+Duas consequências práticas:
+
+1. **Antes de listar algo como bloqueio, procure a decisão.** Se existir, o item não é bloqueio: é
+   documento desatualizado. Corrija o texto na mesma passada e siga.
+2. **Um DoD não tem autoridade sobre o dono.** O `PRD.md` chegou a exigir ADRs "em *Aceito* sem
+   ressalva", redação que transformava aceitação consciente de risco em defeito. Critério que
+   contradiz decisão tomada é o critério que está errado.
+
+Reabre quando o **fato** que sustentou a decisão mudar — não quando alguém reler o texto antigo.
+
+## O endurecimento de rede é decisão permanente — e credencial não é tudo a mesma pergunta
+
+Foi tirado de escopo em 2026-08-11 e **aceito em definitivo em 2026-08-13**: não há ACL restrita por
+destino, e a credencial que a ingestão usa é a administrativa mesma. Escolha informada, com a medição
+na mesa (detalhes em `docs/`). Não proponha esse trabalho como parte de outra tarefa, e não o
+registre como débito com gatilho na S12 — a S12 não é mais o gatilho. O que reabre é **uma segunda
+máquina não confiável na rede**. Nada mais.
+
+**Mas "separação de credenciais" nomeia duas coisas diferentes, e só uma delas foi dispensada.** A
+distinção custou uma revisão para aparecer, e este parágrafo existe para ela não se perder de novo:
+
+| | Pergunta | Estado |
+|---|---|---|
+| Raio de explosão desktop→VPS | *se a máquina que ingere for comprometida, o que ela alcança?* | **dispensado** — a rede é confiável por decisão |
+| Escopo admin vs. read-only | *o que o processo pode fazer com a chave que carrega?* | **implementado** — o MCP tem chave read-only |
+
+A segunda não é uma versão menor da primeira, e nenhuma decisão sobre a rede a responde. O servidor
+MCP roda semanas sem supervisão respondendo com texto tirado de notas — que este código trata como
+entrada não confiável por desenho, envelopando todo resultado. Uma chave que escreve nas mãos desse
+processo é raio maior que uma que não escreve, com a rede inteira confiável.
+
+Quem enforça é o Qdrant, e é aí que está o valor: `internal/store` não expõe busca e `cmd/mcp-server`
+não chama caminho de escrita, mas as duas são convenções que este repositório mantém sozinho. A chave
+read-only é a linha que sobrevive a alguém quebrá-las.
 
 ## `docs/` fica fora do git, e isso é decisão fechada
 
