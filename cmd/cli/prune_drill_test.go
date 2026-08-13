@@ -5,6 +5,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/danielmalka/go-knowrag/internal/ingest"
 	"syscall"
 	"testing"
 	"time"
@@ -454,5 +456,33 @@ func TestPruneDrill_RefusesAVaultItCannotLocate(t *testing.T) {
 	}
 	if noteState() != "present" {
 		t.Errorf("a run over a missing path disturbed the note that is there")
+	}
+}
+
+// TestPruneDrill_InterruptedMarkerMatchesTheReportItReads closes the gap that the fixture above
+// cannot: it feeds a string this file wrote, so a change to the report's wording leaves it green
+// while prune-drill.sh's grep quietly stops matching. The guard would be dead and the round of
+// plants would find nothing, because the plant would be in a third file neither side reads.
+//
+// Same shape as TestCIWorkflow_PendingSentinelMatchesTheErrorItLooksFor: nothing at run time can
+// compare a shell literal with a Go value, so a test reads the script and asks the real producer.
+func TestPruneDrill_InterruptedMarkerMatchesTheReportItReads(t *testing.T) {
+	script, err := os.ReadFile(pruneDrillScript)
+	if err != nil {
+		t.Fatalf("reading %s: %v", pruneDrillScript, err)
+	}
+	const marker = "interrupted, the remaining notes were not started"
+	if !strings.Contains(string(script), "'"+marker+"'") {
+		t.Fatalf("%s no longer greps for %q — either it stopped checking, or this test is out of date",
+			pruneDrillScript, marker)
+	}
+
+	// The real producer, not a fixture: whatever ingest prints for an interrupted run has to contain
+	// what the script looks for.
+	produced := ingest.Report{Interrupted: true}.String()
+	if !strings.Contains(produced, marker) {
+		t.Errorf("ingest.Report{Interrupted: true}.String() is %q,\nwhich does not contain the marker "+
+			"%s greps for: %q\n\nthe drill would accept an interrupted run as a complete one",
+			produced, pruneDrillScript, marker)
 	}
 }
