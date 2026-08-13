@@ -123,7 +123,16 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	total := time.Since(start)
 	phases := measure.IngestPhases{LockAcquire: lockDur, VaultScan: scanDur, Orchestrate: orchestrateDur}
-	verdict := measure.EvaluateIngest(total, phases, nfr5Gate)
+	// Reprocessed is every note the run did work for. Skipped is the integrity short-circuit
+	// (internal/ingest/note.go) — the note was read, hashed, and found already correct — which is what
+	// a no-op run is made of. Anything else embedded or wrote, and NFR-5 does not describe that run.
+	reprocessed := 0
+	for state, n := range report.Counts() {
+		if state != ingest.StateSkipped {
+			reprocessed += n
+		}
+	}
+	verdict := measure.EvaluateIngest(total, phases, nfr5Gate, len(report.Results), reprocessed)
 
 	_, _ = fmt.Fprintln(stdout, report.String())
 	_, _ = fmt.Fprintln(stdout)
