@@ -1,25 +1,19 @@
-package main
+package goldenauthor
 
 import (
 	"bytes"
 	"errors"
 	"fmt"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"os"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/danielmalka/go-knowrag/internal/archtest"
-	"github.com/danielmalka/go-knowrag/internal/clicmd"
-	"github.com/danielmalka/go-knowrag/internal/config"
 	"github.com/danielmalka/go-knowrag/internal/eval"
+	"github.com/danielmalka/go-knowrag/internal/vault"
 )
 
 // The fixture uids. Area names are the neutral ones the rest of this repository's fixtures use: the
@@ -103,14 +97,14 @@ func firstCandidate(int) int { return 0 }
 
 // session runs one authoring session over path with the given typed input, and answers what the
 // command printed.
-func session(t *testing.T, path string, cards []noteCard, typed string) string {
+func runSession(t *testing.T, path string, cards []noteCard, typed string) string {
 	t.Helper()
 
 	var out bytes.Buffer
-	err := authorGolden(&out, strings.NewReader(typed), path, cards, loadSet(t, path),
+	err := session(&out, strings.NewReader(typed), path, cards, loadSet(t, path),
 		"owner", "2026-08-13", firstCandidate)
 	if err != nil {
-		t.Fatalf("authorGolden: %v\n%s", err, out.String())
+		t.Fatalf("session: %v\n%s", err, out.String())
 	}
 	return out.String()
 }
@@ -124,7 +118,7 @@ func TestAuthorGolden_DrawsFromTheAreaTheTableIsShortestOn(t *testing.T) {
 		entry("an alfa question", uidA1, "alfa")+
 		entry("another alfa question", uidA2, "alfa"))
 
-	session(t, path, deck(), "what did I write about the beta thing?\nq\n")
+	runSession(t, path, deck(), "what did I write about the beta thing?\nq\n")
 
 	set := loadSet(t, path)
 	if len(set.Questions) != 3 {
@@ -147,7 +141,7 @@ func TestAuthorGolden_NeverDrawsANoteThatAlreadyHasAQuestion(t *testing.T) {
 	path := writeSet(t, goldenTable+entry("an alfa question", uidA1, "alfa"))
 	cards := deck()[:2] // a1 and a2 only
 
-	out := session(t, path, cards, "one\ntwo\nthree\n")
+	out := runSession(t, path, cards, "one\ntwo\nthree\n")
 
 	set := loadSet(t, path)
 	if len(set.Questions) != 2 {
@@ -169,7 +163,7 @@ func TestAuthorGolden_SkippingWritesNothing(t *testing.T) {
 	path := writeSet(t, goldenTable)
 	before := read(t, path)
 
-	out := session(t, path, deck()[:1], "\n")
+	out := runSession(t, path, deck()[:1], "\n")
 
 	if after := read(t, path); after != before {
 		t.Errorf("skipping changed the file:\n%s", after)
@@ -186,7 +180,7 @@ func TestAuthorGolden_SkippingWritesNothing(t *testing.T) {
 func TestAuthorGolden_AppendsAcrossSessionsAndKeepsHandEdits(t *testing.T) {
 	path := writeSet(t, goldenTable)
 
-	session(t, path, deck(), "the first question\nq\n")
+	runSession(t, path, deck(), "the first question\nq\n")
 
 	// The hand edit: a comment, and a reworded question. Both have to survive the next session.
 	const comment = "  # I should split this one in two later\n"
@@ -196,7 +190,7 @@ func TestAuthorGolden_AppendsAcrossSessionsAndKeepsHandEdits(t *testing.T) {
 	}
 	handEdited := read(t, path)
 
-	session(t, path, deck(), "the second question\nq\n")
+	runSession(t, path, deck(), "the second question\nq\n")
 
 	after := read(t, path)
 	if !strings.HasPrefix(after, handEdited) {
@@ -228,7 +222,7 @@ func TestAuthorGolden_AppendsAcrossSessionsAndKeepsHandEdits(t *testing.T) {
 func TestAuthorGolden_WritesExactlyTheGoldenQuestionFields(t *testing.T) {
 	path := writeSet(t, goldenTable)
 
-	session(t, path, deck()[:1], "what did I decide here?\n")
+	runSession(t, path, deck()[:1], "what did I decide here?\n")
 
 	var raw struct {
 		Questions []map[string]any `yaml:"questions"`
@@ -262,14 +256,26 @@ func TestAuthorGolden_WritesExactlyTheGoldenQuestionFields(t *testing.T) {
 	}
 }
 
-// goldenOutputShapes is every line this command is allowed to print. It is an allow-list and not a
-// list of forbidden strings, and that is the whole assertion: a search result has no fixed wording,
-// so the only way to prove one is never printed is to prove that nothing outside these shapes ever
-// is.
+// goldenOutputShapes is every line a session is allowed to print: an allow-list, not a list of
+// forbidden strings, because a search result has no fixed wording.
 //
-// The rule it enforces is the reason the golden set is worth anything. A question written after
-// seeing what the index returns is a question adjusted — unconsciously — until it passes, and a set
-// of those measures the tool that produced it. Showing the *note* is not the same thing and is
+// **This guards the format, not the reach**, and the distinction is worth stating plainly because an
+// earlier version of this comment called it the strongest of the defences and it is not. Two reviewers
+// walked past it. It checks the *shape* of each line, so anything printed behind an allowed prefix —
+// `"body:  " + whatever` — passes, and so does an empty string, because a blank line is allowed. It
+// also only ever sees the sessions these tests drive; a leak on a path no test enters is invisible to
+// it.
+//
+// What it is good at is the accident: a debug print, a stray field, a report line somebody added
+// without thinking about this rule. What actually makes a search result unobtainable here is the
+// package boundary — internal/goldenauthor cannot import internal/retrieval or internal/store, and
+// TestArch_GoldenAuthoringCannotReachTheIndex (internal/archtest) is what says so. Read the package
+// doc in author.go for why that replaced four source-inspection checks, and for the one route that
+// remains open.
+//
+// The rule both of them serve is the reason the golden set is worth anything. A question written
+// after seeing what the index returns is a question adjusted — unconsciously — until it passes, and a
+// set of those measures the tool that produced it. Showing the *note* is not the same thing and is
 // required: the note is where the expected uid comes from.
 var goldenOutputShapes = []*regexp.Regexp{
 	regexp.MustCompile(`^$`),
@@ -290,14 +296,14 @@ func TestAuthorGolden_PrintsNothingButItsOwnShapes(t *testing.T) {
 	path := writeSet(t, goldenTable+entry("an alfa question", uidA1, "alfa"))
 
 	// A session with every branch in it: a save, a skip, and a stop.
-	out := session(t, path, deck(), "a question about beta\n\nanother question\nq\n")
+	out := runSession(t, path, deck(), "a question about beta\n\nanother question\nq\n")
 
 	lines := strings.Split(out, "\n")
 	for i, line := range lines {
 		// The prompt is written without a newline, because on a terminal the author types on the
 		// same line and their Enter is what ends it. In a buffer it therefore runs into whatever is
 		// printed next, so it is stripped as a prefix and the remainder still has to be a shape.
-		line = strings.TrimPrefix(line, goldenPrompt)
+		line = strings.TrimPrefix(line, prompt)
 		if !slicesAny(goldenOutputShapes, line) {
 			t.Errorf("line %d of the session is not one of this command's shapes: %q\n\nfull "+
 				"session:\n%s", i+1, line, out)
@@ -328,9 +334,9 @@ func slicesAny(shapes []*regexp.Regexp, line string) bool {
 func TestAuthorGolden_GuidesAtEveryPrompt(t *testing.T) {
 	path := writeSet(t, goldenTable)
 
-	out := session(t, path, deck(), "one\ntwo\nthree\nq\n")
+	out := runSession(t, path, deck(), "one\ntwo\nthree\nq\n")
 
-	prompts := strings.Count(out, goldenPrompt)
+	prompts := strings.Count(out, prompt)
 	if prompts < 3 {
 		t.Fatalf("the session showed %d prompt(s); this test needs at least three to mean "+
 			"anything:\n%s", prompts, out)
@@ -443,7 +449,7 @@ func TestPromptNudges_RealiseTheTargetMix(t *testing.T) {
 func TestAuthorGolden_RotatesTheSuggestedKind(t *testing.T) {
 	path := writeSet(t, goldenTable)
 
-	out := session(t, path, deck(), "one\ntwo\nthree\nfour\n")
+	out := runSession(t, path, deck(), "one\ntwo\nthree\nfour\n")
 
 	seen := map[string]bool{}
 	for _, line := range strings.Split(out, "\n") {
@@ -463,7 +469,7 @@ func TestAuthorGolden_RotatesTheSuggestedKind(t *testing.T) {
 func TestProgressReport_NamesTheMixItDoesNotTrack(t *testing.T) {
 	path := writeSet(t, goldenTable)
 
-	out := session(t, path, deck()[:1], "q\n")
+	out := runSession(t, path, deck()[:1], "q\n")
 
 	if !strings.Contains(out, progressMix) {
 		t.Errorf("the progress report does not state the target mix:\n%s", out)
@@ -526,7 +532,7 @@ func TestAuthorGolden_StopsAtTheTableMaximum(t *testing.T) {
 			Path:  fmt.Sprintf("v/%s/%d.md", folder, i),
 		})
 	}
-	session(t, path, cards, strings.Repeat("a question\n", 10))
+	runSession(t, path, cards, strings.Repeat("a question\n", 10))
 
 	if got := len(loadSet(t, path).Questions); got != 8 {
 		t.Errorf("the session left %d entr(ies); the table's max_total is 8 and the deck had ten "+
@@ -534,12 +540,14 @@ func TestAuthorGolden_StopsAtTheTableMaximum(t *testing.T) {
 	}
 }
 
-// TestRunGolden_RefusesANonTerminalStdin is the refusal that keeps this command from hanging.
+// TestRun_RefusesANonTerminalStdinBeforeScanning is the refusal that keeps this command from hanging,
+// and the second half — before scanning — is why Run takes the scan as a thunk.
 //
-// A command that waits for an answer nobody is going to type is worse than either answer: a script
-// or a scheduled run that reached this prompt would sit there until somebody noticed. --prune makes
-// the same refusal for the same reason (cmd/cli/ingest_modes.go, confirmPrune).
-func TestRunGolden_RefusesANonTerminalStdin(t *testing.T) {
+// A command that waits for an answer nobody is going to type is worse than either answer: a script or
+// a scheduled run that reached this prompt would sit there until somebody noticed. --prune makes the
+// same refusal for the same reason (cmd/cli/ingest_modes.go, confirmPrune). Scanning the vaults first
+// would make that run wait out fifteen seconds of disk to be told there is nobody to answer.
+func TestRun_RefusesANonTerminalStdinBeforeScanning(t *testing.T) {
 	// A pipe: os.ModeCharDevice is clear on it, which is exactly the case a cron job presents.
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -552,18 +560,29 @@ func TestRunGolden_RefusesANonTerminalStdin(t *testing.T) {
 	// this one.
 	path := writeSet(t, goldenTable+entry("an alfa question", uidA1, "alfa"))
 
+	scanned := false
+	scan := func() ([]vault.ScanResult, error) {
+		scanned = true
+		return nil, nil
+	}
+
 	var out bytes.Buffer
-	err = runGolden(r, &out, r, &config.Config{}, path)
+	err = Run(r, &out, r, path, scan)
 	if err == nil {
 		t.Fatal("the command was accepted with a pipe on stdin, so a scheduled run would reach the " +
 			"prompt and wait for an answer nobody is typing")
 	}
-	if !errors.Is(err, errUsage) {
-		t.Errorf("the refusal is %v, which does not carry errUsage — it would exit on the code that "+
-			"tells a caller the run broke and is worth retrying", err)
+	if !errors.Is(err, ErrRefused) {
+		t.Errorf("the refusal is %v, which does not carry ErrRefused — the caller maps that sentinel "+
+			"to the usage exit code, and without it this exits on the code that tells a caller the "+
+			"run broke and is worth retrying", err)
 	}
 	if !strings.Contains(err.Error(), "terminal") {
 		t.Errorf("the refusal does not say what is wrong: %v", err)
+	}
+	if scanned {
+		t.Error("the refused run scanned the vaults first, which is about fifteen seconds a " +
+			"scheduled invocation spends to be told there is nobody to answer")
 	}
 	if out.Len() != 0 {
 		t.Errorf("the refused run still printed something: %q", out.String())
@@ -641,18 +660,19 @@ func excerptOf(t *testing.T, body string) (lines []string, shown int) {
 	return lines, shown
 }
 
-// TestOpenGoldenSetForAuthoring_TellsTheTwoFailuresApart. A set that is not there and a set that is
+// TestOpenSet_TellsTheTwoFailuresApart. A set that is not there and a set that is
 // broken need different things from the author, and both used to arrive as the same wall of YAML.
-func TestOpenGoldenSetForAuthoring_TellsTheTwoFailuresApart(t *testing.T) {
+func TestOpenSet_TellsTheTwoFailuresApart(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "not-here.yaml")
 
-	_, err := openGoldenSetForAuthoring(missing)
+	_, err := openSet(missing)
 	if err == nil {
 		t.Fatal("a golden set that does not exist was accepted")
 	}
-	if clicmd.CategoryOf(err) != clicmd.CategoryUsage {
-		t.Errorf("a missing golden set is reported as %q; the operator named a path and retrying "+
-			"the same command line will fail identically", clicmd.CategoryOf(err))
+	if !errors.Is(err, ErrRefused) {
+		t.Errorf("a missing golden set does not carry ErrRefused (%v); the operator named a path and "+
+			"retrying the same command line will fail identically, so it has to exit on the usage "+
+			"code rather than the one that means the run broke", err)
 	}
 	for _, want := range []string{missing, "coverage:"} {
 		if !strings.Contains(err.Error(), want) {
@@ -664,7 +684,7 @@ func TestOpenGoldenSetForAuthoring_TellsTheTwoFailuresApart(t *testing.T) {
 	// The other failure: a file that is there and unusable. It has to be a different message, because
 	// telling the author to create a file he is looking at is the answer that wastes an evening.
 	broken := writeSet(t, "coverage: [this is not a table]\n")
-	_, err = openGoldenSetForAuthoring(broken)
+	_, err = openSet(broken)
 	if err == nil {
 		t.Fatal("a malformed golden set was accepted")
 	}
@@ -676,492 +696,18 @@ func TestOpenGoldenSetForAuthoring_TellsTheTwoFailuresApart(t *testing.T) {
 	// decodes into a valid empty GoldenSet. Refused here so the operator hears it before a
 	// fifteen-second vault scan and a session that would print an empty report and exit.
 	empty := writeSet(t, "")
-	_, err = openGoldenSetForAuthoring(empty)
+	_, err = openSet(empty)
 	if err == nil {
 		t.Fatal("a zero-byte golden set was accepted, so the session would scan the vaults and then " +
 			"end with nothing to draw — which reads as 'nothing left to ask'")
 	}
-	if clicmd.CategoryOf(err) != clicmd.CategoryUsage {
-		t.Errorf("a zero-byte golden set is reported as %q", clicmd.CategoryOf(err))
+	if !errors.Is(err, ErrRefused) {
+		t.Errorf("a zero-byte golden set does not carry ErrRefused: %v", err)
 	}
 
 	// And the case that must not be refused at all: a table with no questions yet.
-	if _, err := openGoldenSetForAuthoring(writeSet(t, goldenTable)); err != nil {
+	if _, err := openSet(writeSet(t, goldenTable)); err != nil {
 		t.Errorf("a golden set with a table and no questions was refused, which is the file every "+
 			"first session starts from: %v", err)
 	}
-}
-
-// How the no-search-results rule is actually held, in the order of how hard each part is to get past.
-// Stated here because the next person has to know which of these to trust, and the weakest one is the
-// one that looks the most reassuring.
-//
-//  1. TestAuthorGolden_PrintsNothingButItsOwnShapes. The strongest, because it constrains every line
-//     printed regardless of what anything is named. Its limit is real: it only sees the sessions the
-//     tests drive. Those cover save, skip, stop, both progress reports and the card, so a leak on any
-//     of those paths is caught — a leak on a branch no test enters is not.
-//  2. TestGoldenCmd_CannotReachSearch, below. It closes what (1) cannot: a leak on an undriven path,
-//     and a leak whose printed line happens to fit an allowed shape — `fmt.Fprintln(out, "")` of an
-//     empty summary is a blank line, and blank lines are allowed.
-//  3. searchWords. Cosmetic. Two reviewers walked past it: one with symbols that already exist in the
-//     tree and carry no banned substring, one by simply naming a function `askQdrantNearest`. It is
-//     kept because it costs nothing and catches the first draft anybody would type, and it is named
-//     here as the weak one so nobody mistakes it for the guarantee.
-var searchWords = []string{"Search", "Retriev", "Query", "Hit", "Recall"}
-
-// searchReachingImports are the packages through which this binary reaches the index. Everything that
-// searches goes through one of them: internal/retrieval builds and runs the query, internal/store
-// holds the client, internal/clicmd owns the Searcher interface and the Connect that produces one.
-//
-// This is a list of three, and it is the only hand-written list left in this test — everything else
-// below is derived from it. It is defensible where the two lists it replaced were not: those named
-// the *symbols* and *files* that happened to be on the route today, and grew stale the moment anybody
-// wrote a fourth file or a new package. This names the packages the route runs through, and a new
-// route has to run through one of them too.
-var searchReachingImports = []string{
-	"github.com/danielmalka/go-knowrag/internal/retrieval",
-	"github.com/danielmalka/go-knowrag/internal/store",
-	"github.com/danielmalka/go-knowrag/internal/clicmd",
-}
-
-// goldenAllowedSelectors is default-deny over golden.go's whole import block, and the "whole" is the
-// correction: it used to be keyed only on `eval` and `clicmd`, so a package outside those two was not
-// checked at all. A reviewer wrote internal/searchleak — one function forwarding to
-// retrieval.Searcher.Search — imported it here, and the test stayed green because searchleak was not
-// a key in this map. Now every non-stdlib import golden.go declares must appear as a key, whether or
-// not any selector is used, so a new package fails on the import alone.
-//
-// Within a package it is still default-deny by symbol, which is what keeps internal/eval usable:
-// that package holds Searcher, RunGolden, QuestionResult, GoldenGate and Options alongside the file
-// schema this command needs. A denylist would have to chase every symbol it ever grows.
-//
-// Adding anything here is a deliberate act, and the question to answer first is whether the symbol
-// can carry, or produce, anything the index returned. That is disciplined rather than proven: the
-// check is by name, not by type. Deriving it from types would mean reading every symbol's signature,
-// which is the brittle static analysis this repository avoids.
-var goldenAllowedSelectors = map[string][]string{
-	"eval": {
-		"GoldenQuestion", "GoldenSet", "AreaStatus",
-		"CoverageStatus", "ReadGoldenSet", "AppendQuestion", "ErrGoldenSetMissing",
-	},
-	"clicmd": {"Usage"},
-	"config": {"Config"},
-	"vault":  {"ScanResult", "Note"},
-	"cobra":  {"Command", "NoArgs"},
-}
-
-// TestGoldenCmd_CannotReachSearch is the dependency-edge half of the rule. See the numbered list
-// above for what it covers that the output allow-list does not.
-//
-// All three edges below are derived from searchReachingImports and from the real import graph.
-// Nothing here enumerates a symbol, a file or a package that happens to be on the route today — that
-// shape was got past three times, each time by writing something the list had not been updated for.
-func TestGoldenCmd_CannotReachSearch(t *testing.T) {
-	root := moduleRoot(t)
-	const goldenFile = "cmd/cli/golden.go"
-
-	// (a) golden.go's own imports. Reuses internal/archtest, which is where this module's other
-	// architecture invariant already lives, so there is one walker and one definition of "imports".
-	// clicmd is excluded here alone: golden.go imports it for clicmd.Usage, and which symbols it may
-	// take from it is (c)'s job.
-	for _, pkg := range searchReachingImports {
-		if strings.HasSuffix(pkg, "/clicmd") {
-			continue
-		}
-		violations, err := archtest.FindImporters(root, pkg, nil)
-		if err != nil {
-			t.Fatalf("walking %s for %s: %v", root, pkg, err)
-		}
-		for _, v := range violations {
-			if v.File == goldenFile {
-				t.Errorf("%s imports %q. `golden` reads the vaults and must have no route to the "+
-					"index at all: a question written after seeing what a search returns is a "+
-					"question tuned until it passes", v, pkg)
-			}
-		}
-	}
-
-	fset := token.NewFileSet()
-	golden, err := parser.ParseFile(fset, filepath.Join(root, goldenFile), nil, parser.SkipObjectResolution)
-	if err != nil {
-		t.Fatalf("parsing %s: %v", goldenFile, err)
-	}
-
-	// (b) The same-package edge, which needs no import and is therefore the one a reader misses.
-	// Derived, not listed: see tainted.
-	owned := tainted(t, filepath.Join(root, "cmd", "cli"), filepath.Base(goldenFile))
-	if len(owned) == 0 {
-		t.Fatal("no declaration in cmd/cli was found to reach search, which cannot be true while " +
-			"`search` and `eval --golden` exist — this half of the test is looking at nothing")
-	}
-
-	// (c) The cross-package edge, default-deny over every import and every symbol.
-	for _, imp := range golden.Imports {
-		path := strings.Trim(imp.Path.Value, `"`)
-		// Standard library, identified the usual way: no dot in the first path element. Nothing in it
-		// reaches this index, and listing every stdlib package golden.go uses would be a list that
-		// rots for no benefit.
-		if first, _, _ := strings.Cut(path, "/"); !strings.Contains(first, ".") {
-			continue
-		}
-		name := path[strings.LastIndex(path, "/")+1:]
-		if imp.Name != nil {
-			name = imp.Name.Name
-		}
-		if _, allowed := goldenAllowedSelectors[name]; !allowed {
-			t.Errorf("%s: golden.go imports %q, which has no entry in goldenAllowedSelectors. Every "+
-				"non-stdlib import has to be declared there with the symbols this file may take from "+
-				"it — an unlisted package is a route to anything it can reach, including the index",
-				fset.Position(imp.Pos()), path)
-		}
-	}
-
-	used := map[string]bool{}
-	selectors := 0
-	ast.Inspect(golden, func(n ast.Node) bool {
-		if sel, ok := n.(*ast.SelectorExpr); ok {
-			pkg, isIdent := sel.X.(*ast.Ident)
-			if !isIdent {
-				return true
-			}
-			if allowed, watched := goldenAllowedSelectors[pkg.Name]; watched {
-				selectors++
-				used[pkg.Name+"."+sel.Sel.Name] = true
-				if !slices.Contains(allowed, sel.Sel.Name) {
-					t.Errorf("%s: golden.go uses %s.%s, which is not on the list this file may use "+
-						"from %s. If it cannot carry anything the index returned, add it to "+
-						"goldenAllowedSelectors deliberately; otherwise this is the leak",
-						fset.Position(sel.Pos()), pkg.Name, sel.Sel.Name, pkg.Name)
-				}
-			}
-			return true
-		}
-		ident, ok := n.(*ast.Ident)
-		// The package clause is skipped by identity: `package main` is an *ast.Ident named "main",
-		// and so is the func main() declared in main.go, which reaches search like everything else
-		// that builds the command tree.
-		if !ok || ident == golden.Name {
-			return true
-		}
-		if where, isOwned := owned[ident.Name]; isOwned {
-			t.Errorf("%s: golden.go references %q, declared in %s, which reaches search. Package main "+
-				"needs no import, so this is a route to the index with nothing in the import block to "+
-				"show for it", fset.Position(ident.Pos()), ident.Name, where)
-		}
-		for _, word := range searchWords {
-			if strings.Contains(ident.Name, word) {
-				t.Errorf("%s: golden.go names %q", fset.Position(ident.Pos()), ident.Name)
-			}
-		}
-		return true
-	})
-
-	// Non-vacuity, both directions. A walk that matched nothing passes forever; an allow-list entry
-	// nothing uses is a hole opened for a call that no longer exists.
-	if selectors < 10 {
-		t.Fatalf("the scan found %d watched selector(s) in golden.go — it uses more than that, so "+
-			"this test is passing because it is looking at nothing", selectors)
-	}
-	for pkg, names := range goldenAllowedSelectors {
-		for _, name := range names {
-			if !used[pkg+"."+name] {
-				t.Errorf("goldenAllowedSelectors permits %s.%s, which golden.go does not use — an "+
-					"allow-list entry nobody needs is a door left open", pkg, name)
-			}
-		}
-	}
-}
-
-// TestEval_NoSearchOnTheTypesGoldenHolds closes the fourth bypass, which I built after the third fix
-// and which the checks above do not see.
-//
-// (c) watches selectors whose left side is a package: `eval.RunGolden`. It cannot watch
-// `set.Anything()`, because `set` is a value and knowing its type needs a type checker. So a method
-// added to internal/eval on one of the types golden.go legitimately holds — `func (g GoldenSet)
-// Fetch() []QuestionResult`, building its own searcher inside the package, which already imports
-// internal/retrieval — is callable from golden.go with no new import, no new package, and no watched
-// selector. It goes green.
-//
-// Package-level transitive reachability does not close it: internal/eval imports internal/retrieval
-// today, on purpose, because that is where the gate lives. Neither does an exception list. What
-// closes it is the same taint pass (b) uses, pointed at internal/eval and restricted to the types
-// golden.go can hold — those are derived from the allow-list by following struct fields, not listed.
-func TestEval_NoSearchOnTheTypesGoldenHolds(t *testing.T) {
-	dir := filepath.Join(moduleRoot(t), "internal", "eval")
-
-	held := typesReachableFrom(t, dir, goldenAllowedSelectors["eval"])
-	if len(held) < 3 {
-		t.Fatalf("only %d type(s) reachable from the allow-list: %v — golden.go holds GoldenSet, "+
-			"which reaches CoverageTable through a field, so this is looking at nothing", len(held), held)
-	}
-
-	reaches := tainted(t, dir, "")
-	fset := token.NewFileSet()
-	paths, err := filepath.Glob(filepath.Join(dir, "*.go"))
-	if err != nil {
-		t.Fatalf("globbing %s: %v", dir, err)
-	}
-
-	for _, path := range paths {
-		base := filepath.Base(path)
-		if strings.HasSuffix(base, "_test.go") {
-			continue
-		}
-		file, perr := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
-		if perr != nil {
-			t.Fatalf("parsing %s: %v", base, perr)
-		}
-		reaching := reachingNames(file)
-
-		for _, d := range file.Decls {
-			fn, ok := d.(*ast.FuncDecl)
-			if !ok || fn.Recv == nil || len(fn.Recv.List) == 0 {
-				continue
-			}
-			receiver := receiverType(fn.Recv.List[0].Type)
-			if !held[receiver] {
-				continue
-			}
-			bad := namesReaching(fn, reaching)
-			if !bad {
-				for ref := range referencedNames(fn) {
-					if _, isTainted := reaches[ref]; isTainted {
-						bad = true
-						break
-					}
-				}
-			}
-			if bad {
-				t.Errorf("%s: %s.%s reaches search, and %s is a type golden.go holds — so golden.go "+
-					"could call it with no import and no package selector for any check to see",
-					fset.Position(fn.Pos()), receiver, fn.Name.Name, receiver)
-			}
-		}
-	}
-}
-
-// typesReachableFrom closes over struct fields from the named types, so "the types golden.go can
-// hold" is derived rather than listed: golden.go names GoldenSet, GoldenSet has a CoverageTable
-// field, CoverageTable has CoverageGroups, and a method on any of them is equally callable.
-func typesReachableFrom(t *testing.T, dir string, roots []string) map[string]bool {
-	t.Helper()
-
-	fset := token.NewFileSet()
-	paths, err := filepath.Glob(filepath.Join(dir, "*.go"))
-	if err != nil {
-		t.Fatalf("globbing %s: %v", dir, err)
-	}
-
-	fields := map[string][]string{}
-	for _, path := range paths {
-		if strings.HasSuffix(path, "_test.go") {
-			continue
-		}
-		file, perr := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
-		if perr != nil {
-			t.Fatalf("parsing %s: %v", filepath.Base(path), perr)
-		}
-		ast.Inspect(file, func(n ast.Node) bool {
-			spec, ok := n.(*ast.TypeSpec)
-			if !ok {
-				return true
-			}
-			structType, isStruct := spec.Type.(*ast.StructType)
-			if !isStruct {
-				return true
-			}
-			for _, field := range structType.Fields.List {
-				// Every identifier in the field's type expression: this picks the element type out of
-				// `[]CoverageGroup` and `*int` alike, and a name that is not a local type simply never
-				// matches anything below.
-				for name := range referencedNames(field.Type) {
-					fields[spec.Name.Name] = append(fields[spec.Name.Name], name)
-				}
-			}
-			return true
-		})
-	}
-
-	held := map[string]bool{}
-	var walk func(string)
-	walk = func(name string) {
-		if held[name] {
-			return
-		}
-		held[name] = true
-		for _, next := range fields[name] {
-			walk(next)
-		}
-	}
-	for _, root := range roots {
-		walk(root)
-	}
-	return held
-}
-
-// receiverType is the type name a method is declared on, with any pointer star removed.
-func receiverType(expr ast.Expr) string {
-	if star, ok := expr.(*ast.StarExpr); ok {
-		expr = star.X
-	}
-	if ident, ok := expr.(*ast.Ident); ok {
-		return ident.Name
-	}
-	return ""
-}
-
-// reachingNames maps a file's local identifiers for the search-reaching packages it imports.
-func reachingNames(file *ast.File) map[string]bool {
-	out := map[string]bool{}
-	for _, imp := range file.Imports {
-		p := strings.Trim(imp.Path.Value, `"`)
-		if !slices.Contains(searchReachingImports, p) {
-			continue
-		}
-		name := p[strings.LastIndex(p, "/")+1:]
-		if imp.Name != nil {
-			name = imp.Name.Name
-		}
-		out[name] = true
-	}
-	return out
-}
-
-// tainted returns every top-level declaration in dir that can reach search, mapped to its file, by
-// least fixed point over the package's own reference graph. except is the file under test, whose
-// declarations are the subject rather than the ruler.
-//
-// The seed is a declaration that names one of searchReachingImports directly. Everything that
-// references a tainted declaration becomes tainted, until nothing changes. That is what replaces the
-// hand-written list of two files: a reviewer added cmd/cli/leak_helper.go calling dialSearcher — a
-// third file, so the list did not know about it, and the test passed. Under this it is tainted at the
-// first round and golden.go referring to it fails, whatever the file or the function is called.
-//
-// Per declaration, not per file, and the distinction is what makes it usable: cmd/cli/ingest.go
-// imports internal/store, so a file-level rule would taint everything in it — including selectVaults
-// and scanVaults, which golden.go legitimately uses and which touch nothing but config and the vault
-// scanner.
-func tainted(t *testing.T, dir, except string) map[string]string {
-	t.Helper()
-
-	type decl struct {
-		file  string
-		names map[string]bool // what its body refers to
-		seed  bool
-	}
-
-	fset := token.NewFileSet()
-	paths, err := filepath.Glob(filepath.Join(dir, "*.go"))
-	if err != nil {
-		t.Fatalf("globbing %s: %v", dir, err)
-	}
-
-	decls := map[string]*decl{}
-	for _, path := range paths {
-		base := filepath.Base(path)
-		if base == except || strings.HasSuffix(base, "_test.go") {
-			continue
-		}
-		file, perr := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
-		if perr != nil {
-			t.Fatalf("parsing %s: %v", base, perr)
-		}
-
-		// Which local identifier stands for a search-reaching package in this file.
-		reaching := reachingNames(file)
-
-		for _, d := range file.Decls {
-			for _, name := range topLevelNames(d) {
-				decls[name] = &decl{file: base, names: referencedNames(d), seed: namesReaching(d, reaching)}
-			}
-		}
-	}
-
-	out := map[string]string{}
-	for name, d := range decls {
-		if d.seed {
-			out[name] = d.file
-		}
-	}
-	// Least fixed point. The package is small enough that a naive re-scan per round costs nothing.
-	for changed := true; changed; {
-		changed = false
-		for name, d := range decls {
-			if _, already := out[name]; already {
-				continue
-			}
-			for ref := range d.names {
-				if _, isTainted := out[ref]; isTainted {
-					out[name] = d.file
-					changed = true
-					break
-				}
-			}
-		}
-	}
-	return out
-}
-
-// topLevelNames is what one declaration adds to the package scope. Methods are excluded: their names
-// are reachable only through a value of the receiver type, and the receiver type is itself in the map
-// if it is declared here.
-func topLevelNames(d ast.Decl) []string {
-	var out []string
-	switch v := d.(type) {
-	case *ast.FuncDecl:
-		if v.Recv == nil {
-			out = append(out, v.Name.Name)
-		}
-	case *ast.GenDecl:
-		for _, spec := range v.Specs {
-			switch s := spec.(type) {
-			case *ast.TypeSpec:
-				out = append(out, s.Name.Name)
-			case *ast.ValueSpec:
-				for _, ident := range s.Names {
-					out = append(out, ident.Name)
-				}
-			}
-		}
-	}
-	return out
-}
-
-// referencedNames is every identifier a declaration mentions, minus the selector halves — `Search` in
-// `s.Search(...)` names a method on some value, not a package-level declaration, and counting it
-// would make any struct field that shares a name with a tainted function look like a reference to it.
-func referencedNames(n ast.Node) map[string]bool {
-	selectors := map[*ast.Ident]bool{}
-	ast.Inspect(n, func(node ast.Node) bool {
-		if sel, ok := node.(*ast.SelectorExpr); ok {
-			selectors[sel.Sel] = true
-		}
-		return true
-	})
-
-	out := map[string]bool{}
-	ast.Inspect(n, func(node ast.Node) bool {
-		if ident, ok := node.(*ast.Ident); ok && !selectors[ident] {
-			out[ident.Name] = true
-		}
-		return true
-	})
-	return out
-}
-
-// namesReaching reports whether a declaration mentions one of the search-reaching packages by its
-// local name — `store.NewQdrantClient`, `clicmd.Connect`, `retrieval.Query`.
-func namesReaching(n ast.Node, reaching map[string]bool) bool {
-	found := false
-	ast.Inspect(n, func(node ast.Node) bool {
-		sel, ok := node.(*ast.SelectorExpr)
-		if !ok {
-			return true
-		}
-		if pkg, isIdent := sel.X.(*ast.Ident); isIdent && reaching[pkg.Name] {
-			found = true
-		}
-		return true
-	})
-	return found
 }
