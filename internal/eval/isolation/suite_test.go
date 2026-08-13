@@ -111,9 +111,15 @@ func TestReport_HasNoScoreField(t *testing.T) {
 //
 // The list is checked against the paragraph it belongs to, not against the whole summary, and that
 // split is what stops this test from becoming the lock on a stale claim. The write path moved from
-// the second list to the first when WritePathTenantCase was added: a check for "internal/ingest
+// the second list to the first when WritePathTenantCase was added, and a check for "internal/ingest
 // appears somewhere in the summary" would have stayed green through that move and gone on requiring
-// the report to disclaim what it now proves.
+// the report to disclaim what it now proves. That is why every entry is checked for presence in one
+// half and absence in the other.
+//
+// The MCP scope binding moved the other way, which is the rarer direction and the reason the split
+// is three paragraphs rather than two: it was claimed as proven for one commit, review escaped the
+// case behind it three ways with running code, and it went back to being declared. The assertion
+// that survives that round is the absence — "cmd/mcp-server" must not appear among what is proven.
 func TestReport_SummaryStatesWhatItDoesNotProve(t *testing.T) {
 	summary := Suite{Cases: []Case{passing("a")}}.Run(t.Context()).Summary()
 
@@ -123,13 +129,19 @@ func TestReport_SummaryStatesWhatItDoesNotProve(t *testing.T) {
 		}
 	}
 
-	proves, gaps, split := strings.Cut(summary, "Untouched by every case above")
-	if !split {
-		t.Fatalf("the summary no longer separates what it proves from what it leaves untouched, so "+
-			"neither list can be checked against the paragraph it belongs to:\n%s", summary)
+	// Three paragraphs, cut apart before anything is read, because each names things the others must
+	// not. The MCP paragraph is separate from what is proven precisely because it mentions
+	// cmd/mcp-server: a check run over the two together cannot tell "proven" from "not proven here",
+	// which is the difference this whole paragraph exists to state. A defect plant found that too —
+	// deleting the claim sentence left the presence check satisfied by the paragraph beneath it.
+	proven, rest, splitClaim := strings.Cut(summary, "The MCP scope binding is not proven here")
+	mcp, gaps, splitGaps := strings.Cut(rest, "Untouched by every case above")
+	if !splitClaim || !splitGaps {
+		t.Fatalf("the summary no longer separates what it proves, how far the MCP tripwire reaches, "+
+			"and what it leaves untouched, so no list can be checked against the paragraph it "+
+			"belongs to:\n%s", summary)
 	}
 	for _, want := range []string{
-		"cmd/mcp-server",        // the tenant the server binds at startup
 		"stats",                 // counts every tenant when none is named, by design
 		"offset 0",              // pagination is never exercised
 		"FilterMatchesAnything", // and neither is the filter probe
@@ -142,7 +154,7 @@ func TestReport_SummaryStatesWhatItDoesNotProve(t *testing.T) {
 	// The write path is proven now, so it has to be claimed and must not still be disclaimed. Both
 	// halves are required: the first alone would pass over a summary that said it twice and in
 	// opposite directions, which is worse than either sentence on its own.
-	if !strings.Contains(proves, "internal/ingest") {
+	if !strings.Contains(proven, "internal/ingest") {
 		t.Errorf("the summary does not say the write path is proven, so a reader who needs to know "+
 			"whether ingestion is covered cannot find out from PASS:\n%s", summary)
 	}
@@ -150,6 +162,26 @@ func TestReport_SummaryStatesWhatItDoesNotProve(t *testing.T) {
 		if strings.Contains(gaps, gone) {
 			t.Errorf("the summary still names %q among the things a PASS says nothing about, after "+
 				"WritePathTenantCase started proving it:\n%s", gone, summary)
+		}
+	}
+	// The MCP scope binding is the one this report has already got wrong once. An earlier version
+	// moved it into the proven sentence; review then escaped the case behind it three ways, with
+	// running code. So the absences here are the load-bearing half: the word "proven" must not
+	// attach to it in the first paragraph, and the paragraph that owns it must keep saying what the
+	// tripwire cannot see, or PASS goes back to reading as a claim nothing holds.
+	if strings.Contains(proven, "cmd/mcp-server") {
+		t.Errorf("the summary lists cmd/mcp-server among what it proves; one case reads that "+
+			"directory's source and a query built in another package walks past it:\n%s", summary)
+	}
+	for _, want := range []string{
+		"not a proof",     // the tripwire is named as one
+		"another package", // and the escape that walks past it is named
+		"main package",    // and why this suite cannot drive the server instead
+		"own tests",       // pointing at where the real proof lives
+	} {
+		if !strings.Contains(mcp, want) {
+			t.Errorf("the MCP paragraph does not carry %q, so a reader takes the case for a proof of "+
+				"what no tool input can reach:\n%s", want, summary)
 		}
 	}
 

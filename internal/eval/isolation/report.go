@@ -11,6 +11,12 @@
 // probe_write.go, and proves every point handed over is scoped and labelled with the tenant that
 // asked for it — which is the field the read filter has no choice but to trust.
 //
+// Two cases read source instead of driving code, and say so where they are declared: the
+// architecture boundary (cases_architecture.go) and the MCP server's scope binding (cases_mcp.go).
+// The second is a tripwire on one directory's shape and explicitly not a proof — read its doc
+// comment before quoting a green run about the MCP server. It reads source because it has no
+// choice: cmd/mcp-server is `package main`, so nothing can import it.
+//
 // It does not prove Qdrant honours a `must` clause: that is Qdrant's contract, and
 // internal/retrieval's integration-tagged tests (TestSearch_Integration_TenantIsolation) check it
 // against a real instance on the private runner. A green suite here means "this system cannot ask a
@@ -86,12 +92,28 @@ func (r Report) Summary() string {
 		"honours those conditions — internal/retrieval's integration-tagged tests do that against a " +
 		"real instance.\n")
 
+	// The MCP paragraph is the one this report got wrong once, and the correction is the reason it is
+	// this long. An earlier version moved the MCP scope binding from the list below into the sentence
+	// above and called it proven; review then escaped the case three ways with running code, two of
+	// which are now refused and one of which is not. A suite that declares a gap honestly is worth
+	// more than one claiming an invariant that does not hold, so the item stays declared and the
+	// paragraph says exactly how far the case reaches. Its shape is fixed by
+	// TestMCPScopeCase_DoesNotFollowIndirectionOutOfThePackage, which reads a fixture that escalates
+	// past it.
+	b.WriteString("\nThe MCP scope binding is not proven here (cmd/mcp-server/config.go fixes it " +
+		"from the environment at startup). One case reads that command's source and refuses the " +
+		"shapes an escalation takes inside it — a scope built from a tool input, assembled by a " +
+		"call, left unset, or assigned after the fact — which is a tripwire on that directory and " +
+		"not a proof: a query built in another package and returned from there carries no shape it " +
+		"can see. The escalation attempt itself is driven by cmd/mcp-server's own tests, which no " +
+		"release gate runs; no package can import a main package, so this suite cannot repeat them.\n")
+
 	// The rest of the system, named here rather than left to whoever reads PASS. The suite drives two
 	// entry points, Searcher.Search and ingest.Orchestrate, so a green run is a claim about those two
 	// and about nothing else — and the reader who takes it for a claim about the system is the
 	// failure this paragraph exists to prevent.
-	b.WriteString("\nUntouched by every case above, so a PASS says nothing about them: the tenant " +
-		"the MCP server binds from its environment at startup (cmd/mcp-server/config.go), `stats`, " +
+	b.WriteString("\nUntouched by every case above, so a PASS says nothing about them either: " +
+		"`stats`, " +
 		"which counts every tenant when none is named and does so by design (internal/store/points.go), " +
 		"pagination, since every case here queries at offset 0, and Searcher.FilterMatchesAnything " +
 		"(internal/retrieval/search.go), which no case calls.\n")
