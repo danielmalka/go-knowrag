@@ -11,9 +11,21 @@ __pycache__/
 internal/schema/applied_state.json.tmp-*
 
 # secrets — nunca commitar num repo publico
+#
+# Três padrões, e o terceiro existe porque os dois primeiros não bastavam. `.env` e `.env.*` casam
+# pelo nome inteiro do arquivo, então protegiam `deploy/.env` e não protegiam
+# `scripts/embedder-service/knowrag-embedder.env` nem `scripts/drill.env` — arquivos que os próprios
+# README e `.env.example` mandam criar, com endereço de máquina e caminho remoto dentro. Um `git add -A`
+# os teria publicado. Achado em revisão em 2026-08-13, antes de qualquer um existir; nada vazou.
+#
+# `*.env` casa em qualquer diretório e não engole os exemplos, que terminam em `.example`. Confira com
+# `git check-ignore -v <arquivo>` ao acrescentar um arquivo de ambiente novo — é a única forma de saber,
+# porque o padrão que parece certo aqui é o que estava errado antes.
 .env
 .env.*
+*.env
 !.env.example
+!*.env.example
 
 # binarios compilados na raiz — `go build` sem -o deixa um com o nome do pacote
 /mcp-server
