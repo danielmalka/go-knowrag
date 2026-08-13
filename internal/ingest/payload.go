@@ -37,10 +37,16 @@ const (
 	fieldEmbeddingModel = "embedding_model"
 
 	// fieldUpdated is the one payload field kept out of both point_hash and condition 4 (owner
-	// decision 2026-08-08; PRD-contrato §2.4, ADR-004 §5.1). It is still written — it is what the
-	// UI displays and orders by — but it is derived from git/mtime, so it moves without the content
-	// moving, and an identity that depends on a clock that walks on its own re-embeds a vault on a
-	// git checkout.
+	// decision 2026-08-08; PRD-contrato §2.4, ADR-004 §5.1). It is written and, today, read back by
+	// nothing: the payload projection in internal/retrieval/build.go (resultPayloadFields) is
+	// uid/chunk_index/text/headings/path, so no result can display or order by it.
+	//
+	// The sentence here used to say it was "what the UI displays and orders by". There is no UI, and
+	// that mattered beyond tidiness: D-08's trigger in docs/debitos-tecnicos.md is the day `updated`
+	// becomes a sort key, and the comment asserted the trigger had already fired.
+	//
+	// Why it stays out: it is derived from git/mtime, so it moves without the content moving, and an
+	// identity that depends on a clock that walks on its own re-embeds a vault on a git checkout.
 	//
 	// This constant is the single definition site of the exclusion: PayloadFields writes it under
 	// this name and comparedExclusions skips it under this name, so the two cannot drift into a
