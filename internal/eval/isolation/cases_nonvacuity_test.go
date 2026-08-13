@@ -380,13 +380,14 @@ func TestDefaultSuite_RegistersEveryCase(t *testing.T) {
 		"archived is returned only when asked for",
 		"privileged",
 		"write path",
+		"mcp server",
 		"architecture",
 	} {
 		if !slices.ContainsFunc(names, func(n string) bool { return strings.Contains(n, want) }) {
 			t.Errorf("no case in DefaultSuite mentions %q; it is not being run: %v", want, names)
 		}
 	}
-	if len(names) != 9 {
+	if len(names) != 10 {
 		t.Errorf("DefaultSuite has %d case(s): %v. A case added without a line here is a case whose "+
 			"absence from this list is the only thing that would have flagged it", len(names), names)
 	}
@@ -442,11 +443,18 @@ func searchDrivenCases() []Case {
 // that reachable for the first time: before the write case there was one list, and a case missing
 // from it also failed TestDefaultSuite_RegistersEveryCase's count.
 //
-// The architecture case is the one deliberate omission, named rather than skipped by shape: it scans
-// source, drives neither a store nor an ingestion, and has two failure harnesses of its own above
-// (TestArchitectureCase_FiresOnAViolatingTree and TestArchitectureCase_FailsWhenItCannotScan).
+// The two source-reading cases are the deliberate omissions, named rather than skipped by shape:
+// they drive neither a store nor an ingestion, so a leaking probe says nothing about either, and
+// each has its own failure harnesses — TestArchitectureCase_FiresOnAViolatingTree and
+// TestArchitectureCase_FailsWhenItCannotScan above, and cases_mcp_nonvacuity_test.go for the MCP
+// scope binding. Named here rather than matched by a shape test, because "it reads source" is a
+// property of the case's body and a rule keyed on it would exempt whatever future case happens to
+// read a file.
 func TestEveryCase_IsCoveredByANonVacuityHarness(t *testing.T) {
-	covered := map[string]bool{ArchitectureBoundaryCase("").Name: true}
+	covered := map[string]bool{
+		ArchitectureBoundaryCase("").Name: true,
+		MCPScopeBindingCase("").Name:      true,
+	}
 	for _, c := range searchDrivenCases() {
 		covered[c.Name] = true
 	}

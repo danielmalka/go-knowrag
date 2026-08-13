@@ -11,6 +11,11 @@
 // probe_write.go, and proves every point handed over is scoped and labelled with the tenant that
 // asked for it — which is the field the read filter has no choice but to trust.
 //
+// Two cases read source instead of driving code, and say so where they are declared: the
+// architecture boundary (cases_architecture.go) and the MCP server's scope binding (cases_mcp.go).
+// Both guard invariants about a build rather than about a call, and the second has no choice —
+// cmd/mcp-server is `package main`, so nothing can import it.
+//
 // It does not prove Qdrant honours a `must` clause: that is Qdrant's contract, and
 // internal/retrieval's integration-tagged tests (TestSearch_Integration_TenantIsolation) check it
 // against a real instance on the private runner. A green suite here means "this system cannot ask a
@@ -80,18 +85,27 @@ func (r Report) Summary() string {
 	}
 
 	b.WriteString("\nProves: the request this system builds always carries its tenant condition, " +
-		"and a store that ignored it would be caught; and that an ingestion (internal/ingest) scopes " +
+		"and a store that ignored it would be caught; that an ingestion (internal/ingest) scopes " +
 		"every call to the tenant it was asked for, labels every point it writes with that same " +
-		"tenant, and can neither overwrite nor delete another tenant's points. Does not prove Qdrant " +
+		"tenant, and can neither overwrite nor delete another tenant's points; and that the scope of " +
+		"every search cmd/mcp-server runs is copied from this instance's configuration and can be " +
+		"reached by nothing a tool caller sends. Does not prove Qdrant " +
 		"honours those conditions — internal/retrieval's integration-tagged tests do that against a " +
 		"real instance.\n")
 
-	// The rest of the system, named here rather than left to whoever reads PASS. The suite drives two
-	// entry points, Searcher.Search and ingest.Orchestrate, so a green run is a claim about those two
-	// and about nothing else — and the reader who takes it for a claim about the system is the
-	// failure this paragraph exists to prevent.
-	b.WriteString("\nUntouched by every case above, so a PASS says nothing about them: the tenant " +
-		"the MCP server binds from its environment at startup (cmd/mcp-server/config.go), `stats`, " +
+	// The reach of the MCP claim, stated because the case that makes it reads source rather than
+	// driving the server. cmd/mcp-server is `package main` and nothing can import it, so the dynamic
+	// proof — a real MCP session carrying `tenant_id` in its JSON — lives in that package's own tests
+	// and cannot run from here. See MCPScopeBindingCase (cases_mcp.go), which says which is which.
+	b.WriteString("\nThe MCP claim is made over that command's source, not by calling it: no package " +
+		"can import a main package, so the escalation attempt itself is driven by " +
+		"cmd/mcp-server's own tests and what runs here is the rule they would have to break.\n")
+
+	// The rest of the system, named here rather than left to whoever reads PASS. The suite drives
+	// three entry points, Searcher.Search, ingest.Orchestrate and cmd/mcp-server's source, so a green
+	// run is a claim about those and about nothing else — and the reader who takes it for a claim
+	// about the system is the failure this paragraph exists to prevent.
+	b.WriteString("\nUntouched by every case above, so a PASS says nothing about them: `stats`, " +
 		"which counts every tenant when none is named and does so by design (internal/store/points.go), " +
 		"pagination, since every case here queries at offset 0, and Searcher.FilterMatchesAnything " +
 		"(internal/retrieval/search.go), which no case calls.\n")

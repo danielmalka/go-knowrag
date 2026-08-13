@@ -53,6 +53,7 @@ func DefaultSuite(root string) Suite {
 		ArchivedExclusionCase(),
 		PrivilegedPathCase(),
 		WritePathTenantCase(),
+		MCPScopeBindingCase(root),
 		ArchitectureBoundaryCase(root),
 	}}
 }

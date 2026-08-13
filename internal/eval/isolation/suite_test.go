@@ -110,10 +110,12 @@ func TestReport_HasNoScoreField(t *testing.T) {
 // without going to read the suite.
 //
 // The list is checked against the paragraph it belongs to, not against the whole summary, and that
-// split is what stops this test from becoming the lock on a stale claim. The write path moved from
-// the second list to the first when WritePathTenantCase was added: a check for "internal/ingest
-// appears somewhere in the summary" would have stayed green through that move and gone on requiring
-// the report to disclaim what it now proves.
+// split is what stops this test from becoming the lock on a stale claim. Two entries have already
+// moved from the second list to the first — the write path with WritePathTenantCase, the MCP scope
+// binding with MCPScopeBindingCase — and a check for "internal/ingest appears somewhere in the
+// summary" would have stayed green through both moves and gone on requiring the report to disclaim
+// what it now proves. That is why every entry is checked for presence in one half and absence in
+// the other.
 func TestReport_SummaryStatesWhatItDoesNotProve(t *testing.T) {
 	summary := Suite{Cases: []Case{passing("a")}}.Run(t.Context()).Summary()
 
@@ -129,7 +131,6 @@ func TestReport_SummaryStatesWhatItDoesNotProve(t *testing.T) {
 			"neither list can be checked against the paragraph it belongs to:\n%s", summary)
 	}
 	for _, want := range []string{
-		"cmd/mcp-server",        // the tenant the server binds at startup
 		"stats",                 // counts every tenant when none is named, by design
 		"offset 0",              // pagination is never exercised
 		"FilterMatchesAnything", // and neither is the filter probe
@@ -139,17 +140,31 @@ func TestReport_SummaryStatesWhatItDoesNotProve(t *testing.T) {
 				"a claim about it:\n%s", want, summary)
 		}
 	}
-	// The write path is proven now, so it has to be claimed and must not still be disclaimed. Both
-	// halves are required: the first alone would pass over a summary that said it twice and in
-	// opposite directions, which is worse than either sentence on its own.
-	if !strings.Contains(proves, "internal/ingest") {
-		t.Errorf("the summary does not say the write path is proven, so a reader who needs to know "+
-			"whether ingestion is covered cannot find out from PASS:\n%s", summary)
+	// The write path and the MCP scope binding are proven now, so each has to be claimed and must not
+	// still be disclaimed. Both halves are required: the first alone would pass over a summary that
+	// said it twice and in opposite directions, which is worse than either sentence on its own.
+	for _, want := range []string{"internal/ingest", "cmd/mcp-server"} {
+		if !strings.Contains(proves, want) {
+			t.Errorf("the summary does not say %q is proven, so a reader who needs to know whether it "+
+				"is covered cannot find out from PASS:\n%s", want, summary)
+		}
 	}
-	for _, gone := range []string{"internal/ingest", "write path"} {
+	for _, gone := range []string{
+		"internal/ingest", "write path", // WritePathTenantCase
+		"cmd/mcp-server", "binds from its environment", // MCPScopeBindingCase
+	} {
 		if strings.Contains(gaps, gone) {
-			t.Errorf("the summary still names %q among the things a PASS says nothing about, after "+
-				"WritePathTenantCase started proving it:\n%s", gone, summary)
+			t.Errorf("the summary still names %q among the things a PASS says nothing about, after a "+
+				"case started proving it:\n%s", gone, summary)
+		}
+	}
+	// The MCP claim is the one a reader can overread, because the case behind it reads source rather
+	// than driving the server. A summary that claimed it without that qualification would be selling
+	// a build-time rule as a call that was made and refused.
+	for _, want := range []string{"source", "main package"} {
+		if !strings.Contains(proves, want) {
+			t.Errorf("the summary claims the MCP scope binding without saying it is read off that "+
+				"command's source, so PASS reads as an escalation attempt this suite made:\n%s", summary)
 		}
 	}
 
