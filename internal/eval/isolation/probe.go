@@ -26,6 +26,16 @@ const (
 	collBasePaga = "base_paga"
 )
 
+// payloadTenantField is the payload key the whole of this suite turns on: the one internal/retrieval
+// puts in its `must` condition and the one internal/ingest writes into every point.
+//
+// It is one constant used by both halves, and that is what keeps it from being a comment nobody
+// rechecks. requestsCarryTenant below inspects the real request under this name, so a rename in
+// internal/retrieval/build.go fails every search case; WritePathTenantCase reads the stored payload
+// under it, so a rename in internal/ingest/payload.go fails the write case. Neither side can drift
+// away from this spelling quietly.
+const payloadTenantField = "tenant_id"
+
 // point is one indexed chunk in the probe store.
 type point struct {
 	uid        string
@@ -164,7 +174,7 @@ func matches(p point, f retrieval.Filter) bool {
 
 func field(p point, name string) string {
 	switch name {
-	case "tenant_id":
+	case payloadTenantField:
 		return p.tenantID
 	case "visibility":
 		return p.visibility
@@ -246,7 +256,7 @@ func requestsCarryTenant(reqs []retrieval.SearchRequest, tenantID string) string
 	if len(reqs) == 0 {
 		return "no request reached the store, so nothing was proven about the filter it would carry"
 	}
-	want := retrieval.Condition{Field: "tenant_id", Value: tenantID}
+	want := retrieval.Condition{Field: payloadTenantField, Value: tenantID}
 	for i, req := range reqs {
 		if !slices.Contains(req.Filter.Must, want) {
 			return fmt.Sprintf("request %d went out with no tenant condition on its own filter: %+v",
@@ -262,7 +272,7 @@ func requestsCarryTenant(reqs []retrieval.SearchRequest, tenantID string) string
 		// the scope a scope, and two would be a contradiction Qdrant resolves by matching nothing,
 		// which would look like isolation while meaning confusion.
 		for _, c := range req.Filter.Must {
-			if c.Field == "tenant_id" && c.Value != tenantID {
+			if c.Field == payloadTenantField && c.Value != tenantID {
 				return fmt.Sprintf("request %d carries a second tenant condition %q alongside %q",
 					i+1, c.Value, tenantID)
 			}

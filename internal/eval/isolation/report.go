@@ -3,14 +3,18 @@
 // What it proves, and what it does not, stated here because the difference decides how much a green
 // run is worth:
 //
-// Every case drives the real internal/retrieval code path — the real Query validation, the real
-// buildFilter, the real request builder — against a deliberately hostile store (probe.go). It
-// proves the request that leaves this system carries the tenant condition, and that the store
-// cannot answer with a foreign point unless that condition is missing. It does not prove Qdrant
-// honours a `must` clause: that is Qdrant's contract, and internal/retrieval's integration-tagged
-// tests (TestSearch_Integration_TenantIsolation) check it against a real instance on the private
-// runner. A green suite here means "this system cannot ask a wrong question", not "the database was
-// interrogated".
+// Every case drives real production code against a deliberately hostile stand-in for Qdrant. The
+// read cases drive internal/retrieval — the real Query validation, the real buildFilter, the real
+// request builder — against the store in probe.go, and prove the request that leaves this system
+// carries the tenant condition, and that the store cannot answer with a foreign point unless that
+// condition is missing. The write case drives internal/ingest's Orchestrate against the store in
+// probe_write.go, and proves every point handed over is scoped and labelled with the tenant that
+// asked for it — which is the field the read filter has no choice but to trust.
+//
+// It does not prove Qdrant honours a `must` clause: that is Qdrant's contract, and
+// internal/retrieval's integration-tagged tests (TestSearch_Integration_TenantIsolation) check it
+// against a real instance on the private runner. A green suite here means "this system cannot ask a
+// wrong question and cannot write a wrongly scoped point", not "the database was interrogated".
 //
 // That split is what lets the suite run in public CI with no container, no vault and no credential.
 package isolation
@@ -76,18 +80,20 @@ func (r Report) Summary() string {
 	}
 
 	b.WriteString("\nProves: the request this system builds always carries its tenant condition, " +
-		"and a store that ignored it would be caught. Does not prove Qdrant honours that condition — " +
-		"internal/retrieval's integration-tagged tests do that against a real instance.\n")
+		"and a store that ignored it would be caught; and that an ingestion (internal/ingest) scopes " +
+		"every call to the tenant it was asked for, labels every point it writes with that same " +
+		"tenant, and can neither overwrite nor delete another tenant's points. Does not prove Qdrant " +
+		"honours those conditions — internal/retrieval's integration-tagged tests do that against a " +
+		"real instance.\n")
 
-	// The rest of the system, named here rather than left to whoever reads PASS. Every case in this
-	// suite drives one entry point, Searcher.Search, so a green run is a claim about the read path
+	// The rest of the system, named here rather than left to whoever reads PASS. The suite drives two
+	// entry points, Searcher.Search and ingest.Orchestrate, so a green run is a claim about those two
 	// and about nothing else — and the reader who takes it for a claim about the system is the
 	// failure this paragraph exists to prevent.
-	b.WriteString("\nUntouched by every case above, so a PASS says nothing about them: the write " +
-		"path (internal/ingest), the tenant the MCP server binds from its environment at startup " +
-		"(cmd/mcp-server/config.go), `stats`, which counts every tenant when none is named and does " +
-		"so by design (internal/store/points.go), pagination, since every case here queries at " +
-		"offset 0, and Searcher.FilterMatchesAnything (internal/retrieval/search.go), which no case " +
-		"calls.\n")
+	b.WriteString("\nUntouched by every case above, so a PASS says nothing about them: the tenant " +
+		"the MCP server binds from its environment at startup (cmd/mcp-server/config.go), `stats`, " +
+		"which counts every tenant when none is named and does so by design (internal/store/points.go), " +
+		"pagination, since every case here queries at offset 0, and Searcher.FilterMatchesAnything " +
+		"(internal/retrieval/search.go), which no case calls.\n")
 	return b.String()
 }

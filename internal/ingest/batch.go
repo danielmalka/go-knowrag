@@ -18,13 +18,20 @@ import (
 // note, because a batch of 730 notes that stops at the first bad frontmatter is a batch nobody can
 // finish.
 func RunBatch(ctx context.Context, d Deps, notes []vault.Note) (Report, error) {
+	// Validated before anything is asked of the store, and the order is load-bearing. withPrefetch
+	// below reads a whole tenant (prefetch.go), so validating afterwards let a run with no tenant_id
+	// at all issue that read on its way to being refused — a call carrying a scope Deps.Validate
+	// exists to reject (note.go). It is the same line internal/retrieval draws on the read side, where
+	// an empty tenant_id is refused in Query.Validate before any request is built (retrieval/query.go),
+	// and internal/eval/isolation asserts both.
+	if err := d.Validate(); err != nil {
+		return Report{}, err
+	}
+
 	// One snapshot for the whole batch instead of one round trip per note. See withPrefetch: it
 	// changes only how current state is read, and degrades to the per-note path if the store cannot
 	// produce a snapshot.
 	d, snapshot, snapshotTaken := withPrefetch(ctx, d)
-	if err := d.Validate(); err != nil {
-		return Report{}, err
-	}
 	if err := checkDuplicateUIDs(notes); err != nil {
 		return Report{}, err
 	}
