@@ -113,16 +113,43 @@ func splitAreas(s string) []string {
 	return slices.Compact(out)
 }
 
-// LogValue implements slog.LogValuer so logging a Config never prints the Qdrant credential. The
-// process logs its own config at startup, which is exactly the line that would otherwise ship the
-// key to wherever stderr goes.
+// LogValue and String cover the two routes a credential leaves a struct by, and this type carried
+// only the first until 2026-08-13 — while internal/store.Config and internal/config.Config both
+// carried both, deliberately. `fmt.Sprintf("%+v", cfg)` ignores slog entirely and printed the key in
+// clear.
+//
+// Nothing formats a Config that way today, so this was latent rather than leaking. It is fixed
+// anyway because the asymmetry is the danger: the other two types are commented as covering both
+// routes, so a reader who checks one of them concludes the codebase covers it everywhere.
+//
+// The value receiver is load-bearing and not a style choice: a value method is in the method set of
+// both Config and *Config, so a Config formatted by copy is redacted too. This project shipped the
+// pointer-receiver version of exactly this once, and formatting the struct by value walked straight
+// past it (internal/store/client.go records that incident).
 func (c Config) LogValue() slog.Value {
 	return slog.GroupValue(
 		slog.String("collection", c.Collection),
 		slog.String("tenant_id", c.TenantID),
 		slog.String("qdrant_endpoint", c.QdrantEndpoint),
-		slog.String("qdrant_api_key", "[REDACTED]"),
+		slog.String("qdrant_api_key", c.redactedKey()),
 		slog.String("embedder_endpoint", c.EmbedderEndpoint),
 		slog.String("areas", strings.Join(c.Areas, ",")),
 	)
+}
+
+// String must never format the struct with %v: that would call String on itself forever.
+func (c Config) String() string {
+	return fmt.Sprintf(
+		"main.Config{Collection:%q TenantID:%q QdrantEndpoint:%q QdrantAPIKey:%q "+
+			"EmbedderEndpoint:%q Areas:%q}",
+		c.Collection, c.TenantID, c.QdrantEndpoint, c.redactedKey(), c.EmbedderEndpoint, c.Areas)
+}
+
+// redactedKey reports the key's presence without its value, so "not set" stays distinguishable from
+// "set but hidden" — the same shape internal/store/client.go uses.
+func (c Config) redactedKey() string {
+	if c.QdrantAPIKey == "" {
+		return ""
+	}
+	return "[REDACTED]"
 }
