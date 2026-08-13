@@ -2,8 +2,6 @@ package eval
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -13,18 +11,6 @@ import (
 
 	"github.com/danielmalka/go-knowrag/internal/goldenset"
 )
-
-// EntryIdentity is what makes a golden-set entry "the same question" across edits to the file.
-//
-// It hashes content, not position, because the obvious alternative does not work: `git blame` by
-// line number reattributes every entry below any insertion, so rewrapping the file or moving one
-// question rewrites the provenance of all the rest without a single question having changed. The
-// NUL separator is there so that ("ab", "c") and ("a", "bc") cannot hash the same — a UUID contains
-// no NUL, so the split point is unambiguous.
-func EntryIdentity(q goldenset.GoldenQuestion) string {
-	sum := sha256.Sum256([]byte(q.Question + "\x00" + q.UID))
-	return hex.EncodeToString(sum[:])
-}
 
 // CommitInfo is the commit that introduced one entry.
 //
@@ -81,7 +67,7 @@ func GoldenSetCommit(
 
 	perEntry := make(map[string]CommitInfo, len(questions))
 	for _, q := range questions {
-		perEntry[EntryIdentity(q)] = introducingCommit(ctx, dir, base, q.Question)
+		perEntry[goldenset.EntryIdentity(q)] = introducingCommit(ctx, dir, base, q.Question)
 	}
 	return file, perEntry, nil
 }
@@ -141,7 +127,7 @@ func ResolveStale(
 ) []StaleEntry {
 	byIdentity := make(map[string]goldenset.GoldenQuestion, len(questions))
 	for _, q := range questions {
-		byIdentity[EntryIdentity(q)] = q
+		byIdentity[goldenset.EntryIdentity(q)] = q
 	}
 
 	out := make([]StaleEntry, 0, len(flagged))

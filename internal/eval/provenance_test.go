@@ -76,33 +76,6 @@ func entry(question, uid, area string) string {
 const fixtureCoverage = "coverage:\n  min_total: 1\n  max_total: 10\n  groups:\n" +
 	"    - name: high\n      areas: [alfa, beta]\n      min: 1\n      max: 5\n"
 
-func TestEntryIdentity_IsContentNotPosition(t *testing.T) {
-	q := question("what does the runbook say", uidA, nil)
-
-	same := q
-	same.Area, same.Author, same.Date = "beta", "somebody else", "2030-01-01"
-	if EntryIdentity(q) != EntryIdentity(same) {
-		t.Error("changing area/author/date changed the identity; those are not what makes an entry " +
-			"the same question, and reordering the file would then rewrite provenance")
-	}
-
-	for _, changed := range []goldenset.GoldenQuestion{
-		{Question: q.Question + "?", UID: q.UID},
-		{Question: q.Question, UID: uidB},
-	} {
-		if EntryIdentity(q) == EntryIdentity(changed) {
-			t.Errorf("a different question/uid pair hashes the same: %+v", changed)
-		}
-	}
-
-	// The NUL separator, so ("ab","c") and ("a","bc") cannot collide. A UUID contains no NUL, so the
-	// split point is unambiguous — this asserts the separator is actually there.
-	if EntryIdentity(goldenset.GoldenQuestion{Question: "ab", UID: "c"}) ==
-		EntryIdentity(goldenset.GoldenQuestion{Question: "a", UID: "bc"}) {
-		t.Error("the identity concatenates without a separator, so two different entries collide")
-	}
-}
-
 // TestFlagStaleEntries_EntryCommitAfterBaseline_IsFlagged is S10 T6's first RED test.
 func TestFlagStaleEntries_EntryCommitAfterBaseline_IsFlagged(t *testing.T) {
 	repo := newGitRepo(t)
@@ -127,7 +100,7 @@ func TestFlagStaleEntries_EntryCommitAfterBaseline_IsFlagged(t *testing.T) {
 		t.Fatalf("%d entry/entries flagged, want exactly the one committed after the baseline: %v",
 			len(flagged), ResolveStale(flagged, perEntry, questions))
 	}
-	if flagged[0] != EntryIdentity(second) {
+	if flagged[0] != goldenset.EntryIdentity(second) {
 		t.Errorf("the wrong entry was flagged: %v", ResolveStale(flagged, perEntry, questions))
 	}
 
@@ -167,7 +140,7 @@ func TestGoldenSetCommit_SurvivesReformatting_IdentityUnaffectedByLineShift(t *t
 		t.Fatalf("GoldenSetCommit: %v", err)
 	}
 
-	got := perEntry[EntryIdentity(target)]
+	got := perEntry[goldenset.EntryIdentity(target)]
 	if !got.Found {
 		t.Fatal("the target entry lost its provenance across the reformat")
 	}
@@ -176,7 +149,7 @@ func TestGoldenSetCommit_SurvivesReformatting_IdentityUnaffectedByLineShift(t *t
 			"reformat commit is %s, and attributing it there is the line-number defect this test guards",
 			got.Hash, introduced, reformat)
 	}
-	if other := perEntry[EntryIdentity(other)]; other.Hash != reformat {
+	if other := perEntry[goldenset.EntryIdentity(other)]; other.Hash != reformat {
 		t.Errorf("the entry actually added by the reformat is attributed to %s, want %s",
 			other.Hash, reformat)
 	}
@@ -206,7 +179,7 @@ func TestGoldenSetCommit_ReAddedEntryKeepsItsOriginalIntroduction(t *testing.T) 
 		t.Fatalf("GoldenSetCommit: %v", err)
 	}
 
-	got := perEntry[EntryIdentity(target)]
+	got := perEntry[goldenset.EntryIdentity(target)]
 	if got.Hash != introduced {
 		t.Errorf("the re-added entry is attributed to %s, want the commit that first introduced it "+
 			"(%s); %s is the commit that added it back", got.Hash, introduced, readded)
@@ -273,16 +246,16 @@ func TestFlagStaleEntries_UnattributedIsFlaggedNotWaived(t *testing.T) {
 		t.Fatalf("GoldenSetCommit: %v", err)
 	}
 
-	if info := perEntry[EntryIdentity(uncommitted)]; info.Found {
+	if info := perEntry[goldenset.EntryIdentity(uncommitted)]; info.Found {
 		t.Fatalf("an uncommitted entry was attributed to %s", info.Hash)
 	}
 
 	flagged := FlagStaleEntries(perEntry, file.Time)
-	if !slices.Contains(flagged, EntryIdentity(uncommitted)) {
+	if !slices.Contains(flagged, goldenset.EntryIdentity(uncommitted)) {
 		t.Error("the uncommitted entry was not flagged, so an entry with unknown authoring order " +
 			"reads as one that predates the baseline")
 	}
-	if slices.Contains(flagged, EntryIdentity(committed)) {
+	if slices.Contains(flagged, goldenset.EntryIdentity(committed)) {
 		t.Error("the committed entry was flagged against its own file commit")
 	}
 

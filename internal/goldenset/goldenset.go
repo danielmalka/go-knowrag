@@ -19,6 +19,8 @@ package goldenset
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -58,6 +60,25 @@ type GoldenQuestion struct {
 	// file the author also controls proves nothing about when the entry landed.
 	Author string `yaml:"author" json:"author"`
 	Date   string `yaml:"date" json:"date"`
+}
+
+// EntryIdentity is what makes a golden-set entry "the same question" across edits to the file.
+//
+// It hashes content, not position, because the obvious alternative does not work: `git blame` by
+// line number reattributes every entry below any insertion, so rewrapping the file or moving one
+// question rewrites the provenance of all the rest without a single question having changed. The
+// NUL separator is there so that ("ab", "c") and ("a", "bc") cannot hash the same — a UUID contains
+// no NUL, so the split point is unambiguous.
+//
+// It lives here rather than next to its only caller today (internal/eval/provenance.go, which keys
+// the git attribution by it) because it is a property of the entry and needs no git and nothing else
+// of the gate. The reason to care is the next obvious authoring feature — "warn me if I have already
+// asked this" — whose natural implementation reuses exactly this hash. With it in internal/eval, that
+// feature would make internal/goldenauthor import the gate for a one-line hash and reopen the route
+// this package exists to close (see the package doc above).
+func EntryIdentity(q GoldenQuestion) string {
+	sum := sha256.Sum256([]byte(q.Question + "\x00" + q.UID))
+	return hex.EncodeToString(sum[:])
 }
 
 // GoldenSet is the whole file: the questions and the coverage table they were authored against.
