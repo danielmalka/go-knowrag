@@ -183,8 +183,9 @@ func (c *Client) ScrollByUID(ctx context.Context, tenantID string, uid uuid.UUID
 // share: stop when there is no offset to resume from, and refuse an empty page that still carries
 // one rather than reading it as the end. Continuing on that shape would re-issue the same request
 // forever; stopping in silence would report part of the collection as if it were all of it — and for
-// ScrollByUID and ScrollTenant that partial read feeds straight into the orphan candidate set and the
-// integrity check, where it looks like a smaller, still-plausible index rather than a wrong one.
+// ScrollByUID and ScrollTenant that partial read feeds straight into the orphan candidate set
+// (ScanOrphans, internal/ingest/orphans.go) and the integrity check (internal/ingest/note.go), where
+// it looks like a smaller, still-plausible index rather than a wrong one.
 //
 // Not reachable through Qdrant's documented behaviour — the offset comes back nil when there is
 // nothing after the page. It is checked because "not reachable" is a claim about a server this code
