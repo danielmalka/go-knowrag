@@ -94,7 +94,7 @@ func TestRootHelp_ListsEveryCommand(t *testing.T) {
 		list = list[:end]
 	}
 
-	for _, want := range []string{"schema", "ingest", "search", "stats", "eval"} {
+	for _, want := range []string{"schema", "ingest", "search", "stats", "eval", "golden"} {
 		if !strings.Contains(list, want) {
 			t.Errorf("the command list does not offer %q:\n%s", want, list)
 		}

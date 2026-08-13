@@ -68,6 +68,26 @@ type GoldenSet struct {
 // the whole GoldenSet because the coverage table is part of the file. See the GoldenSet doc comment
 // for why the table is not a literal in coverage.go.
 func LoadGoldenSet(path string) (GoldenSet, error) {
+	set, err := ReadGoldenSet(path)
+	if err != nil {
+		return GoldenSet{}, err
+	}
+	if len(set.Questions) == 0 {
+		return GoldenSet{}, fmt.Errorf("eval: the golden set at %s declares no questions — an empty "+
+			"golden set measures nothing and must not be run as if it did", path)
+	}
+	return set, nil
+}
+
+// ReadGoldenSet is LoadGoldenSet without the non-empty requirement: same file, same strict decoding,
+// same per-entry validation, but a set with no questions comes back as a valid empty set instead of
+// an error.
+//
+// It exists for the authoring side (authoring.go). A file that declares its coverage table and no
+// questions yet is exactly what an author starts from, and it is the one caller for which "nothing
+// was measured" is the normal state rather than the failure LoadGoldenSet refuses. Every other
+// caller wants LoadGoldenSet: a *measuring* run over an empty set is a pass nobody earned.
+func ReadGoldenSet(path string) (GoldenSet, error) {
 	// #nosec G304 -- the path is the golden set the operator named; reading a file the operator
 	// asked to read is this function's whole job.
 	data, err := os.ReadFile(path)
@@ -78,18 +98,18 @@ func LoadGoldenSet(path string) (GoldenSet, error) {
 		}
 		return GoldenSet{}, fmt.Errorf("eval: reading the golden set at %s: %w", path, err)
 	}
+	return decodeGoldenSet(data, path)
+}
 
+// decodeGoldenSet parses and validates the bytes of one golden set. It is separate from the read so
+// authoring.go can decode the file it is *about* to write without putting it on disk first.
+func decodeGoldenSet(data []byte, path string) (GoldenSet, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 
 	var set GoldenSet
 	if derr := dec.Decode(&set); derr != nil && !errors.Is(derr, io.EOF) {
 		return GoldenSet{}, fmt.Errorf("eval: parsing the golden set at %s: %w", path, derr)
-	}
-
-	if len(set.Questions) == 0 {
-		return GoldenSet{}, fmt.Errorf("eval: the golden set at %s declares no questions — an empty "+
-			"golden set measures nothing and must not be run as if it did", path)
 	}
 	if err := validateQuestions(set.Questions); err != nil {
 		return GoldenSet{}, fmt.Errorf("eval: the golden set at %s is invalid: %w", path, err)
