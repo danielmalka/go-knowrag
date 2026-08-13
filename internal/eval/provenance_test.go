@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/danielmalka/go-knowrag/internal/goldenset"
 )
 
 // gitRepo is a throwaway repository with a golden-set file in it. Every commit gets an explicit,
@@ -74,38 +76,11 @@ func entry(question, uid, area string) string {
 const fixtureCoverage = "coverage:\n  min_total: 1\n  max_total: 10\n  groups:\n" +
 	"    - name: high\n      areas: [alfa, beta]\n      min: 1\n      max: 5\n"
 
-func TestEntryIdentity_IsContentNotPosition(t *testing.T) {
-	q := question("what does the runbook say", uidA, nil)
-
-	same := q
-	same.Area, same.Author, same.Date = "beta", "somebody else", "2030-01-01"
-	if EntryIdentity(q) != EntryIdentity(same) {
-		t.Error("changing area/author/date changed the identity; those are not what makes an entry " +
-			"the same question, and reordering the file would then rewrite provenance")
-	}
-
-	for _, changed := range []GoldenQuestion{
-		{Question: q.Question + "?", UID: q.UID},
-		{Question: q.Question, UID: uidB},
-	} {
-		if EntryIdentity(q) == EntryIdentity(changed) {
-			t.Errorf("a different question/uid pair hashes the same: %+v", changed)
-		}
-	}
-
-	// The NUL separator, so ("ab","c") and ("a","bc") cannot collide. A UUID contains no NUL, so the
-	// split point is unambiguous — this asserts the separator is actually there.
-	if EntryIdentity(GoldenQuestion{Question: "ab", UID: "c"}) ==
-		EntryIdentity(GoldenQuestion{Question: "a", UID: "bc"}) {
-		t.Error("the identity concatenates without a separator, so two different entries collide")
-	}
-}
-
 // TestFlagStaleEntries_EntryCommitAfterBaseline_IsFlagged is S10 T6's first RED test.
 func TestFlagStaleEntries_EntryCommitAfterBaseline_IsFlagged(t *testing.T) {
 	repo := newGitRepo(t)
-	first := GoldenQuestion{Question: "the first question about restarts", UID: uidA, Area: "alfa"}
-	second := GoldenQuestion{Question: "the second question about retention", UID: uidB, Area: "beta"}
+	first := goldenset.GoldenQuestion{Question: "the first question about restarts", UID: uidA, Area: "alfa"}
+	second := goldenset.GoldenQuestion{Question: "the second question about retention", UID: uidB, Area: "beta"}
 
 	body := fixtureCoverage + "questions:\n" + entry(first.Question, first.UID, "alfa")
 	repo.commit(body, "add the first question")
@@ -114,7 +89,7 @@ func TestFlagStaleEntries_EntryCommitAfterBaseline_IsFlagged(t *testing.T) {
 	body += entry(second.Question, second.UID, "beta")
 	lateCommit := repo.commit(body, "add the second question")
 
-	questions := []GoldenQuestion{first, second}
+	questions := []goldenset.GoldenQuestion{first, second}
 	_, perEntry, err := GoldenSetCommit(t.Context(), repo.path, questions)
 	if err != nil {
 		t.Fatalf("GoldenSetCommit: %v", err)
@@ -125,7 +100,7 @@ func TestFlagStaleEntries_EntryCommitAfterBaseline_IsFlagged(t *testing.T) {
 		t.Fatalf("%d entry/entries flagged, want exactly the one committed after the baseline: %v",
 			len(flagged), ResolveStale(flagged, perEntry, questions))
 	}
-	if flagged[0] != EntryIdentity(second) {
+	if flagged[0] != goldenset.EntryIdentity(second) {
 		t.Errorf("the wrong entry was flagged: %v", ResolveStale(flagged, perEntry, questions))
 	}
 
@@ -144,8 +119,8 @@ func TestFlagStaleEntries_EntryCommitAfterBaseline_IsFlagged(t *testing.T) {
 // provenance of questions nobody touched.
 func TestGoldenSetCommit_SurvivesReformatting_IdentityUnaffectedByLineShift(t *testing.T) {
 	repo := newGitRepo(t)
-	target := GoldenQuestion{Question: "the question whose line number moves", UID: uidA, Area: "alfa"}
-	other := GoldenQuestion{Question: "an unrelated question added later", UID: uidB, Area: "beta"}
+	target := goldenset.GoldenQuestion{Question: "the question whose line number moves", UID: uidA, Area: "alfa"}
+	other := goldenset.GoldenQuestion{Question: "an unrelated question added later", UID: uidB, Area: "beta"}
 
 	body := fixtureCoverage + "questions:\n" + entry(target.Question, target.UID, "alfa")
 	introduced := repo.commit(body, "add the target question")
@@ -160,12 +135,12 @@ func TestGoldenSetCommit_SurvivesReformatting_IdentityUnaffectedByLineShift(t *t
 		t.Fatal("the fixture made one commit, not two")
 	}
 
-	_, perEntry, err := GoldenSetCommit(t.Context(), repo.path, []GoldenQuestion{target, other})
+	_, perEntry, err := GoldenSetCommit(t.Context(), repo.path, []goldenset.GoldenQuestion{target, other})
 	if err != nil {
 		t.Fatalf("GoldenSetCommit: %v", err)
 	}
 
-	got := perEntry[EntryIdentity(target)]
+	got := perEntry[goldenset.EntryIdentity(target)]
 	if !got.Found {
 		t.Fatal("the target entry lost its provenance across the reformat")
 	}
@@ -174,7 +149,7 @@ func TestGoldenSetCommit_SurvivesReformatting_IdentityUnaffectedByLineShift(t *t
 			"reformat commit is %s, and attributing it there is the line-number defect this test guards",
 			got.Hash, introduced, reformat)
 	}
-	if other := perEntry[EntryIdentity(other)]; other.Hash != reformat {
+	if other := perEntry[goldenset.EntryIdentity(other)]; other.Hash != reformat {
 		t.Errorf("the entry actually added by the reformat is attributed to %s, want %s",
 			other.Hash, reformat)
 	}
@@ -187,8 +162,8 @@ func TestGoldenSetCommit_SurvivesReformatting_IdentityUnaffectedByLineShift(t *t
 // commits change the occurrence count, and the introducing commit is the oldest, not the newest.
 func TestGoldenSetCommit_ReAddedEntryKeepsItsOriginalIntroduction(t *testing.T) {
 	repo := newGitRepo(t)
-	kept := GoldenQuestion{Question: "a question that stays put", UID: uidC, Area: "alfa"}
-	target := GoldenQuestion{Question: "a question removed and added back", UID: uidA, Area: "alfa"}
+	kept := goldenset.GoldenQuestion{Question: "a question that stays put", UID: uidC, Area: "alfa"}
+	target := goldenset.GoldenQuestion{Question: "a question removed and added back", UID: uidA, Area: "alfa"}
 
 	base := fixtureCoverage + "questions:\n" + entry(kept.Question, kept.UID, "alfa")
 	introduced := repo.commit(base+entry(target.Question, target.UID, "alfa"), "add both questions")
@@ -199,12 +174,12 @@ func TestGoldenSetCommit_ReAddedEntryKeepsItsOriginalIntroduction(t *testing.T) 
 		t.Fatal("the fixture did not make three distinct commits")
 	}
 
-	_, perEntry, err := GoldenSetCommit(t.Context(), repo.path, []GoldenQuestion{kept, target})
+	_, perEntry, err := GoldenSetCommit(t.Context(), repo.path, []goldenset.GoldenQuestion{kept, target})
 	if err != nil {
 		t.Fatalf("GoldenSetCommit: %v", err)
 	}
 
-	got := perEntry[EntryIdentity(target)]
+	got := perEntry[goldenset.EntryIdentity(target)]
 	if got.Hash != introduced {
 		t.Errorf("the re-added entry is attributed to %s, want the commit that first introduced it "+
 			"(%s); %s is the commit that added it back", got.Hash, introduced, readded)
@@ -252,8 +227,10 @@ func TestParseCommitLine_PartialOutputIsNotFound(t *testing.T) {
 // baseline, nothing to see".
 func TestFlagStaleEntries_UnattributedIsFlaggedNotWaived(t *testing.T) {
 	repo := newGitRepo(t)
-	committed := GoldenQuestion{Question: "a committed question", UID: uidA, Area: "alfa"}
-	uncommitted := GoldenQuestion{Question: "a question that only exists in the working tree", UID: uidB, Area: "beta"}
+	committed := goldenset.GoldenQuestion{Question: "a committed question", UID: uidA, Area: "alfa"}
+	uncommitted := goldenset.GoldenQuestion{
+		Question: "a question that only exists in the working tree", UID: uidB, Area: "beta",
+	}
 
 	body := fixtureCoverage + "questions:\n" + entry(committed.Question, committed.UID, "alfa")
 	repo.commit(body, "add the committed question")
@@ -263,22 +240,22 @@ func TestFlagStaleEntries_UnattributedIsFlaggedNotWaived(t *testing.T) {
 		t.Fatalf("writing the working-tree edit: %v", err)
 	}
 
-	questions := []GoldenQuestion{committed, uncommitted}
+	questions := []goldenset.GoldenQuestion{committed, uncommitted}
 	file, perEntry, err := GoldenSetCommit(t.Context(), repo.path, questions)
 	if err != nil {
 		t.Fatalf("GoldenSetCommit: %v", err)
 	}
 
-	if info := perEntry[EntryIdentity(uncommitted)]; info.Found {
+	if info := perEntry[goldenset.EntryIdentity(uncommitted)]; info.Found {
 		t.Fatalf("an uncommitted entry was attributed to %s", info.Hash)
 	}
 
 	flagged := FlagStaleEntries(perEntry, file.Time)
-	if !slices.Contains(flagged, EntryIdentity(uncommitted)) {
+	if !slices.Contains(flagged, goldenset.EntryIdentity(uncommitted)) {
 		t.Error("the uncommitted entry was not flagged, so an entry with unknown authoring order " +
 			"reads as one that predates the baseline")
 	}
-	if slices.Contains(flagged, EntryIdentity(committed)) {
+	if slices.Contains(flagged, goldenset.EntryIdentity(committed)) {
 		t.Error("the committed entry was flagged against its own file commit")
 	}
 

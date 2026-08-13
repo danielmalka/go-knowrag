@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/danielmalka/go-knowrag/internal/goldenset"
 	"github.com/danielmalka/go-knowrag/internal/retrieval"
 )
 
@@ -31,7 +32,7 @@ func (m *modeSearcher) Search(_ context.Context, q retrieval.Query) ([]retrieval
 }
 
 func TestCompareHybridVsDense_RunsBothModesOverTheSameQuestions(t *testing.T) {
-	questions := []GoldenQuestion{question("a", uidA, nil), question("b", uidB, nil)}
+	questions := []goldenset.GoldenQuestion{question("a", uidA, nil), question("b", uidB, nil)}
 	s := &modeSearcher{byMode: map[retrieval.SearchMode][]retrieval.Result{
 		// Hybrid finds uidA only; dense-only finds both, so dense-only wins 2/2 against 1/2.
 		retrieval.SearchModeHybrid:    {result(uidA, 0, 0.9)},
@@ -150,7 +151,7 @@ func TestWriteHybridVsDenseReport_RefusesARunThatDidNotFinish(t *testing.T) {
 func TestCompareHybridVsDense_SearcherFailureDoesNotProduceADecision(t *testing.T) {
 	s := &modeSearcher{err: errUnreachable}
 	hybrid, dense, err := CompareHybridVsDense(t.Context(), s,
-		[]GoldenQuestion{question("a", uidA, nil)}, runConfig(5))
+		[]goldenset.GoldenQuestion{question("a", uidA, nil)}, runConfig(5))
 	if err != nil {
 		t.Fatalf("CompareHybridVsDense: %v", err)
 	}

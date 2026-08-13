@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/danielmalka/go-knowrag/internal/goldenset"
 	"github.com/danielmalka/go-knowrag/internal/retrieval"
 )
 
@@ -119,16 +120,16 @@ func TestIsolationGate_NeverReportsAPendingHarness(t *testing.T) {
 
 // goldenGateFixture is a golden set committed to a throwaway repository, which is what GoldenGate
 // needs to resolve provenance. It returns the path and the questions in it.
-func goldenGateFixture(t *testing.T) (string, []GoldenQuestion) {
+func goldenGateFixture(t *testing.T) (string, []goldenset.GoldenQuestion) {
 	t.Helper()
 	repo := newGitRepo(t)
-	first := GoldenQuestion{Question: "the first gate question", UID: uidA, Area: "alfa"}
-	second := GoldenQuestion{Question: "the second gate question", UID: uidB, Area: "alfa"}
+	first := goldenset.GoldenQuestion{Question: "the first gate question", UID: uidA, Area: "alfa"}
+	second := goldenset.GoldenQuestion{Question: "the second gate question", UID: uidB, Area: "alfa"}
 
 	body := fixtureCoverage + "questions:\n" +
 		entry(first.Question, first.UID, "alfa") + entry(second.Question, second.UID, "alfa")
 	repo.commit(body, "add the golden set")
-	return repo.path, []GoldenQuestion{first, second}
+	return repo.path, []goldenset.GoldenQuestion{first, second}
 }
 
 // TestGoldenGate_MeasuresAgainstTheThreshold is the wiring S09 left the seam for: the CLI-facing
@@ -292,8 +293,8 @@ func TestGoldenGate_MissingGoldenSetIsNotAPass(t *testing.T) {
 	if err == nil {
 		t.Fatal("a missing golden set produced an outcome")
 	}
-	if !errors.Is(err, ErrGoldenSetMissing) {
-		t.Errorf("the error %v is not ErrGoldenSetMissing", err)
+	if !errors.Is(err, goldenset.ErrGoldenSetMissing) {
+		t.Errorf("the error %v is not goldenset.ErrGoldenSetMissing", err)
 	}
 	if outcome.Passed || outcome.Score != nil {
 		t.Errorf("the refusal carries a verdict: %+v", outcome)

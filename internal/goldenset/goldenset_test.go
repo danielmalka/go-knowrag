@@ -1,4 +1,4 @@
-package eval
+package goldenset
 
 import (
 	"errors"
@@ -11,6 +11,9 @@ import (
 
 // The fixture UIDs. Fixed literals rather than uuid.New(), so a failure prints the same value on
 // every run and a diff of the test output means something.
+//
+// The same three literals are also declared in internal/eval/runner_test.go — see the comment there
+// for why they are duplicated rather than shared through a third package.
 const (
 	uidA = "11111111-1111-4111-8111-111111111111"
 	uidB = "22222222-2222-4222-8222-222222222222"
@@ -20,7 +23,7 @@ const (
 // Area names in every fixture below are the neutral ones commit "chore: neutral tenant names in
 // test fixtures" established. The real ones are the owner's vault folders and this repository is
 // public (CLAUDE.md) — which is also why the coverage table is data in the golden-set file rather
-// than a literal in coverage.go.
+// than a literal in coverage.go (this package).
 const validGoldenSetYAML = `
 coverage:
   min_total: 2

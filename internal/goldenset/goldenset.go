@@ -1,7 +1,28 @@
-package eval
+// Package goldenset is the golden-set file: its schema, the reader that validates it, the coverage
+// table that governs it, and the append that adds one entry to it.
+//
+// It is a package apart from internal/eval, and the reason is an import edge rather than tidiness.
+// internal/goldenauthor is the interactive session in which the owner writes the questions, and it
+// must have no way to obtain a search result — a question written after seeing what retrieval returns
+// is a question tuned until it passes, and a golden set of those measures the tool that produced it.
+// While the schema and the gate shared one package, importing the schema brought the gate: authoring
+// code could call eval.LoadCorpus, eval.NewCorpusSearcher and eval.RunGolden and get real hits over a
+// corpus file. Nothing here imports a searcher, so that no longer compiles, and
+// TestArch_GoldenAuthoringCannotReachTheIndex (internal/archtest/boundary_test.go) is what keeps it
+// that way — it forbids internal/eval to internal/goldenauthor, which is only possible because the
+// schema left.
+//
+// So the rule for anything added here: this package may not reach internal/retrieval or
+// internal/store, directly or through anything it imports. Measuring belongs on the other side of
+// that line, in internal/eval — which is itself unreachable from here for the same reason, since it
+// imports internal/retrieval. The test enforces reachability rather than a list of forbidden names,
+// so a new dependency that searches is caught the day it lands.
+package goldenset
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -18,14 +39,14 @@ import (
 // yet", the second is "the one you have is broken", and both used to surface as the same wall of
 // YAML error text. errors.Is(err, fs.ErrNotExist) also holds — the underlying os error is wrapped —
 // so a caller may match on either.
-var ErrGoldenSetMissing = errors.New("eval: golden set not found")
+var ErrGoldenSetMissing = errors.New("goldenset: golden set not found")
 
 // GoldenQuestion is one question and the note that answers it.
 //
 // UID is a string rather than a uuid.UUID because it is what the YAML holds and because a hand-
 // built question in a test should not have to import uuid to say "this is not a UUID". LoadGoldenSet
 // proves it parses; the runner re-checks it before searching, because RunGolden also serves
-// hand-built questions that never went through the loader (runner.go).
+// hand-built questions that never went through the loader (internal/eval/runner.go).
 type GoldenQuestion struct {
 	Question string `yaml:"question" json:"question"`
 	UID      string `yaml:"uid" json:"uid"`
@@ -37,10 +58,29 @@ type GoldenQuestion struct {
 	Area string `yaml:"area" json:"area"`
 
 	// Author and Date are required and are documentation, not evidence. Authoring order is proven
-	// by git history (provenance.go), never by these two fields — a date typed into a file the
-	// author also controls proves nothing about when the entry landed.
+	// by git history (internal/eval/provenance.go), never by these two fields — a date typed into a
+	// file the author also controls proves nothing about when the entry landed.
 	Author string `yaml:"author" json:"author"`
 	Date   string `yaml:"date" json:"date"`
+}
+
+// EntryIdentity is what makes a golden-set entry "the same question" across edits to the file.
+//
+// It hashes content, not position, because the obvious alternative does not work: `git blame` by
+// line number reattributes every entry below any insertion, so rewrapping the file or moving one
+// question rewrites the provenance of all the rest without a single question having changed. The
+// NUL separator is there so that ("ab", "c") and ("a", "bc") cannot hash the same — a UUID contains
+// no NUL, so the split point is unambiguous.
+//
+// It lives here rather than next to its only caller today (internal/eval/provenance.go, which keys
+// the git attribution by it) because it is a property of the entry and needs no git and nothing else
+// of the gate. The reason to care is the next obvious authoring feature — "warn me if I have already
+// asked this" — whose natural implementation reuses exactly this hash. With it in internal/eval, that
+// feature would make internal/goldenauthor import the gate for a one-line hash and reopen the route
+// this package exists to close (see the package doc above).
+func EntryIdentity(q GoldenQuestion) string {
+	sum := sha256.Sum256([]byte(q.Question + "\x00" + q.UID))
+	return hex.EncodeToString(sum[:])
 }
 
 // GoldenSet is the whole file: the questions and the coverage table they were authored against.
@@ -73,7 +113,7 @@ func LoadGoldenSet(path string) (GoldenSet, error) {
 		return GoldenSet{}, err
 	}
 	if len(set.Questions) == 0 {
-		return GoldenSet{}, fmt.Errorf("eval: the golden set at %s declares no questions — an empty "+
+		return GoldenSet{}, fmt.Errorf("goldenset: the golden set at %s declares no questions — an empty "+
 			"golden set measures nothing and must not be run as if it did", path)
 	}
 	return set, nil
@@ -96,7 +136,7 @@ func ReadGoldenSet(path string) (GoldenSet, error) {
 			return GoldenSet{}, fmt.Errorf("%w at %s: nothing was measured, and an eval with no "+
 				"questions is not an eval that passed: %w", ErrGoldenSetMissing, path, err)
 		}
-		return GoldenSet{}, fmt.Errorf("eval: reading the golden set at %s: %w", path, err)
+		return GoldenSet{}, fmt.Errorf("goldenset: reading the golden set at %s: %w", path, err)
 	}
 	return decodeGoldenSet(data, path)
 }
@@ -109,10 +149,10 @@ func decodeGoldenSet(data []byte, path string) (GoldenSet, error) {
 
 	var set GoldenSet
 	if derr := dec.Decode(&set); derr != nil && !errors.Is(derr, io.EOF) {
-		return GoldenSet{}, fmt.Errorf("eval: parsing the golden set at %s: %w", path, derr)
+		return GoldenSet{}, fmt.Errorf("goldenset: parsing the golden set at %s: %w", path, derr)
 	}
 	if err := validateQuestions(set.Questions); err != nil {
-		return GoldenSet{}, fmt.Errorf("eval: the golden set at %s is invalid: %w", path, err)
+		return GoldenSet{}, fmt.Errorf("goldenset: the golden set at %s is invalid: %w", path, err)
 	}
 	return set, nil
 }

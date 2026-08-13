@@ -1,4 +1,4 @@
-package eval
+package goldenset
 
 import (
 	"errors"
@@ -111,11 +111,11 @@ func CoverageStatus(questions []GoldenQuestion, table CoverageTable) []AreaStatu
 // found". A table that bounds no total is satisfied by one question.
 func (t CoverageTable) Validate() error {
 	if len(t.Groups) == 0 {
-		return errors.New("eval: the coverage table declares no groups, so this check would pass " +
+		return errors.New("goldenset: the coverage table declares no groups, so this check would pass " +
 			"any golden set at all — declare the table in the golden-set file under `coverage:`")
 	}
 	if t.MinTotal <= 0 && t.MaxTotal <= 0 {
-		return errors.New("eval: the coverage table bounds no total, so a one-question golden set " +
+		return errors.New("goldenset: the coverage table bounds no total, so a one-question golden set " +
 			"would satisfy it — set `min_total` and `max_total`")
 	}
 	return nil

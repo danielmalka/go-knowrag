@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/danielmalka/go-knowrag/internal/goldenset"
 )
 
 // The hermetic fixture: a synthetic corpus and the golden set paired with it, both under testdata/
@@ -34,9 +36,9 @@ const (
 // fixture edit that changes either one has to change this line too.
 const hermeticExpectedRecall = 6.0 / 8.0
 
-func loadHermetic(t *testing.T) ([]GoldenQuestion, CoverageTable, *CorpusSearcher) {
+func loadHermetic(t *testing.T) ([]goldenset.GoldenQuestion, goldenset.CoverageTable, *CorpusSearcher) {
 	t.Helper()
-	set, err := LoadGoldenSet(hermeticGoldenSet)
+	set, err := goldenset.LoadGoldenSet(hermeticGoldenSet)
 	if err != nil {
 		t.Fatalf("loading the hermetic golden set: %v", err)
 	}
@@ -148,7 +150,7 @@ func TestHermeticCorpus_TenantScopeIsApplied(t *testing.T) {
 // fixture out of range would not fail the gate — it would print a warning on every push forever.
 func TestHermeticFixture_SatisfiesItsOwnCoverageTable(t *testing.T) {
 	questions, table, _ := loadHermetic(t)
-	if err := ValidateCoverage(questions, table); err != nil {
+	if err := goldenset.ValidateCoverage(questions, table); err != nil {
 		t.Errorf("the hermetic golden set violates the coverage table it declares, so every CI run "+
 			"prints a warning nobody can act on: %v", err)
 	}

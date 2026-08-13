@@ -3,6 +3,7 @@ package archtest
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -63,15 +64,36 @@ func TestArch_QdrantCheckerIsNotVacuous(t *testing.T) {
 	}
 }
 
-// indexPackages are the two packages through which anything in this module reaches the index:
-// internal/retrieval builds and runs the query, internal/store holds the client.
-var indexPackages = []string{
-	"github.com/danielmalka/go-knowrag/internal/retrieval",
-	"github.com/danielmalka/go-knowrag/internal/store",
+// modulePath is this module's import prefix. A wrong value here does not weaken the check quietly:
+// ModuleImports would record no internal edge at all, and the non-vacuity assertion below — which
+// requires internal/eval to be caught — fails on an empty graph.
+const modulePath = "github.com/danielmalka/go-knowrag"
+
+// searchRoots are the two packages that *are* the index: internal/retrieval builds and runs the
+// query, internal/store holds the Qdrant client. Nothing else in this module can produce a search
+// result without going through one of them.
+//
+// This list is two entries and not three, and the missing third is the point. An earlier version of
+// this test also named internal/eval, because internal/eval can search — it holds LoadCorpus,
+// NewCorpusSearcher and RunGolden (internal/eval/corpus.go, internal/eval/runner.go), which answer
+// with real hits over a local corpus file and never touch Qdrant. Naming it worked and was wrong in
+// a way this project keeps paying for: it made the guard a hand-written roster, and deleting one line
+// from a roster disables it with nothing going red. internal/eval is now caught because it *reaches*
+// internal/retrieval, which is a fact about the import graph rather than an entry someone remembered
+// to add — and any future package that gains a way to search is caught the same day, by the same fact.
+//
+// What keeps these two honest is that they are irreducible: they are where the query and the client
+// live, so a deletion here is not a narrowed list, it is a claim that the index no longer searches.
+// The non-vacuity assertion below turns emptying this list into a failure.
+var searchRoots = []string{
+	modulePath + "/internal/retrieval",
+	modulePath + "/internal/store",
 }
 
-// authoringPackage writes the golden set that `eval --golden` measures against.
-const authoringPackage = "internal/goldenauthor"
+// authoringPackage is the session, and it is the only package this test has to name. Everything it
+// reaches — internal/goldenset, internal/config, internal/schema, internal/vault today — is derived
+// from the import graph, so no directory can drop out of the check by being forgotten in a list.
+const authoringPackage = modulePath + "/internal/goldenauthor"
 
 // TestArch_GoldenAuthoringCannotReachTheIndex is invariant 2, and it is the whole of what keeps the
 // golden set worth measuring.
@@ -89,45 +111,79 @@ const authoringPackage = "internal/goldenauthor"
 // found five ways past them — a new package with an innocuous function name and a method declared in
 // another file of the package needed no watched name at all — and each fix was narrower than the hole
 // it closed. Moving the code into its own package made the defect unrepresentable, which is what
-// CLAUDE.md says to do when a plant will not go red, and left this: one walk, no list of symbols.
+// CLAUDE.md says to do when a plant will not go red, and left this: an import walk, no list of
+// symbols.
 //
-// The residual is written down rather than papered over, and it is demonstrated rather than
-// suspected: internal/goldenauthor imports internal/eval for the golden-set file schema, and
-// internal/eval also holds the gate, so eval.LoadCorpus + eval.NewCorpusSearcher + eval.RunGolden
-// compile from there and return real hits over a local corpus file. This test does not catch that,
-// by construction — internal/eval is a legitimate import and an exception list is what this
-// invariant exists to avoid having.
+// internal/eval is caught by this test, and it is the reason the golden-set file schema was split out
+// of it. The session has to read and append to the golden-set file, so it has to import the schema;
+// while the schema and the gate were one package, importing the first brought eval.LoadCorpus,
+// eval.NewCorpusSearcher and eval.RunGolden, which compile without Qdrant and return real hits over a
+// local corpus file. That was the last of the five bypasses and the only one left open on record.
+// internal/goldenset now holds the schema and reaches no searcher.
 //
-// What it is not is a route to the deployment's index: no Qdrant, no embedder, and no corpus path
-// that command ever holds. Closing it means splitting the file schema out of internal/eval, which is
-// its own change — see the package doc in internal/goldenauthor/author.go for the cost.
+// The check is over the transitive closure and not over a list of directories, and that is the second
+// thing this test learned the hard way. A version of it walked a hand-written map of packages, and two
+// reviews took it apart from opposite ends. One deleted a single line from the map: the invariant went
+// off entirely and the whole suite stayed green. The other attacked the closure the map did not walk
+// and found two live holes — internal/config importing internal/retrieval, and internal/vault
+// importing it — each of which compiled and passed. Both are red now (they are the plants that decided
+// this rewrite), and they are red for the same reason the deleted line no longer matters: the
+// reachable set is derived from the source on every run, so there is no list to shorten and no
+// directory to forget.
+//
+// internal/vault is worth naming on its own, because it was the sharp end of that. The old version
+// used "internal/goldenauthor imports internal/vault" as its proof that the walk was looking at
+// something — while being blind to internal/vault itself gaining a route to search. The guard and its
+// blind spot were the same package. That is why the non-vacuity below is anchored on the predicate
+// catching internal/eval instead: it asks whether this check can still catch a searcher, which is the
+// property at risk, rather than whether one import still exists.
+//
+// One package is out of reach of all of this, and it is topology rather than proof. internal/schema
+// cannot import internal/retrieval or internal/store at all: both already depend on internal/schema
+// (`go list -deps` on either), so the edge is an import cycle and the compiler refuses it. Planting it
+// does not turn this test red — it fails to build. Worth knowing exactly, because a green result there
+// looks like this test proved something and it did not; this test would catch it, it just never gets
+// the chance.
+//
+// The ceiling, so nobody re-derives it: this is red, not impossible. Go has no intra-module import
+// restriction — `internal/` gates by module, not by importer, and a build tag cannot select on who is
+// importing. A separate module would enforce it, and is not worth it here: it would drag internal/config
+// and internal/vault along, which nearly everything imports, and buy a second go.mod and a second test
+// invocation. The internal/schema case above is that enforcement happening for free, by an accident of
+// layout rather than by design.
 func TestArch_GoldenAuthoringCannotReachTheIndex(t *testing.T) {
-	dir := filepath.Join(moduleRoot(t), authoringPackage)
-
-	for _, pkg := range indexPackages {
-		violations, err := FindImporters(dir, pkg, nil)
-		if err != nil {
-			t.Fatalf("walking %s for %s: %v", dir, pkg, err)
-		}
-		for _, v := range violations {
-			t.Errorf("%s/%s imports %q. The authoring session must have no route to the index: it "+
-				"asks for a question about a note, and a question written after seeing what a search "+
-				"returns is a question tuned until it passes", authoringPackage, v, pkg)
-		}
-	}
-
-	// Non-vacuity, and it has to be about this walk rather than about FindImporters in general: a
-	// wrong directory, a renamed package or a moved file makes the loop above pass over nothing and go
-	// on passing forever. internal/vault is what the session reads notes from, so it is imported here
-	// by construction — if the walk cannot see that, it is seeing nothing.
-	const known = "github.com/danielmalka/go-knowrag/internal/vault"
-	seen, err := FindImporters(dir, known, nil)
+	graph, err := ModuleImports(moduleRoot(t), modulePath)
 	if err != nil {
-		t.Fatalf("walking %s for %s: %v", dir, known, err)
+		t.Fatalf("building the module import graph: %v", err)
 	}
-	if len(seen) == 0 {
-		t.Fatalf("the walk of %s found no file importing %q, which the session needs to read notes "+
-			"at all — so the check above is looking at nothing", dir, known)
+
+	for _, root := range searchRoots {
+		if chain := PathTo(graph, authoringPackage, root); chain != nil {
+			t.Errorf("the authoring session reaches %s:\n\t%s\nIt asks for a question about a note, "+
+				"and a question written after seeing what a search returns is a question tuned until "+
+				"it passes — so it must have no way to obtain one. Remove the first edge of that chain.",
+				root, strings.Join(chain, "\n\t  -> "))
+		}
+	}
+
+	// Non-vacuity, and it is about this predicate rather than about the graph builder in general. A
+	// wrong modulePath, a broken walk or an emptied searchRoots all make the loop above pass over
+	// nothing and go on passing forever. internal/eval is the package that does search — it is the
+	// gate — so the same question asked about it has to come back yes. If it does not, the check above
+	// proved nothing about anything.
+	//
+	// It is deliberately not anchored on another hand-written list: the fixture is a real package whose
+	// job is searching, so it cannot stop reaching a searcher without ceasing to be the gate.
+	const gate = modulePath + "/internal/eval"
+	caught := false
+	for _, root := range searchRoots {
+		if PathTo(graph, gate, root) != nil {
+			caught = true
+		}
+	}
+	if !caught {
+		t.Fatalf("%s reaches none of %v, but it is the package that runs the searches — so the walk "+
+			"above is looking at nothing (graph has %d package(s))", gate, searchRoots, len(graph))
 	}
 }
 
