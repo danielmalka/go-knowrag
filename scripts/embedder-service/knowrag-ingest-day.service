@@ -1,0 +1,13 @@
+[Unit]
+Description=go-knowrag daytime incremental ingest
+Documentation=file://%h/.config/knowrag/embedder.env
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-%h/.config/knowrag/ingest.env
+WorkingDirectory=%h
+ExecStart=%h/.config/knowrag/daytime-ingest.sh
+# Incremental no-op is ~30 s; a catch-up run that re-embeds is bounded by the same 30 min gate.
+TimeoutStartSec=2700

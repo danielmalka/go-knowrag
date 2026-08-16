@@ -79,6 +79,20 @@ sorteia uma nota e pede uma pergunta por vez.
 
 Reabre por vontade do dono. Não reabre porque um documento de story ainda lista a tarefa.
 
+## Embedder não é 24 h — decisão de 2026-08-16
+
+O BGE-M3 **não sobe no boot**. Ingestão de reconstrução é um job das 03:00 (liga, `ingest --vault both`, desliga).
+De dia, `knowrag-ingest-day.timer` roda incremental às 12:00 e 18:00 e **não** desliga o modelo.
+Busca de dia é uma janela 07:00–23:00, porque o deadline do MCP é 10 s e a carga do modelo é
+28–37 s: ligar o serviço *de dentro* da busca é outage, não latência.
+
+Ingest e query já são dois *chamadores* do mesmo processo. Não são dois modelos. Um encoder
+leve só para query, no mesmo espaço vetorial, não existe neste stack. Separar de verdade é
+trocar o produto da busca (ex.: BM25 no payload), não o agendamento.
+
+Unidades: `scripts/embedder-service/knowrag-*.timer` e o README do mesmo diretório. Não
+`enable` o `knowrag-embedder.service`.
+
 ## `docs/` fica fora do git, e isso é decisão fechada
 
 `docs/` está no `.gitignore` de propósito: é onde moram os ADRs, o PRD e o registro de débitos

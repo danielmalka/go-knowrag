@@ -440,5 +440,63 @@ class PriorityTest(ServiceTestCase):
         self.assertEqual(server._queries_waiting, 1)
 
 
+class IdleWatchdogTest(unittest.TestCase):
+    """The watchdog is what lets the unit leave memory when nobody is embedding.
+
+    It lives in its own server, not ServiceTestCase's shared one: shutdown is the assertion,
+    and shutting down the shared listener would take every later handler test with it.
+    """
+
+    def setUp(self):
+        server._model = StubModel()
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        self.port = self.httpd.server_address[1]
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.thread.start()
+        server.mark_used()
+
+    def tearDown(self):
+        self.httpd.shutdown()
+        self.thread.join(timeout=5)
+        self.httpd.server_close()
+
+    def request(self, method, path, body=None):
+        conn = HTTPConnection("127.0.0.1", self.port, timeout=5)
+        try:
+            conn.request(method, path, body=body)
+            resp = conn.getresponse()
+            return resp.status, json.loads(resp.read())
+        finally:
+            conn.close()
+
+    def test_zero_timeout_installs_nothing(self):
+        self.assertIsNone(server.install_idle_watchdog(self.httpd, 0))
+        self.assertIsNone(server.install_idle_watchdog(self.httpd, -1))
+
+    def test_idle_shuts_the_server_down(self):
+        server.install_idle_watchdog(self.httpd, 0.15)
+        self.thread.join(timeout=2)
+        self.assertFalse(self.thread.is_alive(), "watchdog did not stop the server")
+
+    def test_embed_resets_the_idle_clock(self):
+        server.install_idle_watchdog(self.httpd, 0.25)
+        deadline = time.monotonic() + 0.4
+        while time.monotonic() < deadline:
+            status, _ = self.request("POST", "/embed", json.dumps({"inputs": ["a"]}))
+            self.assertEqual(status, 200)
+            time.sleep(0.08)
+        self.assertTrue(self.thread.is_alive(), "activity should have kept the server up")
+
+    def test_health_does_not_reset_the_idle_clock(self):
+        server.install_idle_watchdog(self.httpd, 0.2)
+        deadline = time.monotonic() + 0.12
+        while time.monotonic() < deadline:
+            status, _ = self.request("GET", "/health")
+            self.assertEqual(status, 200)
+            time.sleep(0.04)
+        self.thread.join(timeout=2)
+        self.assertFalse(self.thread.is_alive(), "/health kept the weights resident")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,11 @@
+[Unit]
+Description=Stop the go-knowrag embedder at 23:00
+
+[Timer]
+OnCalendar=*-*-* 23:00:00
+# Persistent would fire this on a morning boot and kill the daytime window.
+Persistent=false
+Unit=knowrag-embedder-down.service
+
+[Install]
+WantedBy=timers.target

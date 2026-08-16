@@ -1,0 +1,12 @@
+[Unit]
+Description=Run go-knowrag ingest every night
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+# If the machine was down at 03:00, run once when it comes back rather than skip the day.
+Persistent=true
+RandomizedDelaySec=120
+Unit=knowrag-ingest.service
+
+[Install]
+WantedBy=timers.target

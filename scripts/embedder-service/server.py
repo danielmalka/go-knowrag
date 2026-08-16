@@ -58,6 +58,7 @@ import contextlib
 import json
 import os
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import torch
@@ -75,6 +76,51 @@ _model = None
 _gpu = threading.Condition()
 _gpu_busy = False
 _queries_waiting = 0
+
+# Idle shutdown tracks real inference work, not liveness probes. /health is what systemd, the
+# nightly ingest waiter and a curious curl hit; counting those would keep the weights resident
+# forever. Zero timeout (the default) disables the watchdog — a schedule is an operator choice.
+_last_used = time.monotonic()
+_last_used_lock = threading.Lock()
+
+
+def mark_used() -> None:
+    global _last_used
+    with _last_used_lock:
+        _last_used = time.monotonic()
+
+
+def seconds_idle() -> float:
+    with _last_used_lock:
+        return time.monotonic() - _last_used
+
+
+def install_idle_watchdog(httpd: ThreadingHTTPServer, timeout: float) -> threading.Thread | None:
+    """Stop the server after `timeout` seconds with no /embed, /tokenize or /handshake.
+
+    The process then exits 0. Combined with systemd `Restart=on-failure`, that is a clean
+    idle-stop rather than a crash loop. timeout <= 0 leaves the server up until something
+    else stops it (the day-down timer, an operator, a crash).
+    """
+    if timeout <= 0:
+        return None
+
+    def loop() -> None:
+        interval = min(5.0, max(0.05, timeout / 4))
+        while True:
+            time.sleep(interval)
+            idle_for = seconds_idle()
+            if idle_for >= timeout:
+                print(
+                    f"idle for {idle_for:.0f}s (limit {timeout:.0f}s); shutting down",
+                    flush=True,
+                )
+                httpd.shutdown()
+                return
+
+    thread = threading.Thread(target=loop, name="idle-watchdog", daemon=True)
+    thread.start()
+    return thread
 
 
 @contextlib.contextmanager
@@ -264,8 +310,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):  # noqa: N802 - stdlib signature
         if self.path == "/health":
+            # Not mark_used: see the idle-watchdog comment. A probe is not work.
             self._send(200, {"status": "ok", "loaded": _model is not None})
         elif self.path == "/handshake":
+            mark_used()
             self._send(200, handshake())
         else:
             self._send(404, {"error": "no such endpoint", "path": self.path})
@@ -284,6 +332,7 @@ class Handler(BaseHTTPRequestHandler):
 
         try:
             if self.path == "/tokenize":
+                mark_used()
                 # Batch class deliberately, even though ingestion calls this thousands of times per
                 # run: those thousands are exactly why it is not interactive. Its only caller is the
                 # chunker in cmd/cli/ingest.go -- the query path never tokenizes -- so promoting it
@@ -296,6 +345,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             if self.path == "/embed":
+                mark_used()
                 # The class comes from the request's own `kind`, which the Go client has always sent
                 # (internal/embed/http.go) and this server used to ignore. An explicit field rather
                 # than a size heuristic: one-chunk batches are legal at the tail of an ingestion run,
@@ -365,6 +415,13 @@ def main() -> None:
     ap.add_argument("--port", type=int, default=7999)
     ap.add_argument("--device", default="cuda:0")
     ap.add_argument("--fp32", action="store_true", help="load in fp32 instead of fp16")
+    ap.add_argument(
+        "--idle-timeout",
+        type=float,
+        default=0,
+        help="seconds without /embed, /tokenize or /handshake before the process exits 0; "
+             "0 (default) stays up until something else stops it",
+    )
     args = ap.parse_args()
 
     # No number in this line: it is printed before the load, so any figure here is a claim about a
@@ -381,7 +438,12 @@ def main() -> None:
     hs = handshake()
     print(json.dumps(hs), flush=True)
     print(f"ready on http://{args.host}:{args.port}", flush=True)
-    ThreadingHTTPServer((args.host, args.port), Handler).serve_forever()
+    httpd = ThreadingHTTPServer((args.host, args.port), Handler)
+    # Load + probe already took 28-37 s; without this those seconds count as idle and a short
+    # timeout would shut the server down the moment it bound the socket.
+    mark_used()
+    install_idle_watchdog(httpd, args.idle_timeout)
+    httpd.serve_forever()
 
 
 if __name__ == "__main__":

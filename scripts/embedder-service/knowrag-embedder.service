@@ -1,10 +1,12 @@
 [Unit]
-# Keeps the embedding runtime up. Everything downstream depends on it: `knowrag ingest` calls
-# /tokenize at every chunk boundary and /embed per batch, and the MCP server embeds every query.
-# Before this unit existed the process was started by hand and did not survive a reboot.
+# Serves BGE-M3 on loopback. `knowrag ingest` calls /tokenize at every chunk boundary and /embed
+# per batch; the MCP server embeds every query. The same process does both — there is no
+# query-only half of this model (see the embedder README, "Why ingest and query are not two
+# services").
 #
-# This is a stopgap, not the runbook S12 will write. It restarts the process and nothing else: it
-# does not wait for the GPU, does not fall back to CPU, and does not tell anyone it is unhealthy.
+# This unit is NOT enabled. Boot must not load 2+ GB of weights. Two timers start it: the
+# nightly ingest oneshot, and the daytime window so a search does not miss the MCP's 10 s
+# deadline while the model is still loading (28-37 s).
 #
 # StartLimit* live here and not under [Service]. systemd ignores them there — silently, with only a
 # line in `systemd-analyze verify` to say so — which is how the first version of this file ended up
@@ -25,7 +27,11 @@ EnvironmentFile=%h/.config/knowrag/embedder.env
 # systemd expands variables in arguments but not in the executable itself, so the command runs
 # through `sh -c`. The quoting is what makes a path with a space work, and `exec` is what keeps
 # systemd supervising python rather than the shell that spawned it.
-ExecStart=/bin/sh -c 'exec "$KNOWRAG_PYTHON" "$KNOWRAG_REPO/scripts/embedder-service/server.py" --host "$KNOWRAG_EMBEDDER_HOST" --port "$KNOWRAG_EMBEDDER_PORT"'
+# KNOWRAG_EMBEDDER_IDLE_TIMEOUT is seconds of no /embed|/tokenize|/handshake before the
+# process exits 0. Default 0: the daytime stop timer is what takes it down. Set it only if
+# you drop the daytime window and accept that the first search after idle is an outage
+# (MCP search deadline is 10 s; load is 28-37 s).
+ExecStart=/bin/sh -c 'exec "$KNOWRAG_PYTHON" "$KNOWRAG_REPO/scripts/embedder-service/server.py" --host "$KNOWRAG_EMBEDDER_HOST" --port "$KNOWRAG_EMBEDDER_PORT" --idle-timeout "${KNOWRAG_EMBEDDER_IDLE_TIMEOUT:-0}"'
 
 # There is deliberately no WorkingDirectory: server.py opens no file and builds no relative path, and
 # the model comes from the Hugging Face cache under the user's home. An earlier version of this unit
@@ -34,7 +40,10 @@ ExecStart=/bin/sh -c 'exec "$KNOWRAG_PYTHON" "$KNOWRAG_REPO/scripts/embedder-ser
 # Start to ready is ~9 s for a restart like this one, where the page cache is still warm, and 28-37 s
 # from a cold boot (measured off this unit's own journal; ADR-001 §6.2). Restarting is not free and a
 # crash loop would thrash the GPU.
-Restart=always
+#
+# on-failure, not always: an idle-timeout shutdown is exit 0, and Restart=always would bring the
+# weights back the moment they were released. A crash still restarts.
+Restart=on-failure
 RestartSec=5
 
 # The two numbers exist because this service is the largest single consumer on the machine and the
@@ -57,4 +66,7 @@ StandardOutput=journal
 StandardError=journal
 
 [Install]
+# Intentionally not wanted by default.target. Enabling this unit would load the model at
+# every WSL boot. The timers start it; `systemctl --user start knowrag-embedder` is the
+# manual path.
 WantedBy=default.target

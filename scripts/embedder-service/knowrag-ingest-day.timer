@@ -1,0 +1,14 @@
+[Unit]
+Description=Run go-knowrag incremental ingest twice during the search window
+
+[Timer]
+# Inside 07:00–23:00, so the model is already up. Persistent=true so a machine
+# that slept through noon still catches up once it wakes.
+OnCalendar=*-*-* 12:00:00
+OnCalendar=*-*-* 18:00:00
+Persistent=true
+RandomizedDelaySec=120
+Unit=knowrag-ingest-day.service
+
+[Install]
+WantedBy=timers.target

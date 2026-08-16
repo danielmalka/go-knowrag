@@ -8,6 +8,49 @@ runs Qdrant and nothing else of this system. Everything embeds against this one 
 ingest` calls `/tokenize` at every chunk boundary and `/embed` per batch, `knowrag search` and the
 MCP server embed one query each.
 
+## Why ingest and query are not two services
+
+They are already two *callers*. They are not two *models*.
+
+BGE-M3 is one set of weights. `kind: query` vs `kind: passage` is a scheduling flag on this
+server (interactive requests jump the ingest queue). It is not a smaller encoder. A search
+without this process is not a search: Qdrant holds BGE-M3 dense+sparse vectors, and the only
+thing that produces a query vector in that space is this process. A keyword/BM25 path over the
+`text` payload would be a different product, with different recall, and is not built.
+
+The MCP search deadline is 10 s. Loading the weights is 28–37 s. Starting this service from
+inside a search therefore always reports an outage. That is why the daytime timer starts it
+at 07:00, *before* anyone asks, and why on-demand idle-stop is an optional trade (first
+search of the afternoon fails) rather than the default.
+
+## Schedule (the unit is not enabled)
+
+| When | What |
+|---|---|
+| boot | nothing — do not `enable knowrag-embedder` |
+| 03:00 | `knowrag-ingest.timer` — start, `ingest --vault both`, stop |
+| 07:00 | `knowrag-embedder-up.timer` — start, stay up |
+| 12:00 and 18:00 | `knowrag-ingest-day.timer` — incremental ingest, leave the model up |
+| 23:00 | `knowrag-embedder-down.timer` — stop |
+
+The 03:00 job and the daytime job are different units on purpose. The night script
+stops the model when it is done. The day script must not: a search after noon still
+has a 10 s deadline.
+
+Install the timers next to the unit (`~/.config/systemd/user/`), copy `ingest.env.example` to
+`~/.config/knowrag/ingest.env`, then:
+
+```sh
+systemctl --user daemon-reload
+systemctl --user disable knowrag-embedder          # must not be in default.target
+systemctl --user enable --now knowrag-ingest.timer \
+    knowrag-ingest-day.timer \
+    knowrag-embedder-up.timer knowrag-embedder-down.timer
+```
+
+`--idle-timeout` exists for a host that drops the daytime window. Leave it at 0 while the
+timers own the lifetime.
+
 This file describes how to stand it up on a machine that does not have it yet. It is a record of
 what already runs, not a plan: the unit below has been serving a real corpus since S06.
 
@@ -42,8 +85,9 @@ what already runs, not a plan: the unit below has been serving a real corpus sin
    ```sh
    cp knowrag-embedder.service ~/.config/systemd/user/
    systemctl --user daemon-reload
-   systemctl --user enable --now knowrag-embedder
-   loginctl enable-linger "$USER"   # without this it dies with the login session
+   systemctl --user disable knowrag-embedder   # must not start at boot
+   # copy the ingest/up/down units and enable the three timers; see "Schedule" above
+   loginctl enable-linger "$USER"   # without this user timers die with the login session
    ```
 
 4. **Point the CLI and the MCP server at it.** Two variables on this same host, each read by a

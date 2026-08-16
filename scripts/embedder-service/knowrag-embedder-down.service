@@ -1,0 +1,6 @@
+[Unit]
+Description=Stop the go-knowrag embedder at the end of the daytime window
+
+[Service]
+Type=oneshot
+ExecStart=/bin/systemctl --user stop knowrag-embedder

@@ -1,0 +1,12 @@
+[Unit]
+Description=Start the go-knowrag embedder for the daytime search window
+
+[Timer]
+OnCalendar=*-*-* 07:00:00
+# Booting after 07:00 should still bring the model up; otherwise the first search
+# of the day is an outage (MCP deadline 10 s, load 28-37 s).
+Persistent=true
+Unit=knowrag-embedder.service
+
+[Install]
+WantedBy=timers.target

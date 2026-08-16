@@ -1,0 +1,18 @@
+[Unit]
+Description=go-knowrag nightly ingest
+Documentation=file://%h/.config/knowrag/embedder.env
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Machine-local. Point these at the checkout's env files (secrets stay there, not here).
+# KNOWRAG_ENV     = .env.knowrag  (paths, vault roster, embedder URL)
+# KNOWRAG_DOTENV  = .env          (Qdrant keys)
+# KNOWRAG_BIN     = the operator CLI
+# KNOWRAG_ENSURE  = ensure-embedder.sh
+EnvironmentFile=-%h/.config/knowrag/ingest.env
+WorkingDirectory=%h
+ExecStart=%h/.config/knowrag/nightly-ingest.sh
+# Incremental no-op is ~30 s; a full rebuild has a 30 min gate. 45 min is the backstop.
+TimeoutStartSec=2700
