@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/danielmalka/go-knowrag/internal/eval/isolation"
 	"github.com/danielmalka/go-knowrag/internal/goldenset"
@@ -61,6 +62,12 @@ type Options struct {
 	MinRecall float64
 	// K is the cut-off. Zero means the default below.
 	K int
+
+	// CompareModes runs hybrid and dense-only over the same questions (S10 T11). The verdict is
+	// which ranking won, not whether recall cleared MinRecall — that gate stays on the single-mode
+	// path. CompareOut, when set, is where WriteHybridVsDenseReport writes the decision document.
+	CompareModes bool
+	CompareOut   string
 }
 
 // DefaultK is the cut-off every acceptance criterion in this project is written against: Recall@5.
@@ -133,11 +140,15 @@ func GoldenGate(ctx context.Context, opts Options) (Outcome, error) {
 	if k <= 0 {
 		k = DefaultK
 	}
-	results, err := RunGolden(ctx, opts.Searcher, set.Questions, RunConfig{
+	cfg := RunConfig{
 		Collection: opts.Collection,
 		TenantID:   opts.TenantID,
 		K:          k,
-	})
+	}
+	if opts.CompareModes {
+		return compareModesGate(ctx, opts, set, cfg)
+	}
+	results, err := RunGolden(ctx, opts.Searcher, set.Questions, cfg)
 	if err != nil {
 		return Outcome{}, err
 	}
@@ -158,6 +169,32 @@ func GoldenGate(ctx context.Context, opts Options) (Outcome, error) {
 		Passed:  report.Complete && recall >= opts.MinRecall,
 		Score:   &recall,
 		Summary: RenderReport(report),
+	}, nil
+}
+
+func compareModesGate(ctx context.Context, opts Options, set goldenset.GoldenSet, cfg RunConfig) (Outcome, error) {
+	hybrid, dense, err := CompareHybridVsDense(ctx, opts.Searcher, set.Questions, cfg)
+	if err != nil {
+		return Outcome{}, err
+	}
+	if opts.CompareOut != "" {
+		if werr := WriteHybridVsDenseReport(opts.CompareOut, hybrid, dense, time.Now()); werr != nil {
+			return Outcome{}, werr
+		}
+	}
+	recall := hybrid.Global.Recall()
+	summary := fmt.Sprintf("%s\n\nhybrid Recall@%d = %.4f (%d/%d)\ndense-only Recall@%d = %.4f (%d/%d)\n",
+		DecisionOutcome(hybrid, dense),
+		hybrid.K, hybrid.Global.Recall(), hybrid.Global.Hits, hybrid.Global.Total,
+		dense.K, dense.Global.Recall(), dense.Global.Hits, dense.Global.Total)
+	if opts.CompareOut != "" {
+		summary += "wrote " + opts.CompareOut + "\n"
+	}
+	return Outcome{
+		Mode:    "golden-compare",
+		Passed:  hybrid.Complete && dense.Complete,
+		Score:   &recall,
+		Summary: summary,
 	}, nil
 }
 

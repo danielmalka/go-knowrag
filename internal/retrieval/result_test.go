@@ -102,6 +102,24 @@ func TestFormatResults_MissingHeadingsIsNotAnError(t *testing.T) {
 	}
 }
 
+func TestFormatResults_TitleIsOptional(t *testing.T) {
+	with := scoredPoint("p1", 0.9)
+	with.Payload[fieldTitle] = "Cron jobs"
+	without := scoredPoint("p2", 0.4)
+	delete(without.Payload, fieldTitle)
+
+	got, err := formatResults([]ScoredPoint{with, without})
+	if err != nil {
+		t.Fatalf("formatResults: %v", err)
+	}
+	if got[0].Title != "Cron jobs" {
+		t.Errorf("title = %q, want it copied from the payload", got[0].Title)
+	}
+	if got[1].Title != "" {
+		t.Errorf("missing title = %q, want empty rather than an error", got[1].Title)
+	}
+}
+
 func TestFormatResults_MalformedPayload(t *testing.T) {
 	cases := []struct {
 		name    string

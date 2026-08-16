@@ -34,6 +34,12 @@ var (
 	// query indistinguishable — and the whole point of the toggle is that the eval harness can
 	// prove which one it measured (internal/eval/hybrid_compare.go).
 	ErrInvalidSearchMode = errors.New("retrieval: search mode is not one of the defined modes")
+
+	ErrEmptyUID   = errors.New("retrieval: uid is empty")
+	ErrInvalidUID = errors.New("retrieval: uid is not a UUID")
+	// ErrNoteTooLarge is a lookup that hit noteLookupLimit: we cannot tell a 64-chunk note from a
+	// 65-chunk one, so returning the page would be a silent truncation.
+	ErrNoteTooLarge = errors.New("retrieval: the note has more chunks than a single lookup will return")
 )
 
 // SearchMode selects the query shape: the §2.3b hybrid (two prefetch legs fused with RRF) or a
@@ -105,6 +111,10 @@ type Query struct {
 	// input reaches this field. The rule is keyed here, on an explicit flag, and nowhere else; in
 	// particular buildFilter must never read Collection to decide it (S07 T5).
 	IncludePrivate bool
+
+	// UID names one note for GetByUID. Search ignores it: a search is a question, and a caller that
+	// already knows the uid should open the note rather than filter a ranked list down to it.
+	UID string
 }
 
 // Validate rejects every query this package can prove is unanswerable before any I/O happens.

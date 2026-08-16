@@ -208,6 +208,7 @@ type searchHitJSON struct {
 	UID        string  `json:"uid"`
 	ChunkIndex int     `json:"chunk_index"`
 	Text       string  `json:"text"`
+	Title      string  `json:"title"`
 	Breadcrumb string  `json:"breadcrumb"`
 	Path       string  `json:"path"`
 	Score      float32 `json:"score"`
@@ -226,6 +227,7 @@ func hitsJSON(hits []retrieval.Result) []searchHitJSON {
 			UID:        h.UID,
 			ChunkIndex: h.ChunkIndex,
 			Text:       h.Text,
+			Title:      h.Title,
 			Breadcrumb: h.Breadcrumb,
 			Path:       h.Path,
 			Score:      h.Score,
@@ -253,8 +255,12 @@ func writeHits(w io.Writer, jsonMode bool, hits []retrieval.Result) error {
 		if breadcrumb == "" {
 			breadcrumb = noBreadcrumb
 		}
-		if _, err := fmt.Fprintf(w, "%.4f  %s\n        %s\n        uid: %s  chunk_index: %d\n\n",
-			h.Score, h.Path, breadcrumb, h.UID, h.ChunkIndex); err != nil {
+		title := h.Title
+		if title != "" {
+			title = title + "\n        "
+		}
+		if _, err := fmt.Fprintf(w, "%.4f  %s\n        %s%s\n        uid: %s  chunk_index: %d\n\n",
+			h.Score, h.Path, title, breadcrumb, h.UID, h.ChunkIndex); err != nil {
 			return fmt.Errorf("writing the results: %w", err)
 		}
 	}

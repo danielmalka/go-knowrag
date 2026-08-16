@@ -32,6 +32,7 @@ type Result struct {
 	UID        string
 	ChunkIndex int
 	Text       string
+	Title      string
 	Breadcrumb string
 	Path       string
 	Score      float32
@@ -43,8 +44,8 @@ type Result struct {
 // A point missing a required payload field is an error naming that point, not a Result with a hole
 // in it: the only ways a chunk reaches the index without `uid` or `text` are a write from something
 // other than this pipeline or a hand edit, and both are exactly what the caller needs told.
-// Breadcrumb is the one optional field — a note whose chunk sits above the first heading has no
-// headings, which is ordinary rather than broken.
+// Title and breadcrumb are optional — a note may have no frontmatter title, and a chunk that sits
+// above the first heading has no headings, which is ordinary rather than broken.
 func formatResults(points []ScoredPoint) ([]Result, error) {
 	out := make([]Result, 0, len(points))
 	for _, p := range points {
@@ -66,10 +67,12 @@ func formatResults(points []ScoredPoint) ([]Result, error) {
 		}
 
 		headings, _ := p.Payload[fieldHeadings].([]string)
+		title, _ := p.Payload[fieldTitle].(string)
 		out = append(out, Result{
 			UID:        uid,
 			ChunkIndex: index,
 			Text:       text,
+			Title:      title,
 			Breadcrumb: strings.Join(headings, breadcrumbSeparator),
 			Path:       path,
 			Score:      p.Score,

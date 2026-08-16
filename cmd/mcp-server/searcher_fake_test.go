@@ -48,6 +48,11 @@ type fakeSearcher struct {
 	// probeHangs is hangs for the probe, and separate from it because the case that matters has a
 	// search that answered and a probe that never does. Only the caller's deadline unblocks it.
 	probeHangs bool
+
+	lookups     []retrieval.Query
+	noteResults []retrieval.Result
+	noteErrs    []error
+	noteHangs   bool
 }
 
 func (f *fakeSearcher) Search(ctx context.Context, q retrieval.Query) ([]retrieval.Result, error) {
@@ -136,6 +141,48 @@ func (f *fakeSearcher) lastQuery() retrieval.Query {
 		return retrieval.Query{}
 	}
 	return f.queries[len(f.queries)-1]
+}
+
+func (f *fakeSearcher) GetByUID(ctx context.Context, q retrieval.Query) ([]retrieval.Result, error) {
+	f.mu.Lock()
+	n := len(f.lookups)
+	f.lookups = append(f.lookups, q)
+	hangs := f.noteHangs
+	f.mu.Unlock()
+
+	if hangs {
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("looking up %s: %w", q.Collection, status.FromContextError(ctx.Err()).Err())
+		case <-time.After(hangCap):
+			return nil, errors.New("the lookup was never cancelled: nothing bounds how long it may take")
+		}
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if n < len(f.noteErrs) && f.noteErrs[n] != nil {
+		return nil, f.noteErrs[n]
+	}
+	if f.noteResults != nil {
+		return f.noteResults, nil
+	}
+	return f.results, nil
+}
+
+func (f *fakeSearcher) lookupCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.lookups)
+}
+
+func (f *fakeSearcher) lastLookup() retrieval.Query {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.lookups) == 0 {
+		return retrieval.Query{}
+	}
+	return f.lookups[len(f.lookups)-1]
 }
 
 // testConfig is the instance scope every handler test runs against — this build's real one.

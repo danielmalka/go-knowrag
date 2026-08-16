@@ -138,7 +138,9 @@ func TestSearch_HappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("re-embedding for the comparison: %v", err)
 	}
-	want := buildQueryRequest(q, emb, calibratedPrefetchLimit(q, DefaultPrefetchMultiplier))
+	wide := q
+	wide.TopK = fetchWindow(q.TopK, DefaultMaxChunksPerUID)
+	want := buildQueryRequest(wide, emb, calibratedPrefetchLimit(wide, DefaultPrefetchMultiplier))
 	if x.requests[0].Collection != want.Collection || x.requests[0].Limit != want.Limit ||
 		x.requests[0].Offset != want.Offset || !x.requests[0].FusionRRF {
 		t.Errorf("the executed request %+v does not match the built one %+v", x.requests[0], want)
@@ -155,13 +157,14 @@ func TestSearch_HappyPath(t *testing.T) {
 		t.Errorf("%d prefetch leg(s) reached the executor, want 2", len(x.requests[0].Prefetch))
 	}
 
-	// And the return value is formatResults' output, not a second mapping.
+	// The return value is formatResults then the per-uid cap, not a second mapping.
 	formatted, err := formatResults(x.points)
 	if err != nil {
 		t.Fatalf("formatResults: %v", err)
 	}
+	formatted = capPerUID(formatted, q.TopK, DefaultMaxChunksPerUID)
 	if len(got) != len(formatted) || got[0] != formatted[0] {
-		t.Errorf("Search returned %+v, want formatResults' output %+v", got, formatted)
+		t.Errorf("Search returned %+v, want formatResults+capPerUID %+v", got, formatted)
 	}
 }
 

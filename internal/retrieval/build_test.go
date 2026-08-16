@@ -136,7 +136,7 @@ func TestBuildQueryRequest_ShapesHybridQuery(t *testing.T) {
 // formatResults would report every point as malformed.
 func TestBuildQueryRequest_ProjectsOnlyTheFieldsFormatResultsReads(t *testing.T) {
 	req := buildQueryRequest(validQuery(), fakeEmbedding(), 20)
-	for _, want := range []string{fieldUID, fieldChunkIndex, fieldText, fieldHeadings, fieldPath} {
+	for _, want := range []string{fieldUID, fieldChunkIndex, fieldText, fieldHeadings, fieldPath, fieldTitle} {
 		if !slices.Contains(req.PayloadFields, want) {
 			t.Errorf("PayloadFields %v does not include %q", req.PayloadFields, want)
 		}

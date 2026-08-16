@@ -58,8 +58,23 @@ func TestServer_StdioHandshakeListAndCall_OverPipes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("tools/list over pipes: %v", err)
 	}
-	if len(list.Tools) != 1 || list.Tools[0].Name != toolName {
-		t.Fatalf("tools/list returned %+v, want exactly %s", list.Tools, toolName)
+	names := make([]string, 0, len(list.Tools))
+	for _, tool := range list.Tools {
+		names = append(names, tool.Name)
+	}
+	if len(list.Tools) != 2 {
+		t.Fatalf("tools/list returned %v, want %s and %s", names, toolName, getNoteToolName)
+	}
+	for _, want := range []string{toolName, getNoteToolName} {
+		found := false
+		for _, n := range names {
+			if n == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("tools/list returned %v, missing %s", names, want)
+		}
 	}
 
 	res, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
@@ -74,6 +89,20 @@ func TestServer_StdioHandshakeListAndCall_OverPipes(t *testing.T) {
 	}
 	if !strings.Contains(resultText(t, res), "Kubernetes ingress notes.") {
 		t.Errorf("the call did not return the chunk: %s", resultText(t, res))
+	}
+
+	note, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
+		Name:      getNoteToolName,
+		Arguments: json.RawMessage(`{"uid":"` + sampleNoteUID + `"}`),
+	})
+	if err != nil {
+		t.Fatalf("get_note over pipes: %v", err)
+	}
+	if note.IsError {
+		t.Fatalf("get_note returned an error result: %s", resultText(t, note))
+	}
+	if !strings.Contains(resultText(t, note), "Kubernetes ingress notes.") {
+		t.Errorf("get_note did not return the chunk: %s", resultText(t, note))
 	}
 
 	assertOnlyJSONRPC(t, captured.String())

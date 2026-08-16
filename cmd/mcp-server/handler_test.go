@@ -50,8 +50,13 @@ func connect(t *testing.T, cfg Config, s Searcher) *mcp.ClientSession {
 // does not have. Building an input struct instead would make the escalation tests tautological.
 func callRaw(t *testing.T, cs *mcp.ClientSession, args string) *mcp.CallToolResult {
 	t.Helper()
+	return callNamed(t, cs, toolName, args)
+}
+
+func callNamed(t *testing.T, cs *mcp.ClientSession, name, args string) *mcp.CallToolResult {
+	t.Helper()
 	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
-		Name:      toolName,
+		Name:      name,
 		Arguments: json.RawMessage(args),
 	})
 	if err != nil {
@@ -94,42 +99,75 @@ func TestToolsList_SearchKnowledge_SchemaHasNoTenantOrCollectionFields(t *testin
 	if err != nil {
 		t.Fatalf("ListTools: %v", err)
 	}
-	if len(list.Tools) != 1 {
-		t.Fatalf("tools/list returned %d tools, want exactly 1", len(list.Tools))
-	}
-	tool := list.Tools[0]
-	if tool.Name != toolName {
-		t.Errorf("tool name = %q, want %q", tool.Name, toolName)
+	if len(list.Tools) != 2 {
+		t.Fatalf("tools/list returned %d tools, want exactly 2", len(list.Tools))
 	}
 
-	raw, err := json.Marshal(tool.InputSchema)
-	if err != nil {
-		t.Fatalf("marshaling the input schema: %v", err)
+	byName := map[string]*mcp.Tool{}
+	for i := range list.Tools {
+		byName[list.Tools[i].Name] = list.Tools[i]
 	}
-	var parsed struct {
+	for _, name := range []string{toolName, getNoteToolName} {
+		if _, ok := byName[name]; !ok {
+			t.Fatalf("tools/list is missing %q", name)
+		}
+	}
+
+	searchRaw, err := json.Marshal(byName[toolName].InputSchema)
+	if err != nil {
+		t.Fatalf("marshaling the search schema: %v", err)
+	}
+	var search struct {
 		Properties map[string]json.RawMessage `json:"properties"`
 		Required   []string                   `json:"required"`
 	}
-	if err := json.Unmarshal(raw, &parsed); err != nil {
-		t.Fatalf("parsing the input schema %s: %v", raw, err)
+	if err := json.Unmarshal(searchRaw, &search); err != nil {
+		t.Fatalf("parsing the search schema %s: %v", searchRaw, err)
 	}
 
 	for _, forbidden := range []string{"tenant_id", "collection"} {
-		if _, ok := parsed.Properties[forbidden]; ok {
-			t.Errorf("the published schema has a %q property — the model can name the scope:\n%s",
-				forbidden, raw)
+		if _, ok := search.Properties[forbidden]; ok {
+			t.Errorf("the search schema has a %q property — the model can name the scope:\n%s",
+				forbidden, searchRaw)
 		}
 	}
 	for _, want := range []string{"query", "area", "type", "top_k"} {
-		if _, ok := parsed.Properties[want]; !ok {
-			t.Errorf("the published schema is missing property %q:\n%s", want, raw)
+		if _, ok := search.Properties[want]; !ok {
+			t.Errorf("the search schema is missing property %q:\n%s", want, searchRaw)
 		}
 	}
-	if len(parsed.Properties) != 4 {
-		t.Errorf("the published schema has %d properties, want exactly 4:\n%s", len(parsed.Properties), raw)
+	if len(search.Properties) != 4 {
+		t.Errorf("the search schema has %d properties, want exactly 4:\n%s", len(search.Properties), searchRaw)
 	}
-	if len(parsed.Required) != 1 || parsed.Required[0] != "query" {
-		t.Errorf("required = %v, want exactly [query]", parsed.Required)
+	if len(search.Required) != 1 || search.Required[0] != "query" {
+		t.Errorf("search required = %v, want exactly [query]", search.Required)
+	}
+
+	noteRaw, err := json.Marshal(byName[getNoteToolName].InputSchema)
+	if err != nil {
+		t.Fatalf("marshaling the get_note schema: %v", err)
+	}
+	var note struct {
+		Properties map[string]json.RawMessage `json:"properties"`
+		Required   []string                   `json:"required"`
+	}
+	if err := json.Unmarshal(noteRaw, &note); err != nil {
+		t.Fatalf("parsing the get_note schema %s: %v", noteRaw, err)
+	}
+	for _, forbidden := range []string{"tenant_id", "collection"} {
+		if _, ok := note.Properties[forbidden]; ok {
+			t.Errorf("the get_note schema has a %q property — the model can name the scope:\n%s",
+				forbidden, noteRaw)
+		}
+	}
+	if _, ok := note.Properties["uid"]; !ok {
+		t.Errorf("the get_note schema is missing uid:\n%s", noteRaw)
+	}
+	if len(note.Properties) != 1 {
+		t.Errorf("the get_note schema has %d properties, want exactly 1:\n%s", len(note.Properties), noteRaw)
+	}
+	if len(note.Required) != 1 || note.Required[0] != "uid" {
+		t.Errorf("get_note required = %v, want exactly [uid]", note.Required)
 	}
 }
 
@@ -773,7 +811,16 @@ func TestSearchKnowledge_ToolDescriptionListsCanonicalEnums(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools: %v", err)
 	}
-	desc := list.Tools[0].Description
+	var desc string
+	for _, tool := range list.Tools {
+		if tool.Name == toolName {
+			desc = tool.Description
+			break
+		}
+	}
+	if desc == "" {
+		t.Fatalf("tools/list has no %q", toolName)
+	}
 	for _, want := range append(canonicalAreas(cfg), canonicalNoteTypes()...) {
 		if !strings.Contains(desc, want) {
 			t.Errorf("the tool description omits the canonical value %q: %s", want, desc)
@@ -827,5 +874,116 @@ func TestEmbedProfile_IsNotTheOperatorProfile(t *testing.T) {
 	}
 	if mcp.Timeout >= operator.Timeout {
 		t.Errorf("MCP Timeout %v is not tighter than the operator's %v", mcp.Timeout, operator.Timeout)
+	}
+}
+
+const sampleNoteUID = "0198a7f2-4b31-7c42-9e15-3d8a92c47b6a"
+
+func TestGetNote_UsesConfigScopeAndTheRequestedUID(t *testing.T) {
+	fake := &fakeSearcher{noteResults: []retrieval.Result{{
+		UID:        sampleNoteUID,
+		ChunkIndex: 0,
+		Text:       "the rest of the note",
+		Breadcrumb: "infra > certs",
+		Path:       "infra/certs.md",
+		Score:      0,
+		Untrusted:  true,
+	}}}
+	cs := connect(t, testConfig(), fake)
+
+	res := callNamed(t, cs, getNoteToolName, `{"uid":"`+sampleNoteUID+`"}`)
+	if res.IsError {
+		t.Fatalf("get_note failed: %s", resultText(t, res))
+	}
+	if fake.lookupCalls() != 1 {
+		t.Fatalf("GetByUID called %d time(s), want 1", fake.lookupCalls())
+	}
+	if fake.calls() != 0 {
+		t.Errorf("a lookup ran Search %d time(s)", fake.calls())
+	}
+	q := fake.lastLookup()
+	if q.TenantID != "tenant-a" || q.Collection != "interno" {
+		t.Errorf("lookup scope = {tenant %q, collection %q}, want {tenant-a, interno}", q.TenantID, q.Collection)
+	}
+	if q.UID != sampleNoteUID {
+		t.Errorf("lookup uid = %q, want %q", q.UID, sampleNoteUID)
+	}
+	if q.IncludeArchived || q.IncludePrivate {
+		t.Errorf("a lookup lifted a privileged guard: archived=%v private=%v", q.IncludeArchived, q.IncludePrivate)
+	}
+	text := resultText(t, res)
+	if !strings.Contains(text, "the rest of the note") {
+		t.Errorf("the response dropped the chunk text:\n%s", text)
+	}
+	if !strings.Contains(text, sampleNoteUID) {
+		t.Errorf("the response dropped the uid:\n%s", text)
+	}
+}
+
+func TestGetNote_ExtraTenantAndCollectionInput_Refused(t *testing.T) {
+	for name, args := range map[string]string{
+		"both":       `{"uid":"` + sampleNoteUID + `","tenant_id":"clientes-x","collection":"base_paga"}`,
+		"tenant_id":  `{"uid":"` + sampleNoteUID + `","tenant_id":"clientes-x"}`,
+		"collection": `{"uid":"` + sampleNoteUID + `","collection":"base_paga"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			fake := &fakeSearcher{noteResults: sampleResults()}
+			cs := connect(t, testConfig(), fake)
+			res := callNamed(t, cs, getNoteToolName, args)
+			if !res.IsError {
+				t.Errorf("the extra scope keys were accepted: %s", resultText(t, res))
+			}
+			if fake.lookupCalls() != 0 {
+				t.Errorf("GetByUID ran %d time(s) on a refused call", fake.lookupCalls())
+			}
+			if strings.Contains(resultText(t, res), "clientes-x") {
+				t.Errorf("the injected tenant is echoed back: %s", resultText(t, res))
+			}
+		})
+	}
+}
+
+func TestGetNote_Empty_IsNotASearchEmpty(t *testing.T) {
+	cs := connect(t, testConfig(), &fakeSearcher{noteResults: []retrieval.Result{}})
+	res := callNamed(t, cs, getNoteToolName, `{"uid":"`+sampleNoteUID+`"}`)
+	if res.IsError {
+		t.Fatalf("an empty lookup failed: %s", resultText(t, res))
+	}
+	text := resultText(t, res)
+	if text != noNote {
+		t.Errorf("empty get_note = %q, want %q", text, noNote)
+	}
+	if strings.Contains(text, noResults) {
+		t.Errorf("a missing note reused the search-empty sentence:\n%s", text)
+	}
+}
+
+func TestGetNote_HungBackend_TimesOutInsteadOfHanging(t *testing.T) {
+	restore := searchDeadline
+	searchDeadline = 200 * time.Millisecond
+	t.Cleanup(func() { searchDeadline = restore })
+
+	logged := captureLogs(t)
+	cs := connect(t, testConfig(), &fakeSearcher{noteHangs: true})
+
+	res := callNamed(t, cs, getNoteToolName, `{"uid":"`+sampleNoteUID+`"}`)
+	if !res.IsError {
+		t.Fatalf("a lookup that never completed produced a success result: %s", resultText(t, res))
+	}
+	if !strings.Contains(resultText(t, res), unavailableHeader) {
+		t.Errorf("a backend that never answered was not reported as unavailable:\n%s", resultText(t, res))
+	}
+	if !strings.Contains(logged.String(), `"unavailable":"qdrant"`) {
+		t.Errorf("the log record does not name Qdrant:\n%s", logged.String())
+	}
+}
+
+func TestFormatNoteResults_Empty_ReturnsPlainMessage(t *testing.T) {
+	got, err := formatNoteResults(nil)
+	if err != nil {
+		t.Fatalf("formatNoteResults(nil): %v", err)
+	}
+	if got != noNote {
+		t.Errorf("formatNoteResults(nil) = %q, want %q", got, noNote)
 	}
 }

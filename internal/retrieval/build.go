@@ -38,6 +38,7 @@ const (
 	fieldText       = "text"
 	fieldHeadings   = "headings"
 	fieldPath       = "path"
+	fieldTitle      = "title"
 )
 
 // Condition is one payload field matching one keyword. Every filter this package builds is a
@@ -105,7 +106,7 @@ type SearchRequest struct {
 // slice for the same reason schema.Manifest() is: a package-level slice var is writable from
 // anywhere in the module.
 func resultPayloadFields() []string {
-	return []string{fieldUID, fieldChunkIndex, fieldText, fieldHeadings, fieldPath}
+	return []string{fieldUID, fieldChunkIndex, fieldText, fieldHeadings, fieldPath, fieldTitle}
 }
 
 // calibratedPrefetchLimit is the per-leg limit for a Query that Search has already validated.

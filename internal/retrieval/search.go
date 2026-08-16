@@ -16,14 +16,26 @@ import (
 // fusion mode (S07 open question 1).
 const DefaultPrefetchMultiplier = 4
 
+// DefaultMaxChunksPerUID is how many chunks of the same note a search will keep. Two leaves a
+// neighbouring section in the window and still makes room for other notes; 0 disables the cap.
+const DefaultMaxChunksPerUID = 2
+
 // Config is what a Searcher needs beyond its two dependencies.
 type Config struct {
 	PrefetchMultiplier int
+	// MaxChunksPerUID caps how many chunks of one note survive the fused ranking. 0 leaves
+	// Qdrant's order untouched. Search over-fetches by this factor so the cap can still fill TopK.
+	MaxChunksPerUID int
 }
 
 // DefaultConfig is the provisional calibration above. It is a function rather than a var so no
 // caller can rewrite the default for the whole process.
-func DefaultConfig() Config { return Config{PrefetchMultiplier: DefaultPrefetchMultiplier} }
+func DefaultConfig() Config {
+	return Config{
+		PrefetchMultiplier: DefaultPrefetchMultiplier,
+		MaxChunksPerUID:    DefaultMaxChunksPerUID,
+	}
+}
 
 // queryExecutor executes an already-built request. It is deliberately the narrowest possible
 // dependency: it cannot be handed a tenant, a filter or a collection separately from the request
@@ -64,12 +76,55 @@ func (s *Searcher) Search(ctx context.Context, q Query) ([]Result, error) {
 		return nil, fmt.Errorf("retrieval: embedding the query: %w", err)
 	}
 
-	req := buildQueryRequest(q, emb, calibratedPrefetchLimit(q, s.cfg.PrefetchMultiplier))
+	wide := q
+	wide.TopK = fetchWindow(q.TopK, s.cfg.MaxChunksPerUID)
+	req := buildQueryRequest(wide, emb, calibratedPrefetchLimit(wide, s.cfg.PrefetchMultiplier))
 	points, err := s.executor.ExecuteQuery(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("retrieval: executing the query on %s: %w", q.Collection, err)
 	}
-	return formatResults(points)
+	results, err := formatResults(points)
+	if err != nil {
+		return nil, err
+	}
+	return capPerUID(results, q.TopK, s.cfg.MaxChunksPerUID), nil
+}
+
+// fetchWindow is how many fused hits to ask Qdrant for. The cap needs a wider pool than TopK or
+// five chunks of one note fill the answer and the drop has nothing to replace them with.
+func fetchWindow(topK, maxPerUID int) int {
+	if maxPerUID <= 0 {
+		return topK
+	}
+	return topK * maxPerUID
+}
+
+// capPerUID keeps the ranked order and drops a hit once its note has already contributed
+// maxPerUID chunks. maxPerUID <= 0 is "do not diversify": only the TopK window is applied.
+func capPerUID(results []Result, topK, maxPerUID int) []Result {
+	if topK <= 0 {
+		return nil
+	}
+	if maxPerUID <= 0 {
+		if len(results) > topK {
+			return results[:topK]
+		}
+		return results
+	}
+
+	kept := make([]Result, 0, topK)
+	seen := make(map[string]int, topK)
+	for _, r := range results {
+		if seen[r.UID] >= maxPerUID {
+			continue
+		}
+		seen[r.UID]++
+		kept = append(kept, r)
+		if len(kept) == topK {
+			break
+		}
+	}
+	return kept
 }
 
 // FilterMatchesAnything reports whether the filter this Query builds matches at least one point.

@@ -3,6 +3,7 @@ package eval
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -171,6 +172,43 @@ func TestGoldenGate_MeasuresAgainstTheThreshold(t *testing.T) {
 	}
 	if !above.Passed || *above.Score != 1 {
 		t.Errorf("recall 1.0 did not pass a 0.8 threshold: %+v", above)
+	}
+}
+
+func TestGoldenGate_CompareModes_WritesTheDecision(t *testing.T) {
+	path, _ := goldenGateFixture(t)
+	out := filepath.Join(t.TempDir(), "hybrid-vs-dense.md")
+	s := &modeSearcher{byMode: map[retrieval.SearchMode][]retrieval.Result{
+		retrieval.SearchModeHybrid:    {result(uidA, 0, 0.9)},
+		retrieval.SearchModeDenseOnly: {result(uidA, 0, 0.9), result(uidB, 0, 0.8)},
+	}}
+
+	got, err := GoldenGate(t.Context(), Options{
+		Collection:    "interno",
+		TenantID:      "tenant-a",
+		Searcher:      s,
+		GoldenSetPath: path,
+		CompareModes:  true,
+		CompareOut:    out,
+	})
+	if err != nil {
+		t.Fatalf("GoldenGate: %v", err)
+	}
+	if got.Mode != "golden-compare" {
+		t.Errorf("Mode = %q, want golden-compare", got.Mode)
+	}
+	if !got.Passed {
+		t.Error("a complete comparison did not pass")
+	}
+	if !strings.Contains(got.Summary, OutcomeDenseWins) {
+		t.Errorf("summary does not state the decision:\n%s", got.Summary)
+	}
+	body, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("reading the decision document: %v", err)
+	}
+	if !strings.Contains(string(body), OutcomeDenseWins) {
+		t.Errorf("the document does not state the decision:\n%s", body)
 	}
 }
 

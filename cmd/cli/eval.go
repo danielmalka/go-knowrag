@@ -39,8 +39,8 @@ const corpusCollection = "corpus (no index)"
 // only less code: MarkFlagsOneRequired puts the requirement in the generated help, so `eval --help`
 // says a mode is mandatory instead of the operator finding out by running it.
 func newEvalCmd(cfg *config.Config, modes evalModes, connect clicmd.Connect) *cobra.Command {
-	var golden, isolation, jsonOut bool
-	var goldenSetPath, corpusPath string
+	var golden, isolation, jsonOut, compareModes bool
+	var goldenSetPath, corpusPath, compareOut string
 	var minRecall float64
 
 	cmd := &cobra.Command{
@@ -86,6 +86,8 @@ func newEvalCmd(cfg *config.Config, modes evalModes, connect clicmd.Connect) *co
 				opts.Searcher = searcher
 				opts.GoldenSetPath = goldenSetPath
 				opts.MinRecall = minRecall
+				opts.CompareModes = compareModes
+				opts.CompareOut = compareOut
 				if corpusPath != "" {
 					opts.Collection = corpusCollection
 				}
@@ -133,6 +135,10 @@ func newEvalCmd(cfg *config.Config, modes evalModes, connect clicmd.Connect) *co
 			"and no GPU (--golden only)")
 	cmd.Flags().Float64Var(&minRecall, "min-recall", 0,
 		"recall the golden gate must reach to pass; 0 records the number without gating on it")
+	cmd.Flags().BoolVar(&compareModes, "compare-modes", false,
+		"run hybrid and dense-only over the same questions and write the decision (--golden only)")
+	cmd.Flags().StringVar(&compareOut, "compare-out", "docs/eval/hybrid-vs-dense.md",
+		"path for the hybrid-vs-dense decision document (--compare-modes only)")
 	cmd.MarkFlagsMutuallyExclusive("golden", "isolation")
 	cmd.MarkFlagsOneRequired("golden", "isolation")
 

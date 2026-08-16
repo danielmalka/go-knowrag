@@ -12,6 +12,10 @@ import (
 // document contributed a character of it.
 const noResults = "No matching chunks were found."
 
+// noNote is what get_note returns when the uid matches nothing visible. It is not framed as
+// untrusted content because no document contributed a character of it.
+const noNote = "No visible chunks for that uid. The note may be archived, private, or not indexed."
+
 // deadAreaFilter replaces noResults when the empty answer was not about the subject at all: the
 // search came back with nothing and a probe of the `area` it carried — that facet alone, the others
 // cleared by explainEmptyArea — then showed the area matches nothing visible in the index, so every
@@ -64,6 +68,9 @@ func formatResults(results []retrieval.Result) (string, error) {
 
 		var b strings.Builder
 		fmt.Fprintf(&b, "path: %s\n", security.Sanitize(r.Path))
+		if r.Title != "" {
+			fmt.Fprintf(&b, "title: %s\n", security.Sanitize(r.Title))
+		}
 		fmt.Fprintf(&b, "breadcrumb: %s\n", security.Sanitize(r.Breadcrumb))
 		fmt.Fprintf(&b, "uid: %s | chunk_index: %v | score: %.4f\n\n",
 			security.Sanitize(r.UID), r.ChunkIndex, r.Score)
@@ -72,4 +79,13 @@ func formatResults(results []retrieval.Result) (string, error) {
 		blocks = append(blocks, security.Frame(b.String()))
 	}
 	return strings.Join(blocks, "\n\n"), nil
+}
+
+// formatNoteResults is formatResults for a uid lookup: same envelope, a different empty sentence
+// so a missing note is not read as "the knowledge base has nothing on this subject".
+func formatNoteResults(results []retrieval.Result) (string, error) {
+	if len(results) == 0 {
+		return noNote, nil
+	}
+	return formatResults(results)
 }

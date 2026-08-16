@@ -115,7 +115,8 @@ func (r Report) Summary() string {
 	b.WriteString("\nUntouched by every case above, so a PASS says nothing about them either: " +
 		"`stats`, " +
 		"which counts every tenant when none is named and does so by design (internal/store/points.go), " +
-		"pagination, since every case here queries at offset 0, and Searcher.FilterMatchesAnything " +
-		"(internal/retrieval/search.go), which no case calls.\n")
+		"pagination, since every case here queries at offset 0, Searcher.FilterMatchesAnything " +
+		"(internal/retrieval/search.go), which no case calls, and Searcher.GetByUID " +
+		"(internal/retrieval/get.go), which is a filtered read of one note and is also not called here.\n")
 	return b.String()
 }

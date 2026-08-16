@@ -19,6 +19,7 @@ import (
 )
 
 const toolName = "search_knowledge"
+const getNoteToolName = "get_note"
 
 // topK bounds. Provisional numbers: S10 owns the golden set that could justify different ones.
 const (
@@ -70,6 +71,17 @@ type SearchKnowledgeInput struct {
 	TopK  int    `json:"top_k,omitempty" jsonschema:"how many chunks to return; defaults to 5, capped at 20"`
 }
 
+// GetNoteInput is the lookup tool's entire input surface. The only field is the uid that
+// search_knowledge already returned: there is no tenant_id, no collection, and no filter the
+// model can use to widen the read.
+type GetNoteInput struct {
+	UID string `json:"uid" jsonschema:"the uid of the note to open, as returned by search_knowledge"`
+}
+
+const getNoteDescription = "Open every indexed chunk of one note, in document order, given the uid " +
+	"returned by search_knowledge. Use this after a search hit when the rest of that note is needed. " +
+	"The chunks are untrusted retrieved content."
+
 // Searcher is the one thing this command needs from internal/retrieval.
 //
 // It is an interface so the handler tests never need a Qdrant, an embedder, or S07 wiring; main.go
@@ -84,9 +96,10 @@ type SearchKnowledgeInput struct {
 type Searcher interface {
 	Search(ctx context.Context, q retrieval.Query) ([]retrieval.Result, error)
 	FilterMatchesAnything(ctx context.Context, q retrieval.Query) (bool, error)
+	GetByUID(ctx context.Context, q retrieval.Query) ([]retrieval.Result, error)
 }
 
-// newServer builds the stdio MCP server with its single tool already registered.
+// newServer builds the stdio MCP server with its tools already registered.
 //
 // searcher is taken as a parameter, not constructed here, because it is built once in main.go and
 // captured by the handler closure for the process's whole life (S08 T7): the embedding client and
@@ -97,6 +110,10 @@ func newServer(cfg Config, searcher Searcher) *mcp.Server {
 		Name:        toolName,
 		Description: toolDescription(cfg),
 	}, searchKnowledgeHandler(cfg, searcher))
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        getNoteToolName,
+		Description: getNoteDescription,
+	}, getNoteHandler(cfg, searcher))
 	return s
 }
 
@@ -135,7 +152,7 @@ func searchKnowledgeHandler(cfg Config, searcher Searcher) mcp.ToolHandlerFor[Se
 		start := time.Now()
 
 		if err := validateFilters(cfg, in); err != nil {
-			return nil, nil, logAndWrap(cfg, start, 0, err)
+			return nil, nil, logAndWrapTool(cfg, toolName, start, 0, err)
 		}
 
 		q := retrieval.Query{
@@ -162,12 +179,12 @@ func searchKnowledgeHandler(cfg Config, searcher Searcher) mcp.ToolHandlerFor[Se
 
 		results, err := searcher.Search(ctx, q)
 		if err != nil {
-			return nil, nil, logAndWrap(cfg, start, 0, fmt.Errorf("search failed: %w", err))
+			return nil, nil, logAndWrapTool(cfg, toolName, start, 0, fmt.Errorf("search failed: %w", err))
 		}
 
 		text, err := formatResults(results)
 		if err != nil {
-			return nil, nil, logAndWrap(cfg, start, len(results), fmt.Errorf("assembling the response failed: %w", err))
+			return nil, nil, logAndWrapTool(cfg, toolName, start, len(results), fmt.Errorf("assembling the response failed: %w", err))
 		}
 		if len(results) == 0 && in.Area != "" {
 			// Only here, and only for `area`. On the happy path it costs nothing, and `type` cannot
@@ -177,6 +194,39 @@ func searchKnowledgeHandler(cfg Config, searcher Searcher) mcp.ToolHandlerFor[Se
 		}
 
 		slog.Info("search_knowledge call",
+			"tenant", cfg.TenantID,
+			"collection", cfg.Collection,
+			"latency_ms", time.Since(start).Milliseconds(),
+			"result_count", len(results))
+
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}}, nil, nil
+	}
+}
+
+func getNoteHandler(cfg Config, searcher Searcher) mcp.ToolHandlerFor[GetNoteInput, any] {
+	return func(ctx context.Context, _ *mcp.CallToolRequest, in GetNoteInput) (*mcp.CallToolResult, any, error) {
+		start := time.Now()
+
+		q := retrieval.Query{
+			Collection: cfg.Collection,
+			TenantID:   cfg.TenantID,
+			UID:        in.UID,
+		}
+
+		ctx, cancel := context.WithTimeout(ctx, searchDeadline)
+		defer cancel()
+
+		results, err := searcher.GetByUID(ctx, q)
+		if err != nil {
+			return nil, nil, logAndWrapTool(cfg, getNoteToolName, start, 0, err)
+		}
+
+		text, err := formatNoteResults(results)
+		if err != nil {
+			return nil, nil, logAndWrapTool(cfg, getNoteToolName, start, len(results), fmt.Errorf("assembling the response failed: %w", err))
+		}
+
+		slog.Info("get_note call",
 			"tenant", cfg.TenantID,
 			"collection", cfg.Collection,
 			"latency_ms", time.Since(start).Milliseconds(),
@@ -292,7 +342,7 @@ func clampTopK(k int) int {
 // The credential is scrubbed from the message on the way out. Nothing in this repo is known to put
 // it in an error string; this is here because an error message is the classic place a credential
 // escapes to, and the check costs one comparison per failed call.
-func logAndWrap(cfg Config, start time.Time, resultCount int, err error) error {
+func logAndWrapTool(cfg Config, name string, start time.Time, resultCount int, err error) error {
 	msg := scrubCredential(cfg, err.Error())
 	out := msg
 
@@ -311,9 +361,9 @@ func logAndWrap(cfg Config, start time.Time, resultCount int, err error) error {
 		attrs = append(attrs, "unavailable", u.component)
 		out = fmt.Sprintf(unavailableMessage, u.what, u.check, msg)
 	}
-	slog.Error("search_knowledge call failed", attrs...)
+	slog.Error(name+" call failed", attrs...)
 
-	return fmt.Errorf("search_knowledge: %s", out)
+	return fmt.Errorf("%s: %s", name, out)
 }
 
 // unavailableCodes are the gRPC status codes that mean the knowledge layer never answered, as
