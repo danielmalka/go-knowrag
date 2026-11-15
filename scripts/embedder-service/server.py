@@ -15,6 +15,7 @@ call that needs it and released after the idle time. See `model_host.py`.
 
 import json
 import os
+import socket
 import sys
 from collections.abc import Sequence
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -25,6 +26,15 @@ from model_host import IdleUnloader, ModelHost
 from settings import EXIT_UNSUPPORTED, MODEL_ID, REVISION, Settings, UnsupportedSetting, load_settings
 
 POST_ROUTES = ("/embed", "/tokenize", "/load")
+
+
+class LoopbackServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer that binds IPv6 loopback when asked for `::1` (the stdlib default is IPv4)."""
+
+    def __init__(self, address: tuple[str, int], handler: type[BaseHTTPRequestHandler]) -> None:
+        if ":" in address[0]:
+            self.address_family = socket.AF_INET6
+        super().__init__(address, handler)
 
 
 def make_handler(app: EmbedderApp) -> type[BaseHTTPRequestHandler]:
@@ -106,7 +116,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         raise SystemExit(EXIT_UNSUPPORTED) from None
 
     app, host = build_app(settings)
-    httpd = ThreadingHTTPServer((settings.host, settings.port), make_handler(app))
+    httpd = LoopbackServer((settings.host, settings.port), make_handler(app))
     if settings.idle_unload_seconds > 0:
         IdleUnloader(host, settings.idle_unload_seconds).start()
     print(

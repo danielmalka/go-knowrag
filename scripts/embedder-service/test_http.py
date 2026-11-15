@@ -5,6 +5,7 @@ codes and JSON bodies the Go client sees, and exercises the request pipeline pro
 """
 
 import json
+import socket
 import sys
 import threading
 import types
@@ -148,3 +149,22 @@ def test_main_refuses_to_start_without_a_gpu_instead_of_falling_back(monkeypatch
         server.main([])
     assert e.value.code == EXIT_UNSUPPORTED
     assert "no CUDA device" in capsys.readouterr().err
+
+
+def test_main_refuses_to_bind_a_network_address_before_touching_anything(capsys):
+    with pytest.raises(SystemExit) as e:
+        server.main(["--host", "0.0.0.0"])
+    assert e.value.code == EXIT_UNSUPPORTED
+    err = capsys.readouterr().err
+    assert "0.0.0.0" in err and "no authentication" in err
+
+
+def test_ipv6_loopback_binds_an_ipv6_socket():
+    try:
+        httpd = server.LoopbackServer(("::1", 0), server.make_handler(Wiring().app))
+    except OSError:
+        pytest.skip("no IPv6 loopback on this machine")
+    try:
+        assert httpd.address_family == socket.AF_INET6
+    finally:
+        httpd.server_close()

@@ -14,6 +14,7 @@ from settings import (
     UnsupportedSetting,
     load_settings,
     parse_device,
+    parse_host,
     parse_precision,
 )
 
@@ -111,3 +112,29 @@ def test_out_of_range_numbers_are_refused_with_the_value(flag, value):
 
 def test_zero_idle_unload_means_never_and_is_accepted():
     assert load_settings(["--idle-unload", "0"], {}).idle_unload_seconds == 0.0
+
+
+# --- loopback only ------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "::1", "localhost"])
+def test_loopback_hosts_are_accepted_from_the_flag_and_the_environment(host):
+    assert load_settings(["--host", host], {}).host == host
+    assert load_settings([], {"KNOWRAG_EMBEDDER_HOST": host}).host == host
+
+
+@pytest.mark.parametrize("host", [
+    "0.0.0.0", "::", "", "192.168.1.10", "10.0.0.5", "127.0.0.2", "example.com", "127.0.0.1.evil.com",
+    "localhost.localdomain",
+])
+def test_any_non_loopback_host_is_refused_with_the_value_and_the_exit_status(host):
+    with pytest.raises(UnsupportedSetting, match="no authentication") as e:
+        parse_host(host)
+    assert e.value.code == EXIT_UNSUPPORTED and repr(host) in e.value.message
+
+
+def test_a_non_loopback_host_from_the_environment_or_the_flag_is_refused():
+    with pytest.raises(UnsupportedSetting):
+        load_settings([], {"KNOWRAG_EMBEDDER_HOST": "0.0.0.0"})
+    with pytest.raises(UnsupportedSetting):
+        load_settings(["--host", "0.0.0.0"], {})

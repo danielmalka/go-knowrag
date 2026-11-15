@@ -97,6 +97,23 @@ def parse_device(value: str) -> str:
     return value
 
 
+# The service has no authentication of any kind, and `/load`, `/embed` and `/tokenize` hand arbitrary
+# GPU work to whoever can reach them. That is acceptable only because it listens on loopback, so
+# loopback is enforced here rather than left to a default: there is no opt-in to a network address in
+# this service. Exposing it would mean adding authentication first, as its own decision.
+LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost")
+
+
+def parse_host(value: str) -> str:
+    host = value.strip()
+    if host not in LOOPBACK_HOSTS:
+        raise UnsupportedSetting(
+            f"host {value!r} refused: this service has no authentication, so it listens on loopback "
+            f"only ({', '.join(LOOPBACK_HOSTS)}); it must not be reachable from the network"
+        )
+    return host
+
+
 def _positive_int(name: str, raw: str, ceiling: int | None = None) -> int:
     try:
         value = int(raw)
@@ -120,7 +137,7 @@ def _non_negative_float(name: str, raw: str) -> float:
 
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="go-knowrag embedding service (EmbeddingGemma 2)")
-    ap.add_argument("--host", help="bind address (default 127.0.0.1)")
+    ap.add_argument("--host", help="loopback address: 127.0.0.1 (default), ::1 or localhost; nothing else")
     ap.add_argument("--port", help="TCP port (default 7999)")
     ap.add_argument("--device", help="CUDA device (default cuda:0); there is no CPU option")
     ap.add_argument("--precision", help="bf16 (default) or fp32; fp16 is refused")
@@ -138,7 +155,7 @@ def load_settings(argv: Sequence[str], environ: Mapping[str, str]) -> Settings:
         return flag if flag is not None else environ.get(env_name, default)
 
     return Settings(
-        host=pick(args.host, "KNOWRAG_EMBEDDER_HOST", "127.0.0.1"),
+        host=parse_host(pick(args.host, "KNOWRAG_EMBEDDER_HOST", "127.0.0.1")),
         port=_positive_int("port", pick(args.port, "KNOWRAG_EMBEDDER_PORT", "7999"), 65535),
         device=parse_device(pick(args.device, "KNOWRAG_EMBEDDER_DEVICE", "cuda:0")),
         precision=parse_precision(pick(args.precision, "KNOWRAG_EMBEDDER_PRECISION", "bf16")),

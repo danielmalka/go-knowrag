@@ -93,6 +93,9 @@ Substitui a de 2026-08-16 ("não é 24 h", janela 07:00–23:00) e a do item 10 
   pausa paga a carga, então o timeout do cliente MCP tem de ficar acima dela.
 - **Ingestão em horário fixo** (`knowrag-ingest.timer`), sem janela de ligar/desligar o embedder e sem
   `embedder-up`/`embedder-down`. O serviço roda uma chamada de cada vez (a busca passa à frente dos lotes).
+- **Só loopback, por desenho.** O serviço não tem autenticação; por isso `--host`/`KNOWRAG_EMBEDDER_HOST` só
+  aceita `127.0.0.1`, `::1` ou `localhost`, e qualquer outro valor encerra o processo com status 78. Não há
+  opt-in para rede: expor o serviço exigiria antes uma autenticação, como decisão própria.
 - **Dependências Python com versões exatas** em `scripts/embedder-service/requirements.txt`.
 - Detalhes, números medidos e operação: `scripts/embedder-service/README.md`.
 
