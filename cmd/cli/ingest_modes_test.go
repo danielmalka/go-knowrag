@@ -669,7 +669,7 @@ func TestPruneOrphans_EmptyScannedVault_IsRefusedAndNothingIsDeleted(t *testing.
 	emptyRoot := t.TempDir() // exists, holds no files: every note looks deleted
 
 	err := pruneOrphans(t.Context(), store, defaultTenantID,
-		map[string]string{"dono": emptyRoot}, map[string]int{"dono": 0}, ingestOptions{}, &report)
+		map[string]string{"dono": emptyRoot}, &pruneScope{NoteCounts: map[string]int{"dono": 0}}, ingestOptions{}, &report)
 	if err == nil || !strings.Contains(err.Error(), `"dono"`) || !strings.Contains(err.Error(), "found no notes") {
 		t.Fatalf("pruneOrphans over an empty scanned vault = %v, want a refusal naming the vault", err)
 	}
@@ -693,7 +693,7 @@ func TestPruneOrphans_VaultWithNotes_StillPrunes(t *testing.T) {
 		}},
 	}
 	err := pruneOrphans(t.Context(), store, defaultTenantID,
-		map[string]string{"dono": t.TempDir()}, map[string]int{"dono": 12, "outro": 0}, ingestOptions{}, &report)
+		map[string]string{"dono": t.TempDir()}, &pruneScope{NoteCounts: map[string]int{"dono": 12, "outro": 0}, Ceiling: defaultCeiling()}, ingestOptions{}, &report)
 	if err != nil || report.PointsPruned != 3 {
 		t.Fatalf("pruneOrphans = %v, pruned %d; a vault that returned notes must still prune", err, report.PointsPruned)
 	}

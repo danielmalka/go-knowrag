@@ -43,7 +43,7 @@ func runScheduledIngest(t *testing.T, ensureBody, fakeKnowrag string) scheduledR
 	bin := write("knowrag", `echo "$@" > "`+argsFile+`"`+"\n"+fakeKnowrag)
 
 	cmd := exec.Command("sh", scheduledIngestScript) // #nosec G204 -- a fixed script path and test doubles built just above
-	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "KNOWRAG_BIN=" + bin, "KNOWRAG_ENSURE=" + ensure}
+	cmd.Env = append(os.Environ(), "KNOWRAG_BIN="+bin, "KNOWRAG_ENSURE="+ensure)
 	raw, err := cmd.CombinedOutput()
 	run := scheduledRun{out: string(raw)}
 	if err != nil {
@@ -114,5 +114,23 @@ func TestScheduledIngest_EnsureFailureNeverReachesTheIngest(t *testing.T) {
 	}
 	if r.called {
 		t.Errorf("knowrag ran (%q) although the embedder was not ready", r.args)
+	}
+}
+
+// The two limits on the unattended prune are the CLI's; the wrapper only lets the operator move them from
+// the same env file as the rest, and passes nothing when they are unset.
+func TestScheduledIngest_CeilingKnobsArePassedOnlyWhenSet(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the wrapper is a POSIX shell script")
+	}
+	r := runScheduledIngest(t, "exit 0", `echo "orphans: none"`)
+	if strings.Contains(r.args, "--prune-max") {
+		t.Errorf("an unset knob reached the CLI: %q", r.args)
+	}
+	t.Setenv("KNOWRAG_PRUNE_MAX_NOTES", "10")
+	t.Setenv("KNOWRAG_PRUNE_MAX_PERCENT", "50")
+	r = runScheduledIngest(t, "exit 0", `echo "orphans: none"`)
+	if want := "ingest --vault both --prune --yes --prune-max-notes 10 --prune-max-percent 50"; r.args != want {
+		t.Errorf("args = %q, want %q", r.args, want)
 	}
 }

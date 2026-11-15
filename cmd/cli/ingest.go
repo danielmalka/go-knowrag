@@ -80,6 +80,7 @@ func newIngestCmd(cfg *config.Config) *cobra.Command {
 		// The window is set at run time from the configured model profile (runIngest): the command
 		// tree is built before configuration is read, so it cannot know the profile yet.
 		chunkCfg: chunk.Config{FloorTokens: defaultFloorTokens, CeilingTokens: defaultCeilingTokens},
+		ceiling:  defaultCeiling(),
 	}
 
 	cmd := &cobra.Command{
@@ -106,6 +107,9 @@ func newIngestCmd(cfg *config.Config) *cobra.Command {
 			// The prompt goes to stderr for the same reason the usage block is silenced.
 			if err := validateModes(opts); err != nil {
 				return err
+			}
+			if err := opts.ceiling.validate(); err != nil {
+				return fmt.Errorf("%w: %v", errUsage, err)
 			}
 			if err := confirmPrune(os.Stdin, cmd.ErrOrStderr(), opts); err != nil {
 				return err
@@ -138,6 +142,7 @@ func newIngestCmd(cfg *config.Config) *cobra.Command {
 	cmd.Flags().BoolVar(&opts.yes, "yes", false,
 		"authorize --prune without being asked. Required when stdin is not a terminal, where there "+
 			"is nobody to answer the prompt")
+	addPruneGuardFlags(cmd, &opts)
 	cmd.Flags().DurationVar(&opts.gracePeriod, "grace-period", opts.gracePeriod,
 		"how long a note already being written may finish after the first Ctrl-C; a second Ctrl-C "+
 			"drops it immediately")
@@ -163,9 +168,13 @@ type ingestOptions struct {
 	gracePeriod time.Duration
 	prune       bool
 	yes         bool
-	json        bool
-	tenantID    string
-	chunkCfg    chunk.Config
+	ceiling     ceilingPolicy
+	// acceptVaultRoot records the current vault roots as the right ones even if they differ from the
+	// last ingested ones (see vault_identity.go).
+	acceptVaultRoot bool
+	json            bool
+	tenantID        string
+	chunkCfg        chunk.Config
 }
 
 // selectVaults resolves the --vault flag against the configured roster.
@@ -413,15 +422,8 @@ func ingestScans(
 	}
 	splitStillOnDisk(roots, &report)
 
-	noteCounts := make(map[string]int, len(scans))
-	for _, s := range scans {
-		noteCounts[s.Vault] = len(s.Notes)
-	}
-
-	var pruneErr error
-	if opts.prune {
-		pruneErr = pruneOrphans(ctx, points, opts.tenantID, roots, noteCounts, opts, &report)
-	}
+	step := newPruneScope(ctx, cfg, scans, opts, errOut)
+	step.run(ctx, points, roots, opts, &report)
 
 	// Printed before the failure checks because a run with failures still did whatever it did to the
 	// notes it got through, and the operator needs to see that half. A prune that died partway
@@ -430,7 +432,8 @@ func ingestScans(
 	if err := printReport(out, errOut, opts, report, tokens); err != nil {
 		return err
 	}
-	return runOutcome(report, pruneErr)
+	step.record(opts, report, errOut)
+	return runOutcome(report, step.err)
 }
 
 // runOutcome turns what happened into the error the process exits on, and the order is the whole

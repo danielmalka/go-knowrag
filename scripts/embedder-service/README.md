@@ -204,7 +204,13 @@ still asks. The wrapper prints one log line with the exit status and the report'
 note(s) deleted from the vault, 7 point(s), all removed`. The CLI refuses to prune, and exits non-zero, when
 it could not read the index, when the run was interrupted, for a note whose file is still on disk, and
 for a vault whose scan found **no notes at all** (an unmounted drive looks exactly like a vault whose every
-note was deleted).
+note was deleted), when it would delete more than the **ceiling** (the smaller of 20 notes and 5% of the
+vault's indexed notes, at least 3; `KNOWRAG_PRUNE_MAX_NOTES` / `KNOWRAG_PRUNE_MAX_PERCENT` move it), and when the
+vault **root is not the one the last successful run used** (canonical path plus the git root commit, kept in
+`vault-roots.json` under `KNOWRAG_STATE_DIR` or `$XDG_STATE_HOME/knowrag`). A refusal exits non-zero, deletes
+nothing and puts its reason in the `scheduled-ingest:` log line. See the README's "O que fazer quando a poda é
+recusada": `knowrag ingest --dry-run`, then a manual `knowrag ingest --prune` (it asks), or
+`knowrag ingest --accept-vault-root` after a deliberate move.
 
 ## Confirming it is really on the GPU
 

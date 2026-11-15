@@ -350,6 +350,17 @@ Valem para quando o projeto for religado; o projeto continua desligado e nada di
    nova: o CLI **recusa podar um vault cuja varredura não achou nenhuma nota** (`refuseEmptyVault`), porque um
    disco desmontado se parece exatamente com um vault inteiro apagado e o `splitStillOnDisk` não ajuda aí;
    apagar de verdade todo um vault é manual.
+   **Duas travas na poda sem ninguém olhando (`--yes`)**, porque a salvaguarda do vault vazio não pega um
+   vault que existe e tem notas: (a) **teto por rodada**, por vault: recusa a poda inteira se os órfãos passam
+   do menor entre 20 notas e 5% das notas indexadas do vault (piso de 3; `--prune-max-notes`,
+   `--prune-max-percent`, e `KNOWRAG_PRUNE_MAX_*` no wrapper) — 20 bounda um vault grande, 5% um pequeno;
+   (b) **identidade da raiz**: o caminho canônico e o hash do commit raiz do git de cada vault ficam num arquivo
+   de estado fora do vault (`vault-roots.json` em `KNOWRAG_STATE_DIR`/`$XDG_STATE_HOME/knowrag`), gravado ao fim
+   de toda ingestão sem falhas; raiz diferente (outro repositório; a mesma em outra pasta conta como a mesma)
+   ou sem registro recusa a poda. A recusa sai com código ≠ 0, apaga nada e põe o motivo no relatório e na
+   linha `scheduled-ingest:`. O jeito de passar é humano: `knowrag ingest --dry-run`, depois `knowrag ingest
+   --prune` num terminal (mostra os motivos e pergunta; `y` poda e aceita a raiz) ou, para um vault movido de
+   propósito, `knowrag ingest --accept-vault-root`.
 5. **No vault do dono só `wiki/` é indexada.** `raw/` tem uma página derivada em `wiki/` para cada nota, e
    indexar as duas daria duas respostas. Não existe "incluir só": `AREAS=wiki` e toda outra pasta de 1º nível
    em `EXCLUDE_FOLDERS` (mais os `.md` soltos da raiz em `EXCLUDE_ROOT_FILES`); `MCP_AREAS=wiki`. Pasta de 1º

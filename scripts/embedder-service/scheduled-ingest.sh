@@ -42,15 +42,31 @@ BIN="${KNOWRAG_BIN:-knowrag}"
 # `knowrag ingest --prune` still asks for confirmation; nothing here changes that.
 #
 # The CLI itself refuses to prune a run that could not read the index, that was interrupted, that was
-# filtered, a note whose file is still on disk, and a vault whose scan found no notes (an unmounted
-# drive looks exactly like a vault whose every note was deleted). Those refusals come back as a
-# non-zero exit, which this wrapper passes on untouched.
+# filtered, a note whose file is still on disk, a vault whose scan found no notes (an unmounted drive
+# looks exactly like a vault whose every note was deleted), a run that would delete more than the ceiling
+# allows (a sync that left half a vault behind), and a vault root that is not the one the last successful
+# run used (the path now points at another vault). Those refusals come back as a non-zero exit with the
+# reason in the report, which this wrapper passes on untouched. To go past one, a person runs
+# `knowrag ingest --dry-run`, then `knowrag ingest --prune` in a terminal (it asks), or, for a vault that
+# was moved on purpose, `knowrag ingest --accept-vault-root` once.
 "$ENSURE"
 
 report="$(mktemp)"
 trap 'rm -f "$report"' EXIT
+
+# The two limits on an unattended prune (see `knowrag ingest --help`): at most the smaller of N notes and
+# P percent of a vault's indexed notes per run. The defaults are in the CLI; these two variables are how
+# the operator moves them for the scheduled run, in the same env file as everything else.
+set -- ingest --vault both --prune --yes
+if [ -n "${KNOWRAG_PRUNE_MAX_NOTES:-}" ]; then
+	set -- "$@" --prune-max-notes "$KNOWRAG_PRUNE_MAX_NOTES"
+fi
+if [ -n "${KNOWRAG_PRUNE_MAX_PERCENT:-}" ]; then
+	set -- "$@" --prune-max-percent "$KNOWRAG_PRUNE_MAX_PERCENT"
+fi
+
 status=0
-"$BIN" ingest --vault both --prune --yes >"$report" 2>&1 || status=$?
+"$BIN" "$@" >"$report" 2>&1 || status=$?
 cat "$report"
 
 # One line a journal search can find, carrying the report's own orphans line (how many notes were

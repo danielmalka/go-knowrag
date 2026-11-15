@@ -153,15 +153,16 @@ func splitStillOnDisk(roots map[string]string, report *ingest.Report) {
 // only assertion that separates a refusal from a prune that ran and then complained — both return an
 // error, and over an empty orphan list both also delete nothing.
 //
-// noteCounts is how many notes the scan returned for each vault it scanned (nil skips the check, which
-// is only for callers that have no scan, such as tests of the layers below). A vault the scan found
-// EMPTY while the index holds its points is refused: see refuseEmptyVault.
+// scope carries what the run knows about the vaults it scanned (nil skips every check in it, which is
+// only for callers that have no scan, such as tests of the layers below): a vault the scan found EMPTY
+// while the index holds its points is refused (refuseEmptyVault), and a prune over the ceiling or from a
+// vault root that is not the last ingested one is refused unless a person confirms (scope.gate).
 func pruneOrphans(
 	ctx context.Context,
 	s ingest.Store,
 	tenantID string,
 	roots map[string]string,
-	noteCounts map[string]int,
+	scope *pruneScope,
 	opts ingestOptions,
 	report *ingest.Report,
 ) error {
@@ -189,7 +190,10 @@ func pruneOrphans(
 				"which notes were deleted — nothing was removed; fix the connection to Qdrant and " +
 				"run it again")
 	}
-	if err := refuseEmptyVault(noteCounts, report); err != nil {
+	if err := refuseEmptyVault(scope.noteCounts(), report); err != nil {
+		return err
+	}
+	if err := scope.gate(report.Orphans, opts.yes, report); err != nil {
 		return err
 	}
 	var err error
