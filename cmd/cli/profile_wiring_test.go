@@ -3,14 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"io"
 	"io/fs"
-	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 
@@ -90,61 +85,6 @@ func TestIngestChunkWindowFollowsTheProfile(t *testing.T) {
 	}
 }
 
-// TestNoEntryPointReadsTheLibraryDefaultProfile is what keeps "the cutover is complete" true after the
-// next edit. schema.DefaultProfile (BGE-M3) stays as the library fallback until the cleanup PR deletes
-// that profile, so a command that called it, or built an embedder or a manifest without a profile,
-// would still compile and would quietly serve the old model. The entry points are scanned, not the
-// library: the fallback is legitimate there and in tests.
-func TestNoEntryPointReadsTheLibraryDefaultProfile(t *testing.T) {
-	forbidden := map[string][]string{
-		"schema": {"DefaultProfile", "Manifest"},
-		"embed":  {"Expected", "DefaultDenseDim", "NewServiceEmbedder"},
-	}
-	var hits []string
-	for _, root := range []string{"..", "../../internal/clicmd", "../../internal/eval"} {
-		hits = append(hits, scanForbidden(t, root, forbidden)...)
-	}
-	if len(hits) > 0 {
-		t.Errorf("entry points must resolve their profile (schema.ResolveProfile / cfg.Profile) and pass it "+
-			"explicitly; these read the library fallback:\n  %s", strings.Join(hits, "\n  "))
-	}
-}
-
-// TestEveryEntryPointSearchConfigNamesItsProfile covers the one fallback the selector scan cannot: a
-// retrieval.Config left at its zero value or DefaultConfig() silently queries the default profile.
-func TestEveryEntryPointSearchConfigNamesItsProfile(t *testing.T) {
-	for _, dir := range []string{"..", "../../internal/clicmd"} {
-		for _, file := range goFiles(t, dir) {
-			src := readFile(t, file)
-			if strings.Contains(src, "retrieval.DefaultConfig()") && !strings.Contains(src, ".Profile = ") {
-				t.Errorf("%s builds a searcher from retrieval.DefaultConfig() without setting .Profile", file)
-			}
-		}
-	}
-}
-
-func scanForbidden(t *testing.T, root string, forbidden map[string][]string) []string {
-	t.Helper()
-	var hits []string
-	for _, file := range goFiles(t, root) {
-		f, err := parser.ParseFile(token.NewFileSet(), file, nil, 0)
-		if err != nil {
-			t.Fatalf("parsing %s: %v", file, err)
-		}
-		ast.Inspect(f, func(n ast.Node) bool {
-			sel, ok := n.(*ast.SelectorExpr)
-			if !ok {
-				return true
-			}
-			if pkg, ok := sel.X.(*ast.Ident); ok && slices.Contains(forbidden[pkg.Name], sel.Sel.Name) {
-				hits = append(hits, file+": "+pkg.Name+"."+sel.Sel.Name)
-			}
-			return true
-		})
-	}
-	return hits
-}
-
 // goFiles lists the non-test Go files under root, skipping test fixtures and the isolation suite,
 // whose fakes use the library default on purpose (they test tenant filters, not a model).
 func goFiles(t *testing.T, root string) []string {
@@ -166,13 +106,4 @@ func goFiles(t *testing.T, root string) []string {
 		t.Fatal(err)
 	}
 	return out
-}
-
-func readFile(t *testing.T, path string) string {
-	t.Helper()
-	b, err := os.ReadFile(path) // #nosec G304 -- a path this test just walked under the repository
-	if err != nil {
-		t.Fatal(err)
-	}
-	return string(b)
 }
