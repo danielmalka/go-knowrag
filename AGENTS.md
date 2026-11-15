@@ -304,3 +304,67 @@ escolha de embedding ficam em seção própria.
 - **O volume do Qdrant na VPS é mantido** até essa mesma decisão. Não o apague nem o recrie antes dela.
 - **O dossiê de código fica fora do git**, em `docs/dossier/` local, como o resto de `docs/` (D-14, ver
   acima). Não o versione nem copie trecho dele para arquivo rastreado.
+
+## Escolha do modelo de embedding — decisões de 2026-11-15
+
+Decisões do dono, que valem para qualquer trabalho de troca de modelo:
+
+1. **Só modelo aberto e local.** Nada de API de embedding: o vault é pessoal e não sai da máquina.
+2. **Dois candidatos foram provados:** `google/embeddinggemma-2` (só texto; bf16 ou fp32, **nunca fp16**, que
+   dá NaN em silêncio; prefixos do model card: `task: search result | query: ` na pergunta e
+   `title: … | text: ` no documento) e `Qwen/Qwen3-Embedding-0.6B` (com a instrução de query do card). Os dois densos.
+3. **Sem BM25 nem nenhum vetor esparso ou lexical.** O sistema futuro é só denso. A referência do bge-m3 é a
+   medição de 2026-08-16 (híbrido 25/30, denso 21/30); o bge-m3 não foi baixado nem rodado na prova.
+4. **O Qwen3-Embedding-0.6B sai da disputa.** Ficou atrás do EmbeddingGemma 2 em todos os protocolos, pesa mais
+   que o dobro e em CPU é três vezes mais lento.
+5. **O EmbeddingGemma 2 é o candidato.** A troca **não** está decidida: ela espera a medição com o golden set
+   ampliado (item seguinte).
+6. **O golden set vai a ~60 perguntas, sem as inalcançáveis.** As 6 perguntas cuja nota esperada hoje é
+   `private` ou `archived` e a que aponta para uma nota que já não existe saem; novas perguntas, escritas a
+   partir do vault atual por quem não sabe qual modelo acertou o quê, entram no lugar. Só então se decide.
+7. **A rodada com o golden set ampliado roda só o EmbeddingGemma 2** (denso, bf16, com os prefixos do card),
+   **sem rodar o bge-m3.** O dono compara o resultado do EmbeddingGemma 2 e decide a troca; o bge-m3 não é
+   remedido nesta rodada.
+8. **A prova de 30 perguntas e a rodada ampliada rodam na mesma cópia de referência do vault**, com as mesmas
+   exclusões, para que os números sejam comparáveis. Migrar a medição para o vault atual do projeto depende
+   de uma revisão do dono.
+9. **Critério de virada:** Recall@5 de produção ≥ 0,70 no golden v2 e nenhuma área com zero acertos, medido na
+   cópia de referência do vault. A troca para o vault atual vem depois da revisão do dono.
+10. **O embedder fica sempre de pé na GPU, com fallback em CPU.** Isso fecha o D-41 (a janela diária do embedder),
+    depois de medir o pico de memória da ingestão.
+11. **Uma ADR-008, local, substitui a ADR-001**; o resumo público fica no README e neste arquivo.
+12. **Sem CHANGELOG.**
+13. **As violações de contrato do vault são corrigidas antes de reingerir** (cartão 184); a produção recusa um
+    vault com violações.
+14. **Não há rollback para o bge-m3.** Se a migração não atingir o critério do item 9, o serviço continua desligado.
+
+**Resultado da prova** (30 perguntas, Recall@5, mesma conta do `eval --golden`: acerto = a nota esperada está
+no top 5; consulta densa de produção reproduzida; os dois modelos em bf16 na GPU, sobre os mesmos 4.661 chunks):
+
+| Modelo (denso) | produção | agosto | relaxado | pesos / VRAM / RSS | ingestão | query p95 GPU / CPU |
+|---|---:|---:|---:|---|---:|---:|
+| EmbeddingGemma 2 (768d) | 21/30 | 22/30 | 25/30 | 0,5 / 0,6 / 1,9 GB | 152 s | 78 ms / 118 ms |
+| Qwen3-Embedding-0.6B (1024d) | 19/30 | 21/30 | 24/30 | 1,1 / 1,3 / 2,2 GB | 214 s | 60 ms / 378 ms |
+
+**O corpus mudou desde 2026-08-16**, então não é comparação exata com 21/30 e 25/30: são 830 notas e 4.661
+chunks (em agosto, ~735 notas e ~3.690 pontos), 1 nota do golden set não existe mais e 6 perguntas apontam
+para notas hoje `private` ou `archived` (duas eram `stable` em agosto). Por isso três protocolos de
+visibilidade: **produção** (arquivadas e privadas excluídas, como o `eval --golden`; teto 23/30), **agosto**
+(arquivadas incluídas, privadas excluídas; teto 25/30) e **relaxado** (nada excluído; teto 29/30).
+
+Leitura: o EmbeddingGemma 2 fica 1 a 2 acertos à frente do Qwen3. Contra o bge-m3 ele empata o denso (21) em
+produção e empata o híbrido (25) só no relaxado, que ignora a visibilidade; em produção fica 4 abaixo do
+híbrido. A memória cai bem na VRAM (0,6 GB contra ~1,2 GB do bge-m3) e menos no RSS (~1,9 GB contra ~2,4 GB;
+a maior parte é torch). Em CPU responde a query em ~118 ms no p95 com ~2,4 GB de RSS, o que tornaria possível
+um embedder sempre de pé sem GPU (D-41). Diferença de 1 a 3 acertos com 30 perguntas não decide, e é por isso
+que o golden set cresce antes da troca. A ferramenta da prova (exportador de chunks e script de avaliação) fica
+fora da `main`.
+
+**Rodada ampliada** (golden v2 com 60 perguntas, só o EmbeddingGemma 2 denso, bf16 na GPU, mesma cópia de referência
+do vault e mesmos 4.661 chunks da prova): **46/60 de Recall@5 (0,767; IC95 0,646–0,856)**, e o resultado é o mesmo nos
+três protocolos de visibilidade porque o golden v2 só aponta para notas visíveis à busca. Nenhuma das 7 áreas do
+golden ficou com zero acertos (o pior resultado foi 1 de 3). A checagem exata por força bruta também deu 46.
+Ingestão dos 4.661 chunks em 144 s; query com p95 de 73 ms na GPU (outra execução, com a GPU compartilhada, deu
+153 ms) e de 121 ms em CPU fp32 (RSS 2,4 GB). **Pico da ingestão:** 5,2 GB de ativação com batch 16 e chunks de até
+~3.900 tokens, contra 0,5 GB dos pesos; para o embedder ficar de pé junto com outros processos a ingestão precisa de
+batch menor ou de teto menor de tokens, e isso se mede antes de fixar o serviço.
