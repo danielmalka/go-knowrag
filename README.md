@@ -204,6 +204,16 @@ continua sendo o do BGE-M3; o do EmbeddingGemma 2 está registrado mas não é o
 forma de servir o modelo também foi decidida e medida: sidecar HTTP, um runtime só, no host de
 ingestão.
 
+**Título da nota e janela do chunk.** Num perfil com esquema de prefixos (EmbeddingGemma 2), o serviço
+monta `title: <título> | text: <chunk>` e o prefixo ocupa parte da janela do modelo. O perfil reserva
+128 tokens para isso (`PromptReserveTokens`), então o chunker trabalha com 8192 − 128 = 8064. Como o
+título de uma nota não tem limite, a ingestão **corta o título enviado ao embedder** em
+`TitleMaxTokens` (96 no EmbeddingGemma 2: a reserva menos 32 de moldura do prefixo), contado com o
+mesmo contador de tokens que dimensiona os chunks. Corta-se só o título, só na cópia enviada ao
+embedder: o texto do chunk nunca é cortado, e o título no payload e no `point_hash` continua inteiro.
+Assim um chunk que enche a janela mais o prefixo nunca passa de 8192, qualquer que seja o título. Perfil
+sem esquema de prefixos (BGE-M3) não envia título e não é afetado.
+
 Os dois lados confirmam. A ingestão confere antes da primeira escrita; o servidor MCP confere na
 subida e **recusa subir** se o backend responder com uma configuração diferente da que o índice foi
 construído — porque embedar query num espaço vetorial diferente do que está armazenado não devolve

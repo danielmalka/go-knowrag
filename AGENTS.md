@@ -338,6 +338,15 @@ Decisões do dono, que valem para qualquer trabalho de troca de modelo:
     vault com violações.
 14. **Não há rollback para o bge-m3.** Se a migração não atingir o critério do item 9, o serviço continua desligado.
 
+**Contrato de ingestão com o perfil do EmbeddingGemma 2.** O perfil (`internal/schema/model_profile.go`)
+fixa `MaxInputTokens` 8192 e `PromptReserveTokens` 128; o chunker usa a janela `WindowTokens()` = 8064. O
+título da nota vai com cada chunk (`title: <título> | text: `) e **é cortado** em `TitleMaxTokens()` = 96
+(reserva − 32 de moldura) por `fitTitle` (`internal/ingest/title.go`), só na cópia enviada ao embedder:
+nunca se corta o texto do chunk, e o título do payload e do `point_hash` fica inteiro. Invariante, testada
+para todo perfil do registro: janela + título + moldura ≤ `MaxInputTokens`. Ao mudar a reserva, o prefixo
+ou o tokenizador, revise `promptFramingTokens`; `Deps.TitleMaxTokens` é obrigatório quando o handshake
+traz `PromptVersion`.
+
 **Resultado da prova** (30 perguntas, Recall@5, mesma conta do `eval --golden`: acerto = a nota esperada está
 no top 5; consulta densa de produção reproduzida; os dois modelos em bf16 na GPU, sobre os mesmos 4.661 chunks):
 
