@@ -1,12 +1,6 @@
 package main
 
 import (
-	"go/ast"
-	"go/parser"
-	"go/token"
-	"maps"
-	"slices"
-	"strconv"
 	"strings"
 	"testing"
 )
@@ -17,10 +11,11 @@ import (
 // quietly serve the old model. The entry points are scanned, not the library: the fallback is
 // legitimate there and in tests.
 //
-// They resolve a package by its IMPORT PATH, never by the identifier a file happens to use: an alias
-// (`modelSchema ".../internal/schema"`) or a dot-import would walk past a check keyed on the literal
-// names `schema` and `embed`. A dot-import of a watched package is refused outright in an entry point,
-// because after it a call has no qualifier left to resolve.
+// They work on OBJECTS, not on names (profile_guard_scan_test.go, over go/types): a package is the one
+// at an import PATH whatever alias the file uses, so `modelSchema ".../internal/schema"` is still the
+// schema package, and a config variable is the declaration its identifier is bound to, so an inner
+// `cfg` that shadows an outer one is a different variable. A dot-import of a watched package is
+// refused outright in an entry point, because after it a call has no qualifier left to resolve.
 
 const modulePath = "github.com/danielmalka/go-knowrag"
 
@@ -39,7 +34,7 @@ func TestNoEntryPointReadsTheLibraryDefaultProfile(t *testing.T) {
 	var hits []string
 	for _, root := range entryPointRoots {
 		for _, file := range goFiles(t, root) {
-			hits = append(hits, libraryDefaultLeaks(parseFile(t, file, nil), file)...)
+			hits = append(hits, libraryDefaultLeaks(checkFile(t, file, nil))...)
 		}
 	}
 	if len(hits) > 0 {
@@ -53,7 +48,7 @@ func TestEveryEntryPointSearchConfigNamesItsProfile(t *testing.T) {
 	sites := 0
 	for _, root := range entryPointRoots {
 		for _, file := range goFiles(t, root) {
-			n, leaks := searchConfigLeaks(parseFile(t, file, nil), file)
+			n, leaks := searchConfigLeaks(checkFile(t, file, nil))
 			sites += n
 			hits = append(hits, leaks...)
 		}
@@ -106,7 +101,7 @@ var _ = schema.DefaultProfile`, 0},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := libraryDefaultLeaks(parseFile(t, "x.go", []byte(c.src)), "x.go"); len(got) != c.want {
+			if got := libraryDefaultLeaks(checkFile(t, "x.go", []byte(c.src))); len(got) != c.want {
 				t.Errorf("libraryDefaultLeaks = %v, want %d leak(s)", got, c.want)
 			}
 		})
@@ -140,194 +135,58 @@ func f() any { return DefaultConfig() }`, 0, 1},
 		{"unrelated package with the same alias", `package p
 import r "example.com/other/retrieval"
 func f() any { return r.DefaultConfig() }`, 0, 0},
+		// Shadowing: the same NAME is a different VARIABLE in an inner block, and only objects tell.
+		{"inner shadow sets Profile, outer never does", head + `func f() any {
+	cfg := r.DefaultConfig()
+	{
+		cfg := r.DefaultConfig()
+		cfg.Profile = nil
+		_ = cfg
+	}
+	return cfg
+}`, 2, 1},
+		{"outer sets Profile, inner shadow never does", head + `func f() any {
+	cfg := r.DefaultConfig()
+	cfg.Profile = nil
+	{
+		cfg := r.DefaultConfig()
+		_ = cfg
+	}
+	return cfg
+}`, 2, 1},
+		{"both set their own Profile", head + `func f() any {
+	cfg := r.DefaultConfig()
+	cfg.Profile = nil
+	{
+		cfg := r.DefaultConfig()
+		cfg.Profile = nil
+		_ = cfg
+	}
+	return cfg
+}`, 2, 0},
+		{"a parameter that shadows the config variable does not set it", head + `func f() any {
+	cfg := r.DefaultConfig()
+	func(cfg r.Config) { cfg.Profile = nil }(r.Config{Profile: nil})
+	return cfg
+}`, 2, 1},
+		{"a closure assigning the captured outer variable does set it", head + `func f() any {
+	cfg := r.DefaultConfig()
+	func() { cfg.Profile = nil }()
+	return cfg
+}`, 1, 0},
+		{"plain assignment to a declared config variable", head + `func f() any {
+	var cfg r.Config
+	cfg = r.DefaultConfig()
+	cfg.Profile = nil
+	return cfg
+}`, 2, 0},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			sites, leaks := searchConfigLeaks(parseFile(t, "x.go", []byte(c.src)), "x.go")
+			sites, leaks := searchConfigLeaks(checkFile(t, "x.go", []byte(c.src)))
 			if sites != c.wantSites || len(leaks) != c.wantLeaks {
 				t.Errorf("sites=%d leaks=%v, want sites=%d and %d leak(s)", sites, leaks, c.wantSites, c.wantLeaks)
 			}
 		})
 	}
-}
-
-// --- implementation -------------------------------------------------------------------------------
-
-func parseFile(t *testing.T, name string, src []byte) *ast.File {
-	t.Helper()
-	var source any // nil means "read the file", which a nil []byte stored in an interface would not
-	if src != nil {
-		source = src
-	}
-	f, err := parser.ParseFile(token.NewFileSet(), name, source, parser.SkipObjectResolution)
-	if err != nil {
-		t.Fatalf("parsing %s: %v", name, err)
-	}
-	return f
-}
-
-// importNames returns the local names a file gives the package at path, and whether it dot-imports it.
-// A blank import binds nothing, so it is neither.
-func importNames(f *ast.File, path string) (names []string, dot bool) {
-	for _, spec := range f.Imports {
-		got, err := strconv.Unquote(spec.Path.Value)
-		if err != nil || got != path {
-			continue
-		}
-		switch {
-		case spec.Name == nil:
-			names = append(names, path[strings.LastIndex(path, "/")+1:])
-		case spec.Name.Name == ".":
-			dot = true
-		case spec.Name.Name != "_":
-			names = append(names, spec.Name.Name)
-		}
-	}
-	return names, dot
-}
-
-// qualified reports whether expr is `<pkgName>.<one of sels>` for one of the local package names.
-func qualified(expr ast.Expr, pkgNames []string, sels ...string) bool {
-	sel, ok := expr.(*ast.SelectorExpr)
-	if !ok {
-		return false
-	}
-	id, ok := sel.X.(*ast.Ident)
-	return ok && slices.Contains(pkgNames, id.Name) && (len(sels) == 0 || slices.Contains(sels, sel.Sel.Name))
-}
-
-func libraryDefaultLeaks(f *ast.File, file string) []string {
-	var hits []string
-	for path, sels := range libraryDefaults {
-		names, dot := importNames(f, path)
-		if dot {
-			hits = append(hits, file+": dot-import of "+path+" (an entry point must qualify what it uses)")
-		}
-		ast.Inspect(f, func(n ast.Node) bool {
-			if qualified(asExpr(n), names, sels...) {
-				hits = append(hits, file+": "+path[strings.LastIndex(path, "/")+1:]+"."+n.(*ast.SelectorExpr).Sel.Name)
-			}
-			return true
-		})
-	}
-	slices.Sort(hits)
-	return hits
-}
-
-func asExpr(n ast.Node) ast.Expr {
-	e, _ := n.(ast.Expr)
-	return e
-}
-
-// searchConfigLeaks finds every search config the file builds (a retrieval.DefaultConfig() call, a
-// retrieval.Config literal or a retrieval.Config variable) and reports the ones whose Profile field is
-// never set. A config that is not stored in a variable cannot have its field set, so it is a leak too.
-// sites counts what it looked at, so a test can prove the scan is not vacuous.
-func searchConfigLeaks(f *ast.File, file string) (sites int, leaks []string) {
-	names, dot := importNames(f, retrievalPath)
-	if dot {
-		leaks = append(leaks, file+": dot-import of "+retrievalPath+" (an entry point must qualify what it uses)")
-	}
-	if len(names) == 0 {
-		return 0, leaks
-	}
-	scan := func(body ast.Node, what string) {
-		s, l := scopeConfigLeaks(body, names, file, what)
-		sites += s
-		leaks = append(leaks, l...)
-	}
-	for _, decl := range f.Decls {
-		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Body != nil {
-			scan(fn.Body, fn.Name.Name)
-			continue
-		}
-		scan(decl, "package level")
-	}
-	return sites, leaks
-}
-
-// scopeConfigLeaks checks one function body (or one package-level declaration).
-func scopeConfigLeaks(body ast.Node, names []string, file, where string) (sites int, leaks []string) {
-	vars := map[string]bool{}     // config variables declared here
-	setters := map[string]bool{}  // variables whose Profile field is assigned here
-	stored := map[ast.Expr]bool{} // config-producing expressions that landed in a variable
-	isConfigExpr := func(e ast.Expr) bool {
-		switch x := e.(type) {
-		case *ast.CallExpr:
-			return qualified(x.Fun, names, "DefaultConfig")
-		case *ast.CompositeLit:
-			return qualified(x.Type, names, "Config")
-		}
-		return false
-	}
-	ast.Inspect(body, func(n ast.Node) bool {
-		switch x := n.(type) {
-		case *ast.AssignStmt:
-			for i, lhs := range x.Lhs {
-				if sel, ok := lhs.(*ast.SelectorExpr); ok && sel.Sel.Name == "Profile" {
-					if id, ok := sel.X.(*ast.Ident); ok {
-						setters[id.Name] = true
-					}
-				}
-				if id, ok := lhs.(*ast.Ident); ok && i < len(x.Rhs) && len(x.Lhs) == len(x.Rhs) && isConfigExpr(x.Rhs[i]) {
-					stored[x.Rhs[i]] = true
-					vars[id.Name] = !literalSetsProfile(x.Rhs[i])
-				}
-			}
-		case *ast.ValueSpec:
-			zeroConfig := x.Type != nil && qualified(x.Type, names, "Config") && len(x.Values) == 0
-			for i, id := range x.Names {
-				switch {
-				case zeroConfig:
-					vars[id.Name] = true
-					sites++
-				case i < len(x.Values) && isConfigExpr(x.Values[i]):
-					stored[x.Values[i]] = true
-					vars[id.Name] = !literalSetsProfile(x.Values[i])
-				}
-			}
-		}
-		return true
-	})
-	ast.Inspect(body, func(n ast.Node) bool {
-		e := asExpr(n)
-		if e == nil || !isConfigExpr(e) {
-			return true
-		}
-		sites++
-		if literalSetsProfile(e) {
-			return true
-		}
-		if !stored[e] {
-			leaks = append(leaks, file+": "+where+": a search config is built without a Profile and not kept in a variable that could set one")
-		}
-		return true
-	})
-	for _, name := range slices.Sorted(maps.Keys(vars)) {
-		if !setters[name] {
-			leaks = append(leaks, file+": "+where+": search config variable "+name+" never has its Profile set")
-		}
-	}
-	return sites, dedupe(leaks)
-}
-
-// literalSetsProfile is true for a retrieval.Config literal with a `Profile:` key.
-func literalSetsProfile(e ast.Expr) bool {
-	lit, ok := e.(*ast.CompositeLit)
-	if !ok {
-		return false
-	}
-	for _, el := range lit.Elts {
-		if kv, ok := el.(*ast.KeyValueExpr); ok {
-			if id, ok := kv.Key.(*ast.Ident); ok && id.Name == "Profile" {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func dedupe(in []string) []string {
-	slices.Sort(in)
-	return slices.Compact(in)
 }
