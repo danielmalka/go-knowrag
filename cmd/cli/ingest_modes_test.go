@@ -182,7 +182,7 @@ func TestPruneOrphans_SnapshotUnavailable_RefusesWithoutTouchingTheStore(t *test
 		}},
 	}
 
-	err := pruneOrphans(t.Context(), store, defaultTenantID, nil, ingestOptions{}, &report)
+	err := pruneOrphans(t.Context(), store, defaultTenantID, nil, nil, ingestOptions{}, &report)
 	if err == nil {
 		t.Fatal("pruneOrphans over a report whose snapshot failed = nil; a run that asked to delete " +
 			"things must not exit clean having deleted nothing it could not identify")
@@ -211,7 +211,7 @@ func TestPruneOrphans_Scanned_PrunesAndCountsWhatItRemoved(t *testing.T) {
 	// A real vault root whose file is absent: the prune list is only reachable through the on-disk
 	// check now, so a nil root map would classify this as unverifiable and skip the delete.
 	roots := map[string]string{"pessoal": t.TempDir()}
-	if err := pruneOrphans(t.Context(), store, defaultTenantID, roots, ingestOptions{}, &report); err != nil {
+	if err := pruneOrphans(t.Context(), store, defaultTenantID, roots, nil, ingestOptions{}, &report); err != nil {
 		t.Fatalf("pruneOrphans on a scanned run: %v", err)
 	}
 	if want := []string{"delete"}; !slices.Equal(store.calls, want) {
@@ -412,7 +412,7 @@ func TestPruneOrphans_NoteStillOnDisk_IsNotDeleted(t *testing.T) {
 	}
 
 	err := pruneOrphans(t.Context(), store, defaultTenantID,
-		map[string]string{"trabalho": root}, ingestOptions{}, &report)
+		map[string]string{"trabalho": root}, nil, ingestOptions{}, &report)
 	if err != nil {
 		t.Fatalf("pruneOrphans: %v", err)
 	}
@@ -514,7 +514,7 @@ func TestPruneOrphans_FilteredRun_RefusedByThePackage(t *testing.T) {
 	}
 
 	err := pruneOrphans(t.Context(), store, defaultTenantID,
-		map[string]string{"trabalho": t.TempDir()}, ingestOptions{only: "trabalho/areas/**"}, &report)
+		map[string]string{"trabalho": t.TempDir()}, nil, ingestOptions{only: "trabalho/areas/**"}, &report)
 
 	if !errors.Is(err, ingest.ErrPruneSubset) {
 		t.Fatalf("pruneOrphans on a filtered run = %v, want ErrPruneSubset", err)
@@ -600,7 +600,7 @@ func TestPruneOrphans_PathClaimedByALiveNote_IsDeleted(t *testing.T) {
 	}
 
 	err := pruneOrphans(t.Context(), store, defaultTenantID,
-		map[string]string{"trabalho": root}, ingestOptions{}, &report)
+		map[string]string{"trabalho": root}, nil, ingestOptions{}, &report)
 	if err != nil {
 		t.Fatalf("pruneOrphans: %v", err)
 	}
@@ -635,7 +635,7 @@ func TestPruneOrphans_InterruptedRun_DeletesNothing(t *testing.T) {
 	}
 
 	err := pruneOrphans(t.Context(), store, defaultTenantID,
-		map[string]string{"trabalho": t.TempDir()}, ingestOptions{}, &report)
+		map[string]string{"trabalho": t.TempDir()}, nil, ingestOptions{}, &report)
 
 	// Not an error: the operator asked the run to stop, and stopping includes this step. The exit
 	// code comes from Interrupted (runOutcome), not from pretending the prune broke.
@@ -651,5 +651,50 @@ func TestPruneOrphans_InterruptedRun_DeletesNothing(t *testing.T) {
 	// A run told to delete that did not has to say so; silence reads as "nothing to delete".
 	if !strings.Contains(report.String(), "prune was skipped") {
 		t.Errorf("report %q does not say the prune was skipped", report.String())
+	}
+}
+
+// A vault root that exists and is empty (an unmounted drive's mount point) makes every note of that
+// vault "provably absent" on disk, so splitStillOnDisk would let the whole vault be pruned. The scan
+// found zero notes for it, and that is the evidence refuseEmptyVault reads.
+func TestPruneOrphans_EmptyScannedVault_IsRefusedAndNothingIsDeleted(t *testing.T) {
+	store := &recordingStore{}
+	report := ingest.Report{
+		OrphansScanned: true,
+		Orphans: []ingest.Orphan{{
+			UID:   uuid.MustParse("0198a7f2-4b31-7c42-9e15-3d8a92c47b06"),
+			Vault: "dono", Path: "wiki/gone.md", Points: 3,
+		}},
+	}
+	emptyRoot := t.TempDir() // exists, holds no files: every note looks deleted
+
+	err := pruneOrphans(t.Context(), store, defaultTenantID,
+		map[string]string{"dono": emptyRoot}, &pruneScope{NoteCounts: map[string]int{"dono": 0}}, ingestOptions{}, &report)
+	if err == nil || !strings.Contains(err.Error(), `"dono"`) || !strings.Contains(err.Error(), "found no notes") {
+		t.Fatalf("pruneOrphans over an empty scanned vault = %v, want a refusal naming the vault", err)
+	}
+	if len(store.calls) != 0 || report.PointsPruned != 0 {
+		t.Errorf("the refusal came after the store was touched: calls=%v pruned=%d", store.calls, report.PointsPruned)
+	}
+	if report.PruneSkipped == "" {
+		t.Error("the report does not say why the prune did not run")
+	}
+}
+
+// The check is per vault and only fires on a vault that was scanned and found empty: another vault's
+// orphans still go, and so do the orphans of a vault that returned notes.
+func TestPruneOrphans_VaultWithNotes_StillPrunes(t *testing.T) {
+	store := &recordingStore{}
+	report := ingest.Report{
+		OrphansScanned: true,
+		Orphans: []ingest.Orphan{{
+			UID:   uuid.MustParse("0198a7f2-4b31-7c42-9e15-3d8a92c47b06"),
+			Vault: "dono", Path: "wiki/gone.md", Points: 3,
+		}},
+	}
+	err := pruneOrphans(t.Context(), store, defaultTenantID,
+		map[string]string{"dono": t.TempDir()}, &pruneScope{NoteCounts: map[string]int{"dono": 12, "outro": 0}, Ceiling: defaultCeiling()}, ingestOptions{}, &report)
+	if err != nil || report.PointsPruned != 3 {
+		t.Fatalf("pruneOrphans = %v, pruned %d; a vault that returned notes must still prune", err, report.PointsPruned)
 	}
 }

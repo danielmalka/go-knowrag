@@ -500,6 +500,21 @@ A comparação é de **caminho inteiro**, nunca de prefixo de texto: uma entrada
 pasta `alfa/14-interno`. É insensível a maiúsculas, normaliza Unicode para NFC (um nome acentuado
 vindo de macOS em NFD casaria com nada, silenciosamente), e `\` do Windows vale como `/`.
 
+**Indexar só uma pasta.** Não existe "incluir só": a pasta é a única `AREAS` e toda outra pasta de 1º
+nível é excluída pelo nome. É o caso do vault do dono, onde só `wiki/` é indexada (`raw/` tem uma página
+derivada em `wiki/` para cada nota, e indexar as duas daria duas respostas para a mesma pergunta):
+
+```bash
+KNOWRAG_VAULT_<NOME>_AREAS=wiki
+KNOWRAG_VAULT_<NOME>_EXCLUDE_FOLDERS=raw,<cada outra pasta de 1º nível do vault>
+KNOWRAG_VAULT_<NOME>_EXCLUDE_ROOT_FILES=<os .md soltos na raiz>
+MCP_AREAS=wiki
+```
+
+Pastas que começam com ponto (`.git`, `.obsidian`) são puladas sem precisar de entrada. Uma pasta de 1º
+nível nova, que não é a área nem está na lista, faz a ingestão **falhar nomeando-a** — de propósito: pasta
+nova no topo do vault é decidida por uma pessoa, não indexada por acidente.
+
 ### Flags de `knowrag ingest`
 
 | Flag | Default | Para quê |
@@ -509,12 +524,46 @@ vindo de macOS em NFD casaria com nada, silenciosamente), e `\` do Windows vale 
 | `--full` | desligado | reindexa toda nota, pulando o atalho de integridade que normalmente deixa a inalterada em paz |
 | `--only` | vazio | restringe a rodada às notas cujo `vault/path` casa um glob, ex.: `pessoal/areas/**` |
 | `--prune` | desligado | **apaga** os pontos das notas que sumiram do vault. Destrutivo e opt-in: sem ele os órfãos são listados e deixados quietos |
-| `--yes` | desligado | autoriza `--prune` sem perguntar. Obrigatório quando stdin não é terminal, onde não há ninguém para responder |
+| `--yes` | desligado | autoriza `--prune` sem perguntar. Obrigatório quando stdin não é terminal, onde não há ninguém para responder. **A ingestão agendada roda sempre com `--prune --yes`**; a manual continua pedindo confirmação. Com `--yes` valem o teto e a identidade da raiz (abaixo) |
+| `--prune-max-notes` | `20` | com `--yes`: o máximo de notas de um vault que uma rodada poda |
+| `--prune-max-percent` | `5` | com `--yes`: o máximo, em % das notas indexadas do vault, que uma rodada poda (vale o menor dos dois, piso de 3 notas) |
+| `--accept-vault-root` | desligado | grava a raiz dos vaults desta rodada como a certa, mesmo diferente da última ingestão bem-sucedida |
 | `--grace-period` | `30s` | quanto tempo uma nota já sendo escrita tem para terminar depois do primeiro Ctrl-C; o segundo Ctrl-C a derruba na hora |
 | `--json` | desligado | escreve o relatório da rodada como JSON no stdout e mais nada; o resumo do tokenizer vai para o stderr |
 | `--tenant` | `interno` | o `tenant_id` sob o qual todo ponto é escrito |
 | `--floor-tokens` | `256` | junta seções irmãs consecutivas abaixo desse tamanho |
 | `--ceiling-tokens` | `1024` | quebra a seção acima desse tamanho |
+
+**Poda sem ninguém olhando (`--yes`) tem duas travas.** A checagem de arquivo em disco só protege uma nota
+cujo arquivo ainda está onde o índice diz; se a raiz do vault passa a apontar para **outro** vault, ou uma
+sincronização deixa metade dele para trás, todo uid que sumiu vira "provadamente ausente" e a poda agendada
+o apagaria em massa. Por isso, com `--yes` (a rodada agendada), a poda é **recusada inteira** — nada
+apagado, saída ≠ 0, o motivo no relatório e na linha `scheduled-ingest:` — quando:
+
+- **passa do teto**: mais notas órfãs, num vault, do que `min(--prune-max-notes, --prune-max-percent % das
+  notas indexadas do vault)`, com piso de 3. Padrão: **20 notas ou 5%, o que for menor**. 20 apagadas entre
+  duas rodadas de 6 h é faxina; 5% é o que separa uma faxina de um vault pequeno (em 100 notas, 5 é rotina e
+  10 é sincronização quebrada). A rodada agendada move os dois com `KNOWRAG_PRUNE_MAX_NOTES` e
+  `KNOWRAG_PRUNE_MAX_PERCENT`;
+- **a raiz não é a da última ingestão bem-sucedida**: guardada num arquivo de estado fora do vault
+  (`$KNOWRAG_STATE_DIR` ou `$XDG_STATE_HOME/knowrag/vault-roots.json`, por vault e por escopo de índice),
+  com o caminho canônico e, se o vault é um repositório git, o hash do commit raiz (estável quando o vault
+  muda de pasta, diferente em outro vault). Mesmo repositório em outra pasta é o mesmo vault; outro
+  repositório no mesmo caminho não. Sem registro ainda (primeira rodada, ou o arquivo se perdeu) a poda
+  também é recusada até a rodada seguinte, que grava a raiz depois de uma ingestão sem falhas. Um arquivo de
+  estado ilegível nunca abre a poda. A identidade tem três estados: repositório git com commit, pasta
+  comprovadamente sem git (sem `.git` e `git rev-parse` diz que não é repositório) e **desconhecido** (git
+  ausente, timeout, repositório ilegível ou sem commits). Desconhecido falha fechado: a poda é recusada com o
+  motivo e nada é gravado. O caminho só vale como identidade quando os dois lados são pastas sem git
+  comprovadas; um registro com commit nunca vira só-caminho sem `--accept-vault-root`. O arquivo de estado é
+  gravado sob `flock` (`vault-roots.json.lock`), então ingestões concorrentes não perdem registros.
+
+**O que fazer quando a poda é recusada.** Não force a rodada agendada. Rode `knowrag ingest --dry-run` e leia
+a lista de órfãos: se o vault está montado e é o certo, a lista diz o que sumiu. Então, à mão e num terminal,
+`knowrag ingest --prune` (sem `--yes`): ele mostra os motivos e **pergunta**; um `y` poda e aceita a raiz atual.
+Se o vault foi movido ou trocado de propósito e não há nada para podar, `knowrag ingest --accept-vault-root`
+grava a raiz nova sem podar. Só mexa nos dois limites (`KNOWRAG_PRUNE_MAX_*`) se o seu vault muda de tamanho
+de verdade em uma rodada.
 
 **`--only` é recusado junto com `--prune`.** Uma rodada de subconjunto não consegue distinguir uma
 nota apagada de uma que ela simplesmente não visitou, e a poda que confundisse as duas apagaria o

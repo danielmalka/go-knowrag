@@ -329,7 +329,7 @@ escolha de embedding ficam em seção própria.
 - **O dossiê de código fica fora do git**, em `docs/dossier/` local, como o resto de `docs/` (D-14, ver
   acima). Não o versione nem copie trecho dele para arquivo rastreado.
 
-## Religar: horário, Qdrant e vault — decisões do dono de 2026-11-15 (2ª rodada)
+## Religar: horário, Qdrant, vault e poda — decisões do dono de 2026-11-15 (2ª rodada)
 
 Valem para quando o projeto for religado; o projeto continua desligado e nada disto foi instalado.
 
@@ -343,6 +343,31 @@ Valem para quando o projeto for religado; o projeto continua desligado e nada di
    rastreado: aqui ele é "o vault do dono". Trocar o vault de referência da avaliação (a cópia usada na prova e
    no golden set) por ele **depende de uma curadoria em andamento**; a virada operacional espera essa
    curadoria (cartão 188), e o golden set é refeito quando o vault mudar.
+4. **A ingestão programada roda sempre com `--prune`** (com `--yes`, sem prompt): o vault é a única fonte da
+   verdade, então os pontos de uma nota apagada saem do Qdrant na rodada seguinte, e o git do vault guarda o
+   histórico. A rodada manual continua pedindo confirmação. O wrapper (`scheduled-ingest.sh`) escreve no log o
+   código de saída e a linha `orphans:` do relatório (quantas notas e pontos foram podados). Salvaguarda
+   nova: o CLI **recusa podar um vault cuja varredura não achou nenhuma nota** (`refuseEmptyVault`), porque um
+   disco desmontado se parece exatamente com um vault inteiro apagado e o `splitStillOnDisk` não ajuda aí;
+   apagar de verdade todo um vault é manual.
+   **Duas travas na poda sem ninguém olhando (`--yes`)**, porque a salvaguarda do vault vazio não pega um
+   vault que existe e tem notas: (a) **teto por rodada**, por vault: recusa a poda inteira se os órfãos passam
+   do menor entre 20 notas e 5% das notas indexadas do vault (piso de 3; `--prune-max-notes`,
+   `--prune-max-percent`, e `KNOWRAG_PRUNE_MAX_*` no wrapper) — 20 bounda um vault grande, 5% um pequeno;
+   (b) **identidade da raiz**: o caminho canônico e o hash do commit raiz do git de cada vault ficam num arquivo
+   de estado fora do vault (`vault-roots.json` em `KNOWRAG_STATE_DIR`/`$XDG_STATE_HOME/knowrag`), gravado ao fim
+   de toda ingestão sem falhas; raiz diferente (outro repositório; a mesma em outra pasta conta como a mesma)
+   ou sem registro recusa a poda. A identidade tem três estados (git com commit; sem git comprovado; desconhecido
+   = git ausente/timeout/repositório ilegível): desconhecido falha fechado e recusa; caminho só vale quando os
+   dois lados são sem-git comprovados; registro com commit nunca é rebaixado sem aceite; gravação sob flock. A recusa sai com código ≠ 0, apaga nada e põe o motivo no relatório e na
+   linha `scheduled-ingest:`. O jeito de passar é humano: `knowrag ingest --dry-run`, depois `knowrag ingest
+   --prune` num terminal (mostra os motivos e pergunta; `y` poda e aceita a raiz) ou, para um vault movido de
+   propósito, `knowrag ingest --accept-vault-root`.
+5. **No vault do dono só `wiki/` é indexada.** `raw/` tem uma página derivada em `wiki/` para cada nota, e
+   indexar as duas daria duas respostas. Não existe "incluir só": `AREAS=wiki` e toda outra pasta de 1º nível
+   em `EXCLUDE_FOLDERS` (mais os `.md` soltos da raiz em `EXCLUDE_ROOT_FILES`); `MCP_AREAS=wiki`. Pasta de 1º
+   nível nova faz a ingestão falhar nomeando-a, que é o desejado. Exemplo em
+   `scripts/embedder-service/ingest.env.example` e no README.
 
 ## Escolha do modelo de embedding — decisões de 2026-11-15
 

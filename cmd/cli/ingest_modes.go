@@ -152,11 +152,17 @@ func splitStillOnDisk(roots map[string]string, report *ingest.Report) {
 // lines inline so a test can hand it a store and watch whether it was touched at all. That is the
 // only assertion that separates a refusal from a prune that ran and then complained — both return an
 // error, and over an empty orphan list both also delete nothing.
+//
+// scope carries what the run knows about the vaults it scanned (nil skips every check in it, which is
+// only for callers that have no scan, such as tests of the layers below): a vault the scan found EMPTY
+// while the index holds its points is refused (refuseEmptyVault), and a prune over the ceiling or from a
+// vault root that is not the last ingested one is refused unless a person confirms (scope.gate).
 func pruneOrphans(
 	ctx context.Context,
 	s ingest.Store,
 	tenantID string,
 	roots map[string]string,
+	scope *pruneScope,
 	opts ingestOptions,
 	report *ingest.Report,
 ) error {
@@ -184,6 +190,12 @@ func pruneOrphans(
 				"which notes were deleted — nothing was removed; fix the connection to Qdrant and " +
 				"run it again")
 	}
+	if err := refuseEmptyVault(scope.noteCounts(), report); err != nil {
+		return err
+	}
+	if err := scope.gate(report.Orphans, opts.yes, report); err != nil {
+		return err
+	}
 	var err error
 	// Filtered is passed rather than assumed false, even though validateModes already refuses
 	// --prune with --only one layer up. Both authorizations travel the same way and for the same
@@ -193,4 +205,26 @@ func pruneOrphans(
 	report.PointsPruned, err = ingest.Prune(ctx, s, tenantID, report.Orphans,
 		ingest.PruneOptions{Confirmed: true, Filtered: opts.only != ""})
 	return err
+}
+
+// refuseEmptyVault refuses a prune that would delete a whole vault's points because the scan of that
+// vault found no notes at all.
+//
+// splitStillOnDisk protects a note whose file is still there, and it cannot help here: a vault root
+// that exists and is empty (a mount point whose drive is not mounted, a folder emptied by a failed sync)
+// has no files for any note, so every one of its notes is "provably absent" and every point of the
+// vault is an orphan. That is the one way a scheduled `--prune --yes` could erase an index with nobody
+// asking for it. A vault that really lost every note is rare enough to be handled by hand, so the
+// answer here is to refuse, leave the points alone and say why; the run still ingests what it found.
+func refuseEmptyVault(noteCounts map[string]int, report *ingest.Report) error {
+	for _, o := range report.Orphans {
+		if n, scanned := noteCounts[o.Vault]; scanned && n == 0 {
+			report.PruneSkipped = "the scan of vault " + o.Vault + " found no notes"
+			return fmt.Errorf("refusing to prune: the scan of vault %q found no notes while the index holds "+
+				"its points, which looks like an unmounted or emptied vault rather than the deletion of every "+
+				"note — nothing was removed; check the vault path and mount and run it again. If every note "+
+				"really was deleted, remove that vault's points deliberately instead of through --prune", o.Vault)
+		}
+	}
+	return nil
 }
