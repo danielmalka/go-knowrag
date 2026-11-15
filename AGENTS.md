@@ -357,7 +357,9 @@ Valem para quando o projeto for religado; o projeto continua desligado e nada di
    (b) **identidade da raiz**: o caminho canônico e o hash do commit raiz do git de cada vault ficam num arquivo
    de estado fora do vault (`vault-roots.json` em `KNOWRAG_STATE_DIR`/`$XDG_STATE_HOME/knowrag`), gravado ao fim
    de toda ingestão sem falhas; raiz diferente (outro repositório; a mesma em outra pasta conta como a mesma)
-   ou sem registro recusa a poda. A recusa sai com código ≠ 0, apaga nada e põe o motivo no relatório e na
+   ou sem registro recusa a poda. A identidade tem três estados (git com commit; sem git comprovado; desconhecido
+   = git ausente/timeout/repositório ilegível): desconhecido falha fechado e recusa; caminho só vale quando os
+   dois lados são sem-git comprovados; registro com commit nunca é rebaixado sem aceite; gravação sob flock. A recusa sai com código ≠ 0, apaga nada e põe o motivo no relatório e na
    linha `scheduled-ingest:`. O jeito de passar é humano: `knowrag ingest --dry-run`, depois `knowrag ingest
    --prune` num terminal (mostra os motivos e pergunta; `y` poda e aceita a raiz) ou, para um vault movido de
    propósito, `knowrag ingest --accept-vault-root`.

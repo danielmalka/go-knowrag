@@ -551,7 +551,12 @@ apagado, saída ≠ 0, o motivo no relatório e na linha `scheduled-ingest:` —
   muda de pasta, diferente em outro vault). Mesmo repositório em outra pasta é o mesmo vault; outro
   repositório no mesmo caminho não. Sem registro ainda (primeira rodada, ou o arquivo se perdeu) a poda
   também é recusada até a rodada seguinte, que grava a raiz depois de uma ingestão sem falhas. Um arquivo de
-  estado ilegível nunca abre a poda.
+  estado ilegível nunca abre a poda. A identidade tem três estados: repositório git com commit, pasta
+  comprovadamente sem git (sem `.git` e `git rev-parse` diz que não é repositório) e **desconhecido** (git
+  ausente, timeout, repositório ilegível ou sem commits). Desconhecido falha fechado: a poda é recusada com o
+  motivo e nada é gravado. O caminho só vale como identidade quando os dois lados são pastas sem git
+  comprovadas; um registro com commit nunca vira só-caminho sem `--accept-vault-root`. O arquivo de estado é
+  gravado sob `flock` (`vault-roots.json.lock`), então ingestões concorrentes não perdem registros.
 
 **O que fazer quando a poda é recusada.** Não force a rodada agendada. Rode `knowrag ingest --dry-run` e leia
 a lista de órfãos: se o vault está montado e é o certo, a lista diz o que sumiu. Então, à mão e num terminal,

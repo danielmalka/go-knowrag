@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -151,6 +154,15 @@ func TestPrune_AboveTheLimits_ANoOrNobodyToAskRefuses(t *testing.T) {
 	}
 }
 
+// repo and plain build the two kinds of identity a test needs without touching git.
+func repo(path, commit string) vaultRoot {
+	return vaultRoot{Path: path, Git: gitCommit, GitRoot: commit}
+}
+func plain(path string) vaultRoot { return vaultRoot{Path: path, Git: gitNone} }
+func unknown(path string) vaultRoot {
+	return vaultRoot{Path: path, Git: gitUnknown, GitNote: "git could not be run"}
+}
+
 // --- the identity of the vault root ---------------------------------------------------------------
 
 // gitVault makes a git repository whose root commit differs from every other one made with a different
@@ -171,33 +183,120 @@ func gitVault(t *testing.T, seed int) string {
 	return root
 }
 
-func TestVaultRoot_SameVaultRules(t *testing.T) {
-	a := vaultRoot{Path: "/x/a", GitRoot: "111"}
+// The comparison fails CLOSED. A recorded repository is never demoted to "compare the path" because git
+// failed this time, and only two PROVEN non-repositories are compared by path.
+func TestVaultRoot_Comparison(t *testing.T) {
 	for name, tc := range map[string]struct {
-		other vaultRoot
-		want  bool
+		recorded, now vaultRoot
+		wantSame      bool
 	}{
-		"the same path and repository":             {vaultRoot{Path: "/x/a", GitRoot: "111"}, true},
-		"moved to another folder, same repository": {vaultRoot{Path: "/y/b", GitRoot: "111"}, true},
-		"same path, a different repository":        {vaultRoot{Path: "/x/a", GitRoot: "222"}, false},
-		"another path, another repository":         {vaultRoot{Path: "/y/b", GitRoot: "222"}, false},
-		"no git root now, same path":               {vaultRoot{Path: "/x/a"}, true},
-		"no git root now, another path":            {vaultRoot{Path: "/y/b"}, false},
+		"same repository, same path":              {repo("/x/a", "111"), repo("/x/a", "111"), true},
+		"same repository moved to another folder": {repo("/x/a", "111"), repo("/y/b", "111"), true},
+		"another repository at the same path":     {repo("/x/a", "111"), repo("/x/a", "222"), false},
+		"another repository, another path":        {repo("/x/a", "111"), repo("/y/b", "222"), false},
+		"recorded repository, git failed now":     {repo("/x/a", "111"), unknown("/x/a"), false},
+		"recorded repository, no longer a repo":   {repo("/x/a", "111"), plain("/x/a"), false},
+		"recorded plain folder, now a repo":       {plain("/x/a"), repo("/x/a", "111"), false},
+		"two plain folders, same path":            {plain("/x/a"), plain("/x/a"), true},
+		"two plain folders, another path":         {plain("/x/a"), plain("/y/b"), false},
+		"recorded plain folder, git failed now":   {plain("/x/a"), unknown("/x/a"), false},
+		"an old record with no git kind":          {vaultRoot{Path: "/x/a"}, plain("/x/a"), false},
+		"a record that says unknown":              {unknown("/x/a"), unknown("/x/a"), false},
 	} {
-		if got := a.sameVault(tc.other); got != tc.want {
-			t.Errorf("%s: sameVault = %v, want %v", name, got, tc.want)
+		got := tc.recorded.differenceFrom(tc.now) == ""
+		if got != tc.wantSame {
+			t.Errorf("%s: same = %v, want %v (%q)", name, got, tc.wantSame, tc.recorded.differenceFrom(tc.now))
 		}
+	}
+}
+
+// fakeGit replaces the git runner for one test.
+func fakeGit(t *testing.T, fn func(args ...string) gitResult) {
+	t.Helper()
+	old := runGit
+	runGit = func(_ context.Context, _ string, args ...string) gitResult { return fn(args...) }
+	t.Cleanup(func() { runGit = old })
+}
+
+func TestGitIdentity_FailsClosed(t *testing.T) {
+	notARepo := gitResult{exit: 128, stderr: "fatal: not a git repository (or any of the parent directories): .git"}
+	for name, tc := range map[string]struct {
+		answer func(args ...string) gitResult
+		want   gitKind
+	}{
+		"git cannot be run (missing binary)": {func(...string) gitResult { return gitResult{err: exec.ErrNotFound} }, gitUnknown},
+		"git timed out":                      {func(...string) gitResult { return gitResult{err: context.DeadlineExceeded} }, gitUnknown},
+		"git crashed":                        {func(...string) gitResult { return gitResult{exit: 1, stderr: "fatal: bad object"} }, gitUnknown},
+		"git says it is not a repository":    {func(...string) gitResult { return notARepo }, gitNone},
+		"inside .git, not a work tree":       {func(...string) gitResult { return gitResult{stdout: "false\n"} }, gitUnknown},
+		"the root commit cannot be read": {func(a ...string) gitResult {
+			if a[0] == "rev-parse" {
+				return gitResult{stdout: "true\n"}
+			}
+			return gitResult{err: context.DeadlineExceeded}
+		}, gitUnknown},
+		"a repository with no commit": {func(a ...string) gitResult {
+			if a[0] == "rev-parse" {
+				return gitResult{stdout: "true\n"}
+			}
+			return gitResult{exit: 128, stderr: "fatal: ambiguous argument 'HEAD'"}
+		}, gitUnknown},
+		"a repository with a root commit": {func(a ...string) gitResult {
+			if a[0] == "rev-parse" {
+				return gitResult{stdout: "true\n"}
+			}
+			return gitResult{stdout: "bbb\naaa\n"}
+		}, gitCommit},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fakeGit(t, tc.answer)
+			kind, commit, note := gitIdentity(t.Context(), t.TempDir())
+			if kind != tc.want {
+				t.Fatalf("kind = %q (%s), want %q", kind, note, tc.want)
+			}
+			if kind == gitCommit && commit != "aaa" {
+				t.Errorf("commit = %q, want the smallest root %q", commit, "aaa")
+			}
+			if kind == gitUnknown && note == "" {
+				t.Error("an unknown identity carries no note, so the refusal cannot say why")
+			}
+		})
+	}
+}
+
+// "not a repository" is only believed when there is no .git entry: a .git that git rejects is a damaged
+// repository.
+func TestGitIdentity_ADamagedGitDirIsNotAPlainFolder(t *testing.T) {
+	fakeGit(t, func(...string) gitResult {
+		return gitResult{exit: 128, stderr: "fatal: not a git repository (or any of the parent directories): .git"}
+	})
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if kind, _, _ := gitIdentity(t.Context(), root); kind != gitUnknown {
+		t.Errorf("kind = %q for a folder with a .git git rejects, want unknown", kind)
+	}
+}
+
+// With the real git binary gone from PATH nothing can be said about a repository, and nothing may be
+// inferred from that.
+func TestGitIdentity_RealBinaryAbsent(t *testing.T) {
+	root := gitVault(t, 1)
+	t.Setenv("PATH", t.TempDir())
+	if kind, _, _ := gitIdentity(t.Context(), root); kind != gitUnknown {
+		t.Errorf("kind = %q with no git on PATH, want unknown", kind)
 	}
 }
 
 func TestIdentifyRoot_ReadsTheRealRepositoryAndFollowsSymlinks(t *testing.T) {
 	one, other := gitVault(t, 1), gitVault(t, 2)
 	idOne, err := identifyRoot(t.Context(), one)
-	if err != nil || idOne.GitRoot == "" {
-		t.Fatalf("identifyRoot = %+v, %v; want a git root", idOne, err)
+	if err != nil || idOne.Git != gitCommit || idOne.GitRoot == "" {
+		t.Fatalf("identifyRoot = %+v, %v; want a repository with a root commit", idOne, err)
 	}
 	idOther, _ := identifyRoot(t.Context(), other)
-	if idOne.GitRoot == idOther.GitRoot || idOne.sameVault(idOther) {
+	if idOne.GitRoot == idOther.GitRoot || idOne.differenceFrom(idOther) == "" {
 		t.Errorf("two different repositories share an identity: %+v %+v", idOne, idOther)
 	}
 	link := filepath.Join(t.TempDir(), "link")
@@ -207,18 +306,18 @@ func TestIdentifyRoot_ReadsTheRealRepositoryAndFollowsSymlinks(t *testing.T) {
 	if viaLink, _ := identifyRoot(t.Context(), link); viaLink.Path != idOne.Path {
 		t.Errorf("a symlink to the vault has path %q, want the canonical %q", viaLink.Path, idOne.Path)
 	}
-	plain, _ := identifyRoot(t.Context(), t.TempDir())
-	if plain.GitRoot != "" {
-		t.Errorf("a folder with no repository got git root %q", plain.GitRoot)
+	folder, _ := identifyRoot(t.Context(), t.TempDir())
+	if folder.Git != gitNone || folder.GitRoot != "" {
+		t.Errorf("a folder with no repository was classified %+v, want proven non-git", folder)
 	}
 }
 
 func TestCheckRoots(t *testing.T) {
-	recs := rootRecords{Roots: map[string]vaultRoot{"s|dono": {Path: "/x/a", GitRoot: "111"}}}
+	recs := rootRecords{Roots: map[string]vaultRoot{"s|dono": repo("/x/a", "111")}}
 	got := checkRoots(recs, "s", map[string]vaultRoot{
-		"dono":  {Path: "/x/a", GitRoot: "111"},
-		"novo":  {Path: "/n"},
-		"outro": {Path: "/x/a", GitRoot: "222"},
+		"dono":  repo("/x/a", "111"),
+		"novo":  plain("/n"),
+		"outro": repo("/x/a", "222"),
 	})
 	if v := got["dono"]; v.Reason != "" || v.Mismatch {
 		t.Errorf("the recorded root was not recognized: %+v", v)
@@ -226,7 +325,7 @@ func TestCheckRoots(t *testing.T) {
 	if v := got["novo"]; v.Reason == "" || v.Mismatch {
 		t.Errorf("a vault with no record must be a reason but not a mismatch: %+v", v)
 	}
-	if _, found := checkRoots(recs, "other-scope", map[string]vaultRoot{"dono": {Path: "/x/a"}})["dono"]; !found {
+	if _, found := checkRoots(recs, "other-scope", map[string]vaultRoot{"dono": plain("/x/a")})["dono"]; !found {
 		t.Error("a record of another index scope was trusted")
 	}
 }
@@ -235,8 +334,8 @@ func TestCheckRoots(t *testing.T) {
 // scanned fine, the ceiling may even pass (a vault of similar size), and the uids of the real vault are
 // all orphans. The identity is what refuses.
 func TestPrune_RootPointedAtAnotherVaultWithNotes_IsRefused(t *testing.T) {
-	recs := rootRecords{Roots: map[string]vaultRoot{"s|dono": {Path: "/real", GitRoot: "111"}}}
-	verdicts := checkRoots(recs, "s", map[string]vaultRoot{"dono": {Path: "/real", GitRoot: "999"}}) // other repo, same path
+	recs := rootRecords{Roots: map[string]vaultRoot{"s|dono": repo("/real", "111")}}
+	verdicts := checkRoots(recs, "s", map[string]vaultRoot{"dono": repo("/real", "999")}) // other repo, same path
 	// Same size, so the ceiling alone would let a swap of equal vaults through only if the orphans were
 	// few; here the orphan count is 2 of 102 (under the ceiling) to prove the identity refuses by itself.
 	scope := &pruneScope{NoteCounts: map[string]int{"dono": 100}, Ceiling: defaultCeiling(), Roots: verdicts}
@@ -259,8 +358,8 @@ func TestPrune_NoOrphansNeedsNoIdentity(t *testing.T) {
 
 func TestUpdateRecords(t *testing.T) {
 	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
-	old := rootRecords{Roots: map[string]vaultRoot{"s|dono": {Path: "/real", GitRoot: "111"}}}
-	current := map[string]vaultRoot{"dono": {Path: "/other", GitRoot: "999"}, "novo": {Path: "/n"}}
+	old := rootRecords{Roots: map[string]vaultRoot{"s|dono": repo("/real", "111")}}
+	current := map[string]vaultRoot{"dono": repo("/other", "999"), "novo": plain("/n")}
 	verdicts := checkRoots(old, "s", current)
 
 	kept := updateRecords(old, "s", current, verdicts, false, now)
@@ -284,7 +383,7 @@ func TestRootRecords_RoundTripAndCorruption(t *testing.T) {
 	if recs, err := loadRootRecords(path); err != nil || len(recs.Roots) != 0 {
 		t.Fatalf("a missing file = %+v, %v; want empty and no error", recs, err)
 	}
-	want := rootRecords{Version: 1, Roots: map[string]vaultRoot{"s|dono": {Path: "/x", GitRoot: "abc"}}}
+	want := rootRecords{Version: 1, Roots: map[string]vaultRoot{"s|dono": repo("/x", "abc")}}
 	if err := saveRootRecords(path, want); err != nil {
 		t.Fatal(err)
 	}
@@ -389,5 +488,118 @@ func TestPruneStep_AnUnreadableStateFileNeverOpensTheGate(t *testing.T) {
 	s.record(opts, ingest.Report{}, os.Stderr)                      // must not overwrite what it could not read
 	if raw, _ := os.ReadFile(stateFile); string(raw) != "garbage" { // #nosec G304 -- a file this test created
 		t.Errorf("the unreadable state file was overwritten: %q", raw)
+	}
+}
+
+// --- fail closed when git cannot be read -----------------------------------------------------------
+
+// The case the review named: the recorded root has a commit, and a later check at the same path cannot read
+// the repository. The identities must NOT "match by path", and the unattended prune must not go ahead.
+func TestPruneStep_RecordedRepositoryButGitFailsNow_RefusesThePrune(t *testing.T) {
+	root := gitVault(t, 1)
+	cfg, opts, scans := scopeFixture(t, root)
+	first := newPruneScope(t.Context(), cfg, scans, opts, os.Stderr)
+	first.record(opts, ingest.Report{}, os.Stderr)
+	if v := newPruneScope(t.Context(), cfg, scans, opts, os.Stderr).verdicts["dono"]; v.Reason != "" {
+		t.Fatalf("setup: the recorded root is not recognized: %+v", v)
+	}
+
+	t.Setenv("PATH", t.TempDir()) // git is gone: same folder, same path, nothing readable
+	broken := newPruneScope(t.Context(), cfg, scans, opts, os.Stderr)
+	v := broken.verdicts["dono"]
+	if !v.Mismatch || !strings.Contains(v.Reason, "could not be established") {
+		t.Fatalf("verdict = %+v, want a mismatch saying the identity could not be established", v)
+	}
+
+	store, report, err := pruneWith(t, broken.scope, orphansOf("dono", 2), ingestOptions{yes: true})
+	if err == nil || len(store.calls) != 0 || !strings.Contains(report.PruneSkipped, "could not be established") {
+		t.Fatalf("err=%v calls=%v skipped=%q; the unattended prune must be refused with the reason", err, store.calls, report.PruneSkipped)
+	}
+
+	// Nor may the failed look rewrite the record as "path only": back with git, the repository is recognized.
+	broken.record(opts, ingest.Report{}, os.Stderr)
+	opts.acceptVaultRoot = true // even an acceptance cannot record an identity nobody could read
+	broken.record(opts, ingest.Report{}, os.Stderr)
+	t.Setenv("PATH", os.Getenv("PATH")+string(os.PathListSeparator)+"/usr/bin:/bin")
+	if again := newPruneScope(t.Context(), cfg, scans, opts, os.Stderr).verdicts["dono"]; again.Reason != "" {
+		t.Fatalf("a failed git check damaged the record: %+v", again)
+	}
+}
+
+func TestPruneStep_PlainFoldersAreComparedByPath(t *testing.T) {
+	root := t.TempDir() // no git here, and git says so
+	cfg, opts, scans := scopeFixture(t, root)
+	newPruneScope(t.Context(), cfg, scans, opts, os.Stderr).record(opts, ingest.Report{}, os.Stderr)
+	if v := newPruneScope(t.Context(), cfg, scans, opts, os.Stderr).verdicts["dono"]; v.Reason != "" {
+		t.Fatalf("a plain folder was not recognized by its path: %+v", v)
+	}
+	cfg.Vaults["dono"] = config.VaultSettings{Path: t.TempDir()}
+	if v := newPruneScope(t.Context(), cfg, scans, opts, os.Stderr).verdicts["dono"]; !v.Mismatch {
+		t.Fatalf("another plain folder was recognized as the same vault: %+v", v)
+	}
+}
+
+// A vault that was a repository and no longer is (the .git was lost in a copy) is a different identity,
+// not a plain folder to compare by path.
+func TestPruneStep_ARepositoryThatStoppedBeingOneIsRefused(t *testing.T) {
+	root := gitVault(t, 1)
+	cfg, opts, scans := scopeFixture(t, root)
+	newPruneScope(t.Context(), cfg, scans, opts, os.Stderr).record(opts, ingest.Report{}, os.Stderr)
+	if err := os.RemoveAll(filepath.Join(root, ".git")); err != nil {
+		t.Fatal(err)
+	}
+	if v := newPruneScope(t.Context(), cfg, scans, opts, os.Stderr).verdicts["dono"]; !v.Mismatch || !strings.Contains(v.Reason, "kind") {
+		t.Fatalf("verdict = %+v, want a mismatch about the root changing kind", v)
+	}
+}
+
+func TestUpdateRecords_NeverRecordsAnUnknownIdentity(t *testing.T) {
+	old := rootRecords{Roots: map[string]vaultRoot{"s|dono": repo("/real", "111")}}
+	cur := map[string]vaultRoot{"dono": unknown("/real"), "novo": unknown("/n")}
+	got := updateRecords(old, "s", cur, checkRoots(old, "s", cur), true, time.Now()) // accepted, and still
+	if got.Roots["s|dono"].GitRoot != "111" {
+		t.Errorf("a recorded commit was demoted by an unreadable look: %+v", got.Roots["s|dono"])
+	}
+	if _, found := got.Roots["s|novo"]; found {
+		t.Error("a vault whose identity is unknown was recorded")
+	}
+}
+
+// --- concurrent ingestions do not erase each other's records --------------------------------------
+
+func TestRecordRoots_ConcurrentRunsKeepEveryRecord(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "vault-roots.json")
+	const runs = 24
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := range runs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			vaultName := fmt.Sprintf("v%02d", i)
+			if err := recordRoots(path, "s", map[string]vaultRoot{vaultName: plain("/" + vaultName)}, false, time.Now()); err != nil {
+				t.Errorf("recordRoots(%s): %v", vaultName, err)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	recs, err := loadRootRecords(path)
+	if err != nil || len(recs.Roots) != runs {
+		t.Fatalf("%d record(s) survived %d concurrent runs (%v): records were lost", len(recs.Roots), runs, err)
+	}
+}
+
+func TestRecordRoots_NeverOverwritesAFileItCannotRead(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "vault-roots.json")
+	if err := os.WriteFile(path, []byte("garbage"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := recordRoots(path, "s", map[string]vaultRoot{"dono": plain("/x")}, false, time.Now()); err == nil {
+		t.Error("recordRoots wrote over a file it could not decode")
+	}
+	if raw, _ := os.ReadFile(path); string(raw) != "garbage" { // #nosec G304 -- a file this test created
+		t.Errorf("the unreadable file was changed: %q", raw)
 	}
 }

@@ -207,7 +207,7 @@ for a vault whose scan found **no notes at all** (an unmounted drive looks exact
 note was deleted), when it would delete more than the **ceiling** (the smaller of 20 notes and 5% of the
 vault's indexed notes, at least 3; `KNOWRAG_PRUNE_MAX_NOTES` / `KNOWRAG_PRUNE_MAX_PERCENT` move it), and when the
 vault **root is not the one the last successful run used** (canonical path plus the git root commit, kept in
-`vault-roots.json` under `KNOWRAG_STATE_DIR` or `$XDG_STATE_HOME/knowrag`). A refusal exits non-zero, deletes
+`vault-roots.json` under `KNOWRAG_STATE_DIR` or `$XDG_STATE_HOME/knowrag`). A git identity that cannot be read (git missing, timeout, unreadable repository) refuses too: it fails closed. A refusal exits non-zero, deletes
 nothing and puts its reason in the `scheduled-ingest:` log line. See the README's "O que fazer quando a poda é
 recusada": `knowrag ingest --dry-run`, then a manual `knowrag ingest --prune` (it asks), or
 `knowrag ingest --accept-vault-root` after a deliberate move.

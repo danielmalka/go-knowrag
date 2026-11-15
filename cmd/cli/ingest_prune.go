@@ -100,8 +100,7 @@ func (st *pruneStep) record(opts ingestOptions, report ingest.Report, errOut io.
 		return
 	}
 	accepted := opts.acceptVaultRoot || st.scope.accepted
-	next := updateRecords(st.recs, st.scopeKey, st.current, st.verdicts, accepted, time.Now())
-	if err := saveRootRecords(st.statePth, next); err != nil {
+	if err := recordRoots(st.statePth, st.scopeKey, st.current, accepted, time.Now()); err != nil {
 		_, _ = fmt.Fprintf(errOut, "warning: the vault-root records were not saved (%v); the next scheduled prune will be refused until they are\n", err)
 	}
 }
