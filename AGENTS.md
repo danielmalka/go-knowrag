@@ -98,6 +98,19 @@ Substitui a de 2026-08-16 ("não é 24 h", janela 07:00–23:00) e a do item 10 
   resolver um nome), e qualquer outro valor encerra o processo com status 78. Não há
   opt-in para rede: expor o serviço exigiria antes uma autenticação, como decisão própria.
 - **Dependências Python com versões exatas** em `scripts/embedder-service/requirements.txt`.
+- **Virada de perfil (PR 6): o EmbeddingGemma 2 é o perfil efetivo, escolhido por configuração, não pelo
+  `DefaultProfile()`.** Os comandos (`cmd/cli`, `mcp-server`, `measure-*`) resolvem o perfil com
+  `config.Profile()` / `mcp-server Config.Profile()` (`MODEL_PROFILE` / `MCP_MODEL_PROFILE`, padrão
+  `embeddinggemma-2`) e o passam adiante: embedder (`NewServiceEmbedderFor`), `Searcher` (`Config.Profile`),
+  manifesto (`ManifestFor`), janela do chunk e `TitleMaxTokens`. `schema.DefaultProfile()` continua BGE-M3 só
+  como fallback da biblioteca e dos testes até a limpeza (PR 7) apagar esse perfil; por isso
+  `TestNoEntryPointReadsTheLibraryDefaultProfile` (`cmd/cli/profile_wiring_test.go`) reprova qualquer ponto de
+  entrada que o leia. Mudar o `DefaultProfileID` agora quebraria ~40 testes presos ao BGE-M3 que a PR 7
+  apaga. A collection configurada (`DEFAULT_COLLECTION`, `MCP_COLLECTION`) tem de ser do perfil: sem isso o
+  comando recusa antes de abrir conexão.
+- **Timeout da busca (MCP):** uma tentativa de 8 s, sem retry (`embedProfile`): a carga a frio do modelo mede
+  3,0–5,9 s, e 1,5 s de verificação + 8 s = 9,5 s cabem no `searchDeadline` de 10 s. O handshake não carrega
+  o modelo.
 - Detalhes, números medidos e operação: `scripts/embedder-service/README.md`.
 
 ## `docs/` fica fora do git, e isso é decisão fechada

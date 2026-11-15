@@ -29,6 +29,7 @@ import (
 	"github.com/danielmalka/go-knowrag/internal/embed"
 	"github.com/danielmalka/go-knowrag/internal/measure"
 	"github.com/danielmalka/go-knowrag/internal/retrieval"
+	"github.com/danielmalka/go-knowrag/internal/schema"
 	"github.com/danielmalka/go-knowrag/internal/store"
 )
 
@@ -91,12 +92,17 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if *collection == "" {
 		*collection = cfg.DefaultCollection
 	}
+	profile, err := cfg.Profile()
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "measure-search: %v\n", err)
+		return 1
+	}
 	if err := cfg.Require(config.NeedQdrant | config.NeedEmbedder | config.NeedCollection); err != nil {
 		_, _ = fmt.Fprintf(stderr, "measure-search: %v\n", err)
 		return 1
 	}
 
-	searcher, release, err := dialSearcher(cfg)
+	searcher, release, err := dialSearcher(cfg, profile)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "measure-search: %v\n", err)
 		return 1
@@ -140,7 +146,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 // dialSearcher mirrors cmd/cli/search.go's dialSearcher — same client, same embed profile shape —
 // so a p95/p99 measured here describes the connection an operator's own `cli search` makes, not a
 // differently-tuned one.
-func dialSearcher(cfg *config.Config) (*retrieval.Searcher, func(), error) {
+func dialSearcher(cfg *config.Config, profile schema.ModelProfile) (*retrieval.Searcher, func(), error) {
 	client, err := store.NewQdrantClient(store.Config{Endpoint: cfg.QdrantEndpoint, APIKey: cfg.QdrantAPIKey})
 	if err != nil {
 		return nil, nil, err
@@ -161,13 +167,15 @@ func dialSearcher(cfg *config.Config) (*retrieval.Searcher, func(), error) {
 	// Same shape as cmd/cli/ingest.go's embedProfile: a one-shot operator command with nobody
 	// waiting on a p99 of its own connection setup, so the generous timeouts there are appropriate
 	// here too — this tool's own p95/p99 are what it measures, not what it is bound by.
-	embedder, err := embed.NewServiceEmbedder(embed.OperatorProfile(cfg.EmbedderEndpoint), transport)
+	embedder, err := embed.NewServiceEmbedderFor(embed.OperatorProfile(cfg.EmbedderEndpoint), transport, profile)
 	if err != nil {
 		release()
 		return nil, nil, err
 	}
 
-	return retrieval.NewSearcher(embedder, querier, retrieval.DefaultConfig()), release, nil
+	searchCfg := retrieval.DefaultConfig()
+	searchCfg.Profile = profile
+	return retrieval.NewSearcher(embedder, querier, searchCfg), release, nil
 }
 
 func writeJSONReport(path string, report measure.SearchReport) error {

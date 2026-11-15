@@ -40,7 +40,7 @@ func (m *memState) Save(s schema.AppliedState) error { m.state = s; return nil }
 func TestSchemaApplyCmd_Success_ExitsZero(t *testing.T) {
 	var out bytes.Buffer
 
-	code, err := runSchemaApply(t.Context(), &out, cleanQdrant{}, &memState{})
+	code, err := runSchemaApply(t.Context(), &out, cleanQdrant{}, schema.Manifest(), &memState{})
 	if err != nil {
 		t.Fatalf("runSchemaApply: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestSchemaApplyCmd_DriftError_ExitsNonZero(t *testing.T) {
 	}}}}
 
 	var out bytes.Buffer
-	code, err := runSchemaApply(t.Context(), &out, cleanQdrant{}, state)
+	code, err := runSchemaApply(t.Context(), &out, cleanQdrant{}, schema.Manifest(), state)
 
 	if code == exitOK {
 		t.Errorf("exit code = %d on drift, want non-zero", code)

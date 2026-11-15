@@ -39,6 +39,10 @@ func dialSearcher(_ context.Context, cfg *config.Config) (clicmd.Searcher, func(
 	if err := cfg.Require(config.NeedQdrant | config.NeedEmbedder | config.NeedCollection); err != nil {
 		return nil, nil, err
 	}
+	profile, err := cfg.Profile()
+	if err != nil {
+		return nil, nil, err
+	}
 
 	client, err := store.NewQdrantClient(store.Config{
 		Endpoint: cfg.QdrantEndpoint,
@@ -68,11 +72,13 @@ func dialSearcher(_ context.Context, cfg *config.Config) (clicmd.Searcher, func(
 	// second set of timeouts here would be numbers with no measurement behind them. What it costs is
 	// a slow failure against a wedged backend, which is the right trade for a command a human ran
 	// and can interrupt.
-	embedder, err := embed.NewServiceEmbedder(embedProfile(cfg.EmbedderEndpoint), transport)
+	embedder, err := embed.NewServiceEmbedderFor(embedProfile(cfg.EmbedderEndpoint), transport, profile)
 	if err != nil {
 		release()
 		return nil, nil, err
 	}
 
-	return retrieval.NewSearcher(embedder, querier, retrieval.DefaultConfig()), release, nil
+	searchCfg := retrieval.DefaultConfig()
+	searchCfg.Profile = profile
+	return retrieval.NewSearcher(embedder, querier, searchCfg), release, nil
 }

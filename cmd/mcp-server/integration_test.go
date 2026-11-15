@@ -105,6 +105,11 @@ func TestSearchKnowledge_Integration_PrivateNoteNeverReturnedForConfiguredScope(
 		QdrantEndpoint:   integrationAddress,
 		QdrantAPIKey:     integrationAPIKey,
 		EmbedderEndpoint: "unused: the fake embedder is wired directly",
+		// This test is about the visibility filter, not the model: it seeds and searches BGE-M3's
+		// `interno` with the library default profile, so it names that profile instead of taking the
+		// deployed one. It goes with the BGE-M3 profile in the cleanup PR; the dense-only Qdrant path is
+		// covered by internal/store's dense_only_integration_test.go.
+		ModelProfile: "bge-m3",
 	}
 	cs := connect(t, cfg, searcher)
 

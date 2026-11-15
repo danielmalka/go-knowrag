@@ -259,3 +259,47 @@ func TestModelProfile_Validate_RejectsAReserveWithNoRoomForATitle(t *testing.T) 
 		t.Fatal("Validate accepted a prompt scheme whose reserve leaves no room for a title")
 	}
 }
+
+func TestResolveProfile_EmptyMeansTheDeployedProfile(t *testing.T) {
+	for _, id := range []string{"", "   "} {
+		p, err := ResolveProfile(id)
+		if err != nil || p.ID != DeployedProfileID {
+			t.Errorf("ResolveProfile(%q) = %q, %v; want the deployed profile %q", id, p.ID, err, DeployedProfileID)
+		}
+	}
+	if DeployedProfileID != "embeddinggemma-2" {
+		t.Errorf("DeployedProfileID = %q: the cutover serves EmbeddingGemma 2", DeployedProfileID)
+	}
+}
+
+func TestResolveProfile_NamedProfilesAndUnknownIDs(t *testing.T) {
+	p, err := ResolveProfile(" bge-m3 ")
+	if err != nil || p.ID != "bge-m3" {
+		t.Fatalf("ResolveProfile(bge-m3) = %q, %v", p.ID, err)
+	}
+	_, err = ResolveProfile("embeddinggemma-3")
+	if err == nil {
+		t.Fatal("an unknown profile ID was resolved instead of refused")
+	}
+	for _, want := range []string{"embeddinggemma-3", "bge-m3", "embeddinggemma-2"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %q (the typo and the registered IDs)", err, want)
+		}
+	}
+}
+
+func TestResolveProfile_ReturnsACopy(t *testing.T) {
+	a, _ := ResolveProfile("")
+	a.Collections[0] = "tampered"
+	b, _ := ResolveProfile("")
+	if b.Collections[0] == "tampered" {
+		t.Fatal("ResolveProfile shares the registry's collection slice with its callers")
+	}
+}
+
+func TestModelProfile_HasCollection(t *testing.T) {
+	eg2, _ := ProfileByID("embeddinggemma-2")
+	if !eg2.HasCollection("interno_eg2") || eg2.HasCollection("interno") {
+		t.Errorf("HasCollection: interno_eg2=%v interno=%v, want true and false", eg2.HasCollection("interno_eg2"), eg2.HasCollection("interno"))
+	}
+}

@@ -57,6 +57,14 @@ func newSchemaCmd(cfg *config.Config) *cobra.Command {
 				return err
 			}
 
+			// The manifest is the configured model profile's: its collection names and vector width.
+			// Provisioning the wrong profile's collections would create 1024-wide collections for a
+			// 768-wide model, which Qdrant accepts and the first upsert then rejects.
+			profile, err := cfg.Profile()
+			if err != nil {
+				return err
+			}
+
 			client, err := store.NewQdrantClient(store.Config{
 				Endpoint: cfg.QdrantEndpoint,
 				APIKey:   cfg.QdrantAPIKey,
@@ -69,7 +77,7 @@ func newSchemaCmd(cfg *config.Config) *cobra.Command {
 			defer func() { _ = client.Close() }()
 
 			code, err := runSchemaApply(cmd.Context(), cmd.OutOrStdout(), client,
-				&schema.FileAppliedStateStore{Path: statePath})
+				schema.ManifestFor(profile), &schema.FileAppliedStateStore{Path: statePath})
 			if code == exitOK {
 				return nil
 			}
@@ -91,9 +99,10 @@ func runSchemaApply(
 	ctx context.Context,
 	out io.Writer,
 	api store.QdrantAPI,
+	manifest []schema.CollectionManifest,
 	state schema.AppliedStateStore,
 ) (int, error) {
-	report, err := store.Apply(ctx, api, schema.Manifest(), state)
+	report, err := store.Apply(ctx, api, manifest, state)
 
 	// The report prints before the error check because a failed apply still did whatever it did to
 	// the collections it got through, and the operator needs to see that half.

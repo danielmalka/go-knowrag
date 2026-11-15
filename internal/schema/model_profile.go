@@ -5,6 +5,7 @@ import (
 	"maps"
 	"regexp"
 	"slices"
+	"strings"
 )
 
 // ModelProfile is everything about one embedding model that the rest of the build used to spell as a
@@ -65,9 +66,37 @@ type ModelProfile struct {
 	Collections []string
 }
 
-// DefaultProfileID is the profile every entry point uses until a later PR of the migration selects
-// another one.
+// DefaultProfileID is the profile the library falls back to where a caller names none (the zero value
+// of retrieval.Config.Profile, embed.Expected, the fakes). It stays BGE-M3 only until the cleanup PR
+// deletes that profile: the tests that pin hybrid and sparse behavior still build on it. Nothing that
+// RUNS a deployment uses it; every command resolves its profile with ResolveProfile instead, and
+// TestNoEntryPointReadsTheLibraryDefault keeps it that way.
 const DefaultProfileID = "bge-m3"
+
+// DeployedProfileID is the profile a deployment serves when it configures none: EmbeddingGemma 2,
+// since the cutover (no way back to BGE-M3, owner's decision of 2026-11-15).
+const DeployedProfileID = "embeddinggemma-2"
+
+// ResolveProfile is how a command picks its model profile: the configured ID, or DeployedProfileID
+// when nothing is configured. An unknown ID is an error naming the registered ones, never a fallback,
+// because a typo that quietly fell back would serve the wrong vector space.
+func ResolveProfile(id string) (ModelProfile, error) {
+	if id = strings.TrimSpace(id); id == "" {
+		id = DeployedProfileID
+	}
+	p, ok := ProfileByID(id)
+	if !ok {
+		ids := make([]string, 0, len(profiles))
+		for _, q := range profiles {
+			ids = append(ids, q.ID)
+		}
+		return ModelProfile{}, fmt.Errorf("unknown model profile %q; registered: %s", id, strings.Join(ids, ", "))
+	}
+	return p, nil
+}
+
+// HasCollection reports whether name is one of this profile's collections.
+func (p ModelProfile) HasCollection(name string) bool { return slices.Contains(p.Collections, name) }
 
 // Precision spellings used across the build (the wire dtype names are translated to these at
 // internal/embed/http.go).
