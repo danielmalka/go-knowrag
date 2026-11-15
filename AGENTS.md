@@ -325,8 +325,9 @@ Decisões do dono, que valem para qualquer trabalho de troca de modelo:
 7. **A rodada com o golden set ampliado roda só o EmbeddingGemma 2** (denso, bf16, com os prefixos do card),
    **sem rodar o bge-m3.** O dono compara o resultado do EmbeddingGemma 2 e decide a troca; o bge-m3 não é
    remedido nesta rodada.
-8. **A prova de 30 perguntas rodou numa cópia anterior do vault; a rodada ampliada roda no vault atual**
-   (o que o dono indica como o vault do projeto), e não na cópia antiga.
+8. **A prova de 30 perguntas e a rodada ampliada rodam na mesma cópia de referência do vault**, com as mesmas
+   exclusões, para que os números sejam comparáveis. Migrar a medição para o vault atual do projeto depende
+   de uma revisão do dono.
 
 **Resultado da prova** (30 perguntas, Recall@5, mesma conta do `eval --golden`: acerto = a nota esperada está
 no top 5; consulta densa de produção reproduzida; os dois modelos em bf16 na GPU, sobre os mesmos 4.661 chunks):
