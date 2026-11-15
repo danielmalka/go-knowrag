@@ -27,7 +27,7 @@ import (
 
 // parityHits is what the fake searcher answers on both sides.
 //
-// The scores are deliberately not in descending order. RRF fusion decides the order upstream, in
+// The scores are deliberately not in descending order. the search ranking decides the order upstream, in
 // internal/retrieval, and both adapters must pass that order through untouched; a fixture already
 // sorted by score would let an adapter that re-sorts by score look identical to one that does not.
 func parityHits() []retrieval.Result {

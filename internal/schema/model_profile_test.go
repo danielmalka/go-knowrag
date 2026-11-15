@@ -7,33 +7,39 @@ import (
 )
 
 // The default profile is spelled out in literals on purpose: it is the second, independent statement
-// of what the build embeds with, so a silent edit to the registry cannot agree with itself. PR 1 of
-// the embedding migration changes no behavior; this test is the proof that the values did not move.
-func TestDefaultProfile_IsBGEM3AsBefore(t *testing.T) {
+// of what the build embeds with, so a silent edit to the registry cannot agree with itself. The
+// values come from the model card and the pinned repository.
+func TestDefaultProfile_IsEmbeddingGemma2(t *testing.T) {
 	p := DefaultProfile()
-	if p.ID != "bge-m3" || p.Model != "BAAI/bge-m3" {
-		t.Errorf("ID/Model = %q/%q, want bge-m3 / BAAI/bge-m3", p.ID, p.Model)
+	if p.ID != "embeddinggemma-2" || p.Model != "google/embeddinggemma-2" {
+		t.Errorf("ID/Model = %q/%q, want embeddinggemma-2 / google/embeddinggemma-2", p.ID, p.Model)
 	}
-	if p.Revision != "5617a9f61b028005a4858fdac845db406aefb181" {
-		t.Errorf("Revision = %q, want the pinned BGE-M3 commit", p.Revision)
+	if DefaultProfileID != "embeddinggemma-2" {
+		t.Errorf("DefaultProfileID = %q, want embeddinggemma-2", DefaultProfileID)
 	}
-	if p.DenseDim != 1024 {
-		t.Errorf("DenseDim = %d, want 1024", p.DenseDim)
+	if p.Revision != "f9972ac22e696a105c482202646979e33e4b5a1e" {
+		t.Errorf("Revision = %q, want the pinned EmbeddingGemma 2 commit", p.Revision)
 	}
-	if !slices.Equal(p.Precisions, []string{"fp16"}) || p.PrimaryPrecision() != "fp16" {
-		t.Errorf("Precisions = %v, want [fp16]", p.Precisions)
+	if p.DenseDim != 768 || p.DenseWidth() != 768 {
+		t.Errorf("DenseDim = %d, want 768", p.DenseDim)
 	}
-	if p.Pooling != "cls" || p.Normalization != "l2" || p.PromptVersion != "" {
-		t.Errorf("Pooling/Normalization/PromptVersion = %q/%q/%q, want cls/l2/none", p.Pooling, p.Normalization, p.PromptVersion)
+	if p.Pooling != "mean" || p.Normalization != "l2" || p.PromptVersion != "gemma-search-v1" {
+		t.Errorf("Pooling/Normalization/PromptVersion = %q/%q/%q, want mean/l2/gemma-search-v1", p.Pooling, p.Normalization, p.PromptVersion)
 	}
-	if !p.HasSparse() || p.SparseParams["kind"] != "lexical_weights" || p.SparseParams["id_space"] != "tokenizer_vocab" {
-		t.Errorf("SparseParams = %v, want the BGE-M3 lexical_weights head", p.SparseParams)
-	}
-	if want := []string{"interno", "clientes", "base_paga"}; !slices.Equal(p.Collections, want) {
+	if want := []string{"interno_eg2", "clientes_eg2", "base_paga_eg2"}; !slices.Equal(p.Collections, want) {
 		t.Errorf("Collections = %v, want %v", p.Collections, want)
 	}
-	if p.ID != DefaultProfileID {
-		t.Errorf("DefaultProfile().ID = %q, DefaultProfileID = %q", p.ID, DefaultProfileID)
+}
+
+// The precision rule is the one that matters most: bf16 and fp32 both run on the GPU, and fp16 returns
+// NaN or silently degraded vectors, so a backend that loads the weights in fp16 must fail the handshake.
+func TestDefaultProfile_AllowsBF16AndFP32ButNeverFP16(t *testing.T) {
+	p := DefaultProfile()
+	if !p.AllowsPrecision("bf16") || !p.AllowsPrecision("fp32") || p.PrimaryPrecision() != "bf16" {
+		t.Errorf("bf16 (primary) and fp32 must be allowed: %v", p.Precisions)
+	}
+	if p.AllowsPrecision("fp16") {
+		t.Fatal("fp16 must be refused: EmbeddingGemma returns NaN or silently degraded vectors in fp16")
 	}
 }
 
@@ -55,6 +61,9 @@ func TestProfiles_RegistryIsConsistent(t *testing.T) {
 	if !seen[DefaultProfileID] {
 		t.Fatalf("the default profile %q is not registered", DefaultProfileID)
 	}
+	if _, ok := ProfileByID("bge-m3"); ok {
+		t.Error("the retired BGE-M3 profile is registered again")
+	}
 	if _, ok := ProfileByID("no-such-model"); ok {
 		t.Error("ProfileByID invented a profile")
 	}
@@ -66,8 +75,9 @@ func TestProfiles_AreCopies(t *testing.T) {
 	p := DefaultProfile()
 	p.Revision = "poisoned"
 	p.Collections[0] = "poisoned"
+	p.Precisions[0] = "poisoned"
 	again := DefaultProfile()
-	if again.Revision == "poisoned" || again.Collections[0] == "poisoned" {
+	if again.Revision == "poisoned" || again.Collections[0] == "poisoned" || again.Precisions[0] == "poisoned" {
 		t.Fatal("DefaultProfile() shares state with its callers")
 	}
 	all := Profiles()
@@ -81,7 +91,7 @@ func TestModelProfile_Validate_RejectsHalfBuiltProfiles(t *testing.T) {
 	good := DefaultProfile()
 	cases := map[string]func(*ModelProfile){
 		"empty ID":             func(p *ModelProfile) { p.ID = "" },
-		"upper-case ID":        func(p *ModelProfile) { p.ID = "BGE-M3" },
+		"upper-case ID":        func(p *ModelProfile) { p.ID = "EmbeddingGemma-2" },
 		"empty model":          func(p *ModelProfile) { p.Model = "" },
 		"short revision":       func(p *ModelProfile) { p.Revision = "main" },
 		"non-hex revision":     func(p *ModelProfile) { p.Revision = strings.Repeat("z", 40) },
@@ -89,7 +99,7 @@ func TestModelProfile_Validate_RejectsHalfBuiltProfiles(t *testing.T) {
 		"absurd dimension":     func(p *ModelProfile) { p.DenseDim = 1 << 40 },
 		"no precision":         func(p *ModelProfile) { p.Precisions = nil },
 		"unknown precision":    func(p *ModelProfile) { p.Precisions = []string{"int8"} },
-		"duplicate precision":  func(p *ModelProfile) { p.Precisions = []string{"fp16", "fp16"} },
+		"duplicate precision":  func(p *ModelProfile) { p.Precisions = []string{"bf16", "bf16"} },
 		"no pooling":           func(p *ModelProfile) { p.Pooling = "" },
 		"no normalization":     func(p *ModelProfile) { p.Normalization = "" },
 		"bad prompt version":   func(p *ModelProfile) { p.PromptVersion = "Has Space" },
@@ -104,6 +114,7 @@ func TestModelProfile_Validate_RejectsHalfBuiltProfiles(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			p := good
 			p.Collections = slices.Clone(good.Collections)
+			p.Precisions = slices.Clone(good.Precisions)
 			mutate(&p)
 			err := p.Validate()
 			if err == nil {
@@ -117,73 +128,26 @@ func TestModelProfile_Validate_RejectsHalfBuiltProfiles(t *testing.T) {
 }
 
 // The manifest is derived from a profile: another profile means another dimension, revision and
-// collection set, with no other edit.
+// collection set, with no other edit. That is what keeps a later model a registry entry.
 func TestManifestFor_FollowsTheProfile(t *testing.T) {
 	p := ModelProfile{
 		ID: "other", Model: "org/other", Revision: strings.Repeat("a", 40),
-		DenseDim: 768, Precisions: []string{"bf16"}, Pooling: "mean", Normalization: "l2", Collections: []string{"nova"},
+		DenseDim: 512, Precisions: []string{"bf16"}, Pooling: "mean", Normalization: "l2", Collections: []string{"nova"},
 	}
 	m := ManifestFor(p)
-	if len(m) != 1 || m[0].Name != "nova" || m[0].DenseDim != 768 || m[0].ModelRevision != p.Revision {
+	if len(m) != 1 || m[0].Name != "nova" || m[0].DenseDim != 512 || m[0].ModelRevision != p.Revision {
 		t.Fatalf("ManifestFor(other) = %+v", m)
 	}
-	// Manifest() is the default profile's, as before.
+	// Manifest() is the default profile's.
 	def := Manifest()
-	if len(def) != 3 || def[0].DenseDim != 1024 {
-		t.Fatalf("Manifest() changed: %+v", def)
-	}
-}
-
-// EmbeddingGemma 2 is registered but is NOT the default: the switch is a later PR. Its pins are
-// spelled out in literals from the model card, and the one that matters most is what it refuses.
-func TestEmbeddingGemmaProfile_PinsFromTheModelCard(t *testing.T) {
-	p, ok := ProfileByID("embeddinggemma-2")
-	if !ok {
-		t.Fatal("the embeddinggemma-2 profile is not registered")
-	}
-	if p.ID == DefaultProfileID {
-		t.Fatal("EmbeddingGemma must not be the default yet")
-	}
-	if err := p.Validate(); err != nil {
-		t.Fatal(err)
-	}
-	if p.Model != "google/embeddinggemma-2" || p.DenseDim != 768 || p.Pooling != "mean" || p.Normalization != "l2" {
-		t.Errorf("model/dim/pooling/normalization = %q/%d/%q/%q", p.Model, p.DenseDim, p.Pooling, p.Normalization)
-	}
-	if p.HasSparse() {
-		t.Errorf("EmbeddingGemma is dense-only, got SparseParams %v", p.SparseParams)
-	}
-	if !p.AllowsPrecision("bf16") || !p.AllowsPrecision("fp32") {
-		t.Errorf("bf16 (GPU) and fp32 (CPU) must be allowed: %v", p.Precisions)
-	}
-	if p.AllowsPrecision("fp16") {
-		t.Fatal("fp16 must be refused: EmbeddingGemma returns NaN or silently degraded vectors in fp16")
-	}
-	if p.PromptVersion == "" {
-		t.Error("EmbeddingGemma needs a task-prefix scheme in the handshake")
-	}
-	m := ManifestFor(p)
-	if len(m) != len(p.Collections) || m[0].DenseDim != 768 || m[0].ModelRevision != p.Revision {
-		t.Fatalf("ManifestFor(EG2) = %+v", m)
-	}
-	for _, c := range m {
-		for _, old := range DefaultProfile().Collections {
-			if c.Name == old {
-				t.Errorf("the new collection %q collides with the BGE-M3 one", c.Name)
-			}
-		}
-	}
-}
-
-func TestProfile_AllowsPrecision(t *testing.T) {
-	bge := DefaultProfile()
-	if !bge.AllowsPrecision("fp16") || bge.AllowsPrecision("bf16") {
-		t.Errorf("BGE-M3 allows only fp16, got %v", bge.Precisions)
+	if len(def) != 3 || def[0].DenseDim != 768 || def[0].Name != "interno_eg2" {
+		t.Fatalf("Manifest() = %+v, want EmbeddingGemma 2's three 768-wide collections", def)
 	}
 }
 
 // Two profiles must never share a collection name: it would put two models' vectors, of possibly
-// different widths, into one collection. This is also the guard for the final EG2 names.
+// different widths, into one collection. With one registered profile this is trivially true; it is the
+// guard for the day a second one is added.
 func TestProfiles_CollectionNamesAreDisjoint(t *testing.T) {
 	owner := map[string]string{}
 	for _, p := range Profiles() {
@@ -194,42 +158,19 @@ func TestProfiles_CollectionNamesAreDisjoint(t *testing.T) {
 			owner[c] = p.ID
 		}
 	}
-}
-
-func TestEmbeddingGemmaProfile_FinalCollectionNames(t *testing.T) {
-	p, _ := ProfileByID("embeddinggemma-2")
-	want := []string{"interno_eg2", "clientes_eg2", "base_paga_eg2"}
-	if !slices.Equal(p.Collections, want) {
-		t.Errorf("Collections = %v, want %v", p.Collections, want)
-	}
-}
-
-// A dense-only manifest entry names no sparse vector; a hybrid one still does.
-func TestManifestFor_SparseVectorNameFollowsTheProfile(t *testing.T) {
-	eg2, _ := ProfileByID("embeddinggemma-2")
-	for _, c := range ManifestFor(eg2) {
-		if c.SparseVectorName != "" {
-			t.Errorf("%s: dense-only entry names sparse vector %q", c.Name, c.SparseVectorName)
-		}
-	}
-	for _, c := range Manifest() {
-		if c.SparseVectorName != SparseVectorName {
-			t.Errorf("%s: default entry lost its sparse vector: %q", c.Name, c.SparseVectorName)
+	for _, retired := range []string{"interno", "clientes", "base_paga"} {
+		if _, claimed := owner[retired]; claimed {
+			t.Errorf("%q is a retired BGE-M3 collection name and must not be managed by a profile", retired)
 		}
 	}
 }
 
 // The window the chunker may fill is the model's input window minus what the prompt prefix takes.
-func TestProfiles_TokenWindows(t *testing.T) {
-	bge := DefaultProfile()
-	if bge.MaxInputTokens != 8192 || bge.PromptReserveTokens != 0 || bge.WindowTokens() != 8192 || bge.NeedsTitle() {
-		t.Errorf("BGE-M3 window = %d (max %d, reserve %d, needs title %v), want 8192/0 and no title",
-			bge.WindowTokens(), bge.MaxInputTokens, bge.PromptReserveTokens, bge.NeedsTitle())
-	}
-	eg2, _ := ProfileByID("embeddinggemma-2")
-	if eg2.MaxInputTokens != 8192 || eg2.PromptReserveTokens != 128 || eg2.WindowTokens() != 8064 || !eg2.NeedsTitle() {
-		t.Errorf("EmbeddingGemma window = %d (max %d, reserve %d, needs title %v), want 8064 from 8192-128 and a title",
-			eg2.WindowTokens(), eg2.MaxInputTokens, eg2.PromptReserveTokens, eg2.NeedsTitle())
+func TestDefaultProfile_TokenWindow(t *testing.T) {
+	p := DefaultProfile()
+	if p.MaxInputTokens != 8192 || p.PromptReserveTokens != 128 || p.WindowTokens() != 8064 || !p.NeedsTitle() {
+		t.Errorf("window = %d (max %d, reserve %d, needs title %v), want 8064 from 8192-128 and a title",
+			p.WindowTokens(), p.MaxInputTokens, p.PromptReserveTokens, p.NeedsTitle())
 	}
 }
 
@@ -246,60 +187,22 @@ func TestProfiles_TitleBudgetKeepsAFullChunkInsideTheModelWindow(t *testing.T) {
 				p.ID, p.WindowTokens(), p.TitleMaxTokens(), promptFramingTokens, got, p.MaxInputTokens)
 		}
 	}
-	eg2, _ := ProfileByID("embeddinggemma-2")
-	if eg2.TitleMaxTokens() != 96 {
-		t.Errorf("EmbeddingGemma TitleMaxTokens = %d, want 96 (128 reserve - 32 framing)", eg2.TitleMaxTokens())
+	if got := DefaultProfile().TitleMaxTokens(); got != 96 {
+		t.Errorf("EmbeddingGemma TitleMaxTokens = %d, want 96 (128 reserve - 32 framing)", got)
 	}
 }
 
 func TestModelProfile_Validate_RejectsAReserveWithNoRoomForATitle(t *testing.T) {
-	p, _ := ProfileByID("embeddinggemma-2")
+	p := DefaultProfile()
 	p.PromptReserveTokens = promptFramingTokens
 	if err := p.Validate(); err == nil {
 		t.Fatal("Validate accepted a prompt scheme whose reserve leaves no room for a title")
 	}
 }
 
-func TestResolveProfile_EmptyMeansTheDeployedProfile(t *testing.T) {
-	for _, id := range []string{"", "   "} {
-		p, err := ResolveProfile(id)
-		if err != nil || p.ID != DeployedProfileID {
-			t.Errorf("ResolveProfile(%q) = %q, %v; want the deployed profile %q", id, p.ID, err, DeployedProfileID)
-		}
-	}
-	if DeployedProfileID != "embeddinggemma-2" {
-		t.Errorf("DeployedProfileID = %q: the cutover serves EmbeddingGemma 2", DeployedProfileID)
-	}
-}
-
-func TestResolveProfile_NamedProfilesAndUnknownIDs(t *testing.T) {
-	p, err := ResolveProfile(" bge-m3 ")
-	if err != nil || p.ID != "bge-m3" {
-		t.Fatalf("ResolveProfile(bge-m3) = %q, %v", p.ID, err)
-	}
-	_, err = ResolveProfile("embeddinggemma-3")
-	if err == nil {
-		t.Fatal("an unknown profile ID was resolved instead of refused")
-	}
-	for _, want := range []string{"embeddinggemma-3", "bge-m3", "embeddinggemma-2"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error %q does not name %q (the typo and the registered IDs)", err, want)
-		}
-	}
-}
-
-func TestResolveProfile_ReturnsACopy(t *testing.T) {
-	a, _ := ResolveProfile("")
-	a.Collections[0] = "tampered"
-	b, _ := ResolveProfile("")
-	if b.Collections[0] == "tampered" {
-		t.Fatal("ResolveProfile shares the registry's collection slice with its callers")
-	}
-}
-
 func TestModelProfile_HasCollection(t *testing.T) {
-	eg2, _ := ProfileByID("embeddinggemma-2")
-	if !eg2.HasCollection("interno_eg2") || eg2.HasCollection("interno") {
-		t.Errorf("HasCollection: interno_eg2=%v interno=%v, want true and false", eg2.HasCollection("interno_eg2"), eg2.HasCollection("interno"))
+	p := DefaultProfile()
+	if !p.HasCollection("interno_eg2") || p.HasCollection("interno") {
+		t.Errorf("HasCollection: interno_eg2=%v interno=%v, want true and false", p.HasCollection("interno_eg2"), p.HasCollection("interno"))
 	}
 }

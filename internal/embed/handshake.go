@@ -4,9 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
-	"slices"
-	"strings"
 
 	"github.com/danielmalka/go-knowrag/internal/schema"
 )
@@ -14,8 +11,7 @@ import (
 // The pins of the "config efetiva do embedder" are properties of the MODEL, established from the model
 // card and the pinned repository — not settings someone picked (ADR-001 §4) — and they live in the
 // model profile (schema.ModelProfile): revision, dense width, allowed precisions, pooling,
-// normalization, sparse parameters (none for a dense-only model) and the task-prefix scheme. This
-// file only compares a backend's report against them.
+// normalization and the task-prefix scheme. This file only compares a backend's report against them.
 
 // ErrHandshake marks any failure to confirm the backend's effective config. A caller that cannot
 // distinguish "the service is down" from "the service is serving a different model" would treat
@@ -24,17 +20,16 @@ var ErrHandshake = errors.New("embedder handshake failed")
 
 // BackendHandshakeInfo is what the service reports about the config it actually loaded: the fields
 // PRD-contrato §2.4 enumerates — ModelRevision, TokenizerRevision, Dim, Normalization, Pooling,
-// Precision, SparseParams — plus PromptVersion, the task-prefix scheme the service applies (added
-// with the dense-only EmbeddingGemma profile, where forgetting a prefix is the failure that matters).
+// Precision — plus PromptVersion, the task-prefix scheme the service applies (where forgetting a
+// prefix is the failure that matters).
 // The list is closed, not "etc.": every one of them is confirmed against the model profile, so a field
 // nobody confirms is a field declared rather than verified.
 //
 // A field the backend does not report must arrive at its zero value. Handshake reads a zero value
 // as "not reported" and fails on it; that is the fail-closed policy of ADR-001 §4, and it is why
-// this struct has no "unknown" or "optional" representation to hide behind. The two profile-driven
-// exceptions are explicit and symmetric: a dense-only profile expects NO SparseParams and a model
-// with no task prefix expects NO PromptVersion, and in both cases the backend reporting one is the
-// divergence.
+// this struct has no "unknown" or "optional" representation to hide behind. The one profile-driven
+// exception is explicit and symmetric: a model with no task prefix expects NO PromptVersion, and the
+// backend reporting one is the divergence.
 type BackendHandshakeInfo struct {
 	ModelRevision     string
 	TokenizerRevision string
@@ -42,7 +37,6 @@ type BackendHandshakeInfo struct {
 	Normalization     string
 	Pooling           string
 	Precision         string
-	SparseParams      map[string]string
 	PromptVersion     string
 }
 
@@ -53,9 +47,6 @@ func Expected() BackendHandshakeInfo { return ExpectedFor(schema.DefaultProfile(
 // for display and for fixtures: validation accepts any of the profile's allowed precisions
 // (validateAgainstProfile), which is why a CPU host reporting fp32 and a GPU host reporting bf16 both
 // pass for EmbeddingGemma while fp16 never does.
-//
-// It returns a fresh value each call: SparseParams is a map, and a shared one lets any caller
-// rewrite the pins for the whole process.
 func ExpectedFor(p schema.ModelProfile) BackendHandshakeInfo {
 	return BackendHandshakeInfo{
 		// The tokenizer ships inside the model repository at the same commit as the weights, so
@@ -68,14 +59,13 @@ func ExpectedFor(p schema.ModelProfile) BackendHandshakeInfo {
 		Normalization:     p.Normalization,
 		Pooling:           p.Pooling,
 		Precision:         p.PrimaryPrecision(),
-		SparseParams:      maps.Clone(p.SparseParams),
 		PromptVersion:     p.PromptVersion,
 	}
 }
 
 // Handshake asks the backend what it actually loaded and fails unless every field of the
 // "config efetiva do embedder" (PRD-contrato §2.4) — ModelRevision, TokenizerRevision, Dim,
-// Normalization, Pooling, Precision, SparseParams, PromptVersion — match the embedder's model profile. It fails, naming the field,
+// Normalization, Pooling, Precision, PromptVersion — match the embedder's model profile. It fails, naming the field,
 // when the backend does not report it, when this build has no pin for it, and when the two differ.
 //
 // It should be called once, before the first EmbedDocuments/EmbedQuery, by whatever process
@@ -176,10 +166,7 @@ func validateHandshake(got, want BackendHandshakeInfo) error {
 			return err
 		}
 	}
-	if err := comparePromptVersion(got.PromptVersion, want.PromptVersion); err != nil {
-		return err
-	}
-	return compareSparseParams(got.SparseParams, want.SparseParams)
+	return comparePromptVersion(got.PromptVersion, want.PromptVersion)
 }
 
 // comparePromptVersion is the one field where "" is a legal pin: a model with no task prefix pins
@@ -200,7 +187,7 @@ func comparePromptVersion(got, want string) error {
 	}
 }
 
-// intField renders an int field as a string so the seven checks share one comparison, and renders
+// intField renders an int field as a string so the checks share one comparison, and renders
 // the zero value as "" so "the backend did not report Dim" and "Dim is not pinned" stay
 // distinguishable from a reported 0 — which is itself not a legal dimension.
 func intField(v int) string {
@@ -227,51 +214,4 @@ func compareField(field, got, want string) error {
 			ErrHandshake, field, got, want)
 	}
 	return nil
-}
-
-// compareSparseParams is the one field that is a map, so it names the specific differing key: a
-// caller told only that "SparseParams differs" has to diff two maps by hand.
-func compareSparseParams(got, want map[string]string) error {
-	if len(want) == 0 && len(got) == 0 {
-		return nil // dense-only profile, dense-only backend
-	}
-	if len(want) == 0 {
-		return fmt.Errorf(
-			"%w: SparseParams is not pinned for this profile (it is dense-only), and the backend reports %s; "+
-				"a backend that carries a sparse head is serving a different model", ErrHandshake, renderParams(got))
-	}
-	if len(got) == 0 {
-		return fmt.Errorf(
-			"%w: the backend did not report SparseParams; without it the sparse half of every "+
-				"vector is generated by parameters nobody confirmed (ADR-001 §4)", ErrHandshake)
-	}
-	if maps.Equal(got, want) {
-		return nil
-	}
-	for _, k := range slices.Sorted(maps.Keys(want)) {
-		g, ok := got[k]
-		if !ok {
-			return fmt.Errorf("%w: SparseParams: the backend did not report key %q (pinned to %q)",
-				ErrHandshake, k, want[k])
-		}
-		if g != want[k] {
-			return fmt.Errorf("%w: SparseParams: key %q: backend reports %q, pinned value is %q",
-				ErrHandshake, k, g, want[k])
-		}
-	}
-	for _, k := range slices.Sorted(maps.Keys(got)) {
-		if _, ok := want[k]; !ok {
-			return fmt.Errorf("%w: SparseParams: the backend reports key %q = %q, which is not pinned",
-				ErrHandshake, k, got[k])
-		}
-	}
-	return nil
-}
-
-func renderParams(m map[string]string) string {
-	parts := make([]string, 0, len(m))
-	for _, k := range slices.Sorted(maps.Keys(m)) {
-		parts = append(parts, fmt.Sprintf("%s=%q", k, m[k]))
-	}
-	return "{" + strings.Join(parts, ", ") + "}"
 }

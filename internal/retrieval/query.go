@@ -4,8 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-
-	"github.com/danielmalka/go-knowrag/internal/schema"
 )
 
 // The structural rejections. They are sentinels rather than ad-hoc strings because two callers
@@ -26,21 +24,6 @@ var (
 	ErrInvalidTopK   = errors.New("retrieval: top_k out of range")
 	ErrInvalidOffset = errors.New("retrieval: offset out of range")
 
-	// ErrPrefetchLimitTooLow is the calibration floor of PRD-contrato §2.3b: each prefetch leg has
-	// to return at least as many candidates as the fused answer needs, or RRF fuses two lists that
-	// were already truncated below the answer size.
-	ErrPrefetchLimitTooLow = errors.New("retrieval: prefetch limit is below top_k + offset")
-
-	// ErrInvalidSearchMode is a Mode that names no mode. It is rejected rather than folded into the
-	// hybrid default, because folding it there would make a garbage int and a deliberate hybrid
-	// query indistinguishable — and the whole point of the toggle is that the eval harness can
-	// prove which one it measured (internal/eval/hybrid_compare.go).
-	ErrInvalidSearchMode = errors.New("retrieval: search mode is not one of the defined modes")
-
-	// ErrHybridUnavailable is a hybrid search asked of a dense-only model profile: there is no sparse
-	// vector to prefetch and fuse. The caller either asked for the wrong thing or has the wrong profile.
-	ErrHybridUnavailable = errors.New("retrieval: hybrid search needs a sparse vector, and this model profile has none")
-
 	ErrEmptyUID   = errors.New("retrieval: uid is empty")
 	ErrInvalidUID = errors.New("retrieval: uid is not a UUID")
 	// ErrNoteTooLarge is a lookup that hit noteLookupLimit: we cannot tell a 64-chunk note from a
@@ -48,45 +31,8 @@ var (
 	ErrNoteTooLarge = errors.New("retrieval: the note has more chunks than a single lookup will return")
 )
 
-// SearchMode selects the query shape: the §2.3b hybrid (two prefetch legs fused with RRF) or a
-// single dense vector search.
-//
-// The zero value is SearchModeAuto: the shape the Searcher's model profile supports — the hybrid for a
-// profile with a sparse head (so every Query written before this field existed keeps the shape it
-// had on BGE-M3) and the single dense search for a dense-only profile. Asking for SearchModeHybrid
-// explicitly on a dense-only profile is an error (ErrHybridUnavailable), not a silent downgrade.
-// Dense-only exists for one reason: S07 could not answer whether the sparse leg earns its
-// place because there was no golden set to measure it with, and S10 is where that measurement
-// happens. Which one this build ships as the default is not decided in this file — S10 T11 adds
-// DefaultSearchMode from the measured comparison, and until then no caller here reads a default.
-type SearchMode int
-
-const (
-	SearchModeAuto SearchMode = iota
-	SearchModeHybrid
-	SearchModeDenseOnly
-)
-
-func (m SearchMode) String() string {
-	switch m {
-	case SearchModeAuto:
-		return "auto"
-	case SearchModeHybrid:
-		return "hybrid"
-	case SearchModeDenseOnly:
-		return "dense-only"
-	default:
-		return fmt.Sprintf("SearchMode(%d)", int(m))
-	}
-}
-
-// Valid reports whether m names a defined mode.
-func (m SearchMode) Valid() bool {
-	return m == SearchModeAuto || m == SearchModeHybrid || m == SearchModeDenseOnly
-}
-
 // maxTopK and maxOffset bound the result window. They are not a policy about how much a caller may
-// read — they are what keeps topK+offset and the multiplication in prefetchLimit inside int, so an
+// read — they are what keeps topK+offset and the over-fetch window (fetchWindow) inside int, so an
 // absurd input is rejected at the boundary instead of wrapping into a huge unsigned wire limit.
 const (
 	maxTopK   = 1_000
@@ -104,11 +50,6 @@ type Query struct {
 	Text       string
 	TopK       int
 	Offset     int
-
-	// Mode selects hybrid (zero value) or dense-only. It narrows nothing about *which* points may
-	// come back — the filter is built the same way in both modes, tenant condition included — it
-	// only changes how they are ranked.
-	Mode SearchMode
 
 	// Optional facets. Empty means "do not restrict on this field", never "restrict to empty".
 	Area  string
@@ -133,10 +74,9 @@ type Query struct {
 
 // Validate rejects every query this package can prove is unanswerable before any I/O happens.
 //
-// The prefetch floor is checked here rather than at request-construction time so that there is
-// exactly one gate: Search runs Validate first, and everything after it may assume a Query that
-// already cleared the floor. That is what lets calibratedPrefetchLimit return a plain int.
-func (q Query) Validate(prefetchMultiplier int) error {
+// There is exactly one gate: Search runs Validate first, and everything after it may assume a Query
+// that cleared it.
+func (q Query) Validate() error {
 	switch {
 	case q.Collection == "":
 		return ErrEmptyCollection
@@ -148,54 +88,6 @@ func (q Query) Validate(prefetchMultiplier int) error {
 		return fmt.Errorf("%w: top_k = %d, want 1..%d", ErrInvalidTopK, q.TopK, maxTopK)
 	case q.Offset < 0 || q.Offset > maxOffset:
 		return fmt.Errorf("%w: offset = %d, want 0..%d", ErrInvalidOffset, q.Offset, maxOffset)
-	case !q.Mode.Valid():
-		return fmt.Errorf("%w: mode = %d", ErrInvalidSearchMode, int(q.Mode))
 	}
-
-	// Checked in both modes even though dense-only builds no prefetch leg. The floor is a property
-	// of the configured multiplier, not of the mode, and one gate that always runs is worth more
-	// than a branch here that a third mode would have to remember to update.
-	_, err := prefetchLimit(q.TopK, q.Offset, prefetchMultiplier)
-	return err
-}
-
-// prefetchLimit is the per-leg candidate limit: the answer window scaled by the configured
-// multiplier.
-//
-// It takes a plain int rather than a Config so this file stays self-contained — build.go calls the
-// same function with the caller's configured multiplier and does not re-derive the floor.
-func prefetchLimit(topK, offset, multiplier int) (int, error) {
-	floor := topK + offset
-	if multiplier <= 0 {
-		return 0, fmt.Errorf("%w: multiplier = %d, so the limit would be %d and the floor is %d",
-			ErrPrefetchLimitTooLow, multiplier, floor*multiplier, floor)
-	}
-
-	limit := floor * multiplier
-	// limit/multiplier != floor catches the wrap exactly; limit < floor catches the rest. Both are
-	// unreachable through Validate (maxTopK/maxOffset bound the inputs), and both stay because
-	// prefetchLimit is also reachable from build.go with whatever multiplier a Config carries.
-	if limit/multiplier != floor || limit < floor {
-		return 0, fmt.Errorf("%w: top_k+offset = %d times multiplier %d does not fit in an int",
-			ErrPrefetchLimitTooLow, floor, multiplier)
-	}
-	return limit, nil
-}
-
-// ResolveMode turns a requested mode into the one that runs for a profile: Auto becomes the hybrid
-// when the profile has a sparse head and the single dense search when it does not; DenseOnly runs on
-// any profile; an explicit Hybrid on a dense-only profile is ErrHybridUnavailable.
-func ResolveMode(m SearchMode, p schema.ModelProfile) (SearchMode, error) {
-	switch {
-	case !m.Valid():
-		return m, fmt.Errorf("%w: mode = %d", ErrInvalidSearchMode, int(m))
-	case m == SearchModeDenseOnly:
-		return m, nil
-	case m == SearchModeHybrid && !p.HasSparse():
-		return m, fmt.Errorf("%w (profile %q)", ErrHybridUnavailable, p.ID)
-	case p.HasSparse():
-		return SearchModeHybrid, nil
-	default:
-		return SearchModeDenseOnly, nil
-	}
+	return nil
 }

@@ -96,18 +96,18 @@ func TestApply_Integration_FullLifecycle(t *testing.T) {
 		}
 	}
 
-	// (c) Dimension drift, against a live collection that really is 1024.
+	// (c) Dimension drift, against a live collection that really is 768.
 	drifted := schema.Manifest()
-	drifted[0].DenseDim = 768
+	drifted[0].DenseDim = 1024 // the retired BGE-M3 width
 	_, err = Apply(t.Context(), client, drifted, state)
-	assertIntegrationDrift(t, err, drifted[0].Name, "768")
+	assertIntegrationDrift(t, err, drifted[0].Name, "1024")
 
 	// (d) Model-revision drift, with dimension and distance still matching — the half Qdrant
 	// cannot see, caught only because the record is compared against the manifest.
 	drifted = schema.Manifest()
-	drifted[0].ModelRevision = "bge-m3@a-different-revision"
+	drifted[0].ModelRevision = "embeddinggemma-2@a-different-revision"
 	_, err = Apply(t.Context(), client, drifted, state)
-	assertIntegrationDrift(t, err, drifted[0].Name, "bge-m3@a-different-revision")
+	assertIntegrationDrift(t, err, drifted[0].Name, "embeddinggemma-2@a-different-revision")
 
 	// (e) Strict mode: a filter on a field with no payload index is refused, not scanned.
 	assertUnindexedFilterRefused(t, client, m[0].Name)
@@ -203,12 +203,8 @@ func assertLiveCollectionMatches(t *testing.T, client *qdrant.Client, c schema.C
 	if want := qdrantDistance(c.Distance); dense.GetDistance() != want {
 		t.Errorf("%s: distance = %v, want %v", c.Name, dense.GetDistance(), want)
 	}
-	if c.SparseVectorName == "" {
-		if n := len(params.GetSparseVectorsConfig().GetMap()); n != 0 {
-			t.Errorf("%s: a dense-only collection has %d sparse vector(s)", c.Name, n)
-		}
-	} else if _, ok := params.GetSparseVectorsConfig().GetMap()[c.SparseVectorName]; !ok {
-		t.Errorf("%s: no named sparse vector %q", c.Name, c.SparseVectorName)
+	if n := len(params.GetSparseVectorsConfig().GetMap()); n != 0 {
+		t.Errorf("%s: the live collection has %d sparse vector(s); this schema has none", c.Name, n)
 	}
 	if !info.GetConfig().GetStrictModeConfig().GetEnabled() {
 		t.Errorf("%s: strict mode is not enabled on the live collection", c.Name)

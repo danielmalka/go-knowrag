@@ -1,2 +1,2 @@
-// Package retrieval runs hybrid search with RRF fusion over Qdrant.
+// Package retrieval runs a filtered dense vector search over Qdrant.
 package retrieval

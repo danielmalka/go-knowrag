@@ -67,7 +67,6 @@ func baselineHashInput() hashInput {
 			Normalization:     schema.DefaultProfile().Normalization,
 			Pooling:           schema.DefaultProfile().Pooling,
 			Precision:         schema.DefaultProfile().PrimaryPrecision(),
-			SparseParams:      map[string]string{"indices": "token_id", "values": "lexical_weight"},
 		},
 	}
 }
@@ -115,17 +114,14 @@ func TestComputePointHash_ChangesPerComponent(t *testing.T) {
 		{"pipeline ceiling", func(h *hashInput) { h.pipe.CeilingTokens = 900 }},
 		{"pipeline merge rule", func(h *hashInput) { h.pipe.MergeRule = "merge-nothing" }},
 
-		// The seven handshake-confirmed embedder fields, one row each (S04).
+		// The handshake-confirmed embedder fields, one row each (S04).
 		{"embedder model revision", func(h *hashInput) { h.emb.ModelRevision = "another-revision" }},
 		{"embedder tokenizer revision", func(h *hashInput) { h.emb.TokenizerRevision = "another-revision" }},
-		{"embedder dim", func(h *hashInput) { h.emb.Dim = 768 }},
+		{"embedder dim", func(h *hashInput) { h.emb.Dim = 1024 }},
 		{"embedder normalization", func(h *hashInput) { h.emb.Normalization = "none" }},
-		{"embedder pooling", func(h *hashInput) { h.emb.Pooling = "mean" }},
+		{"embedder pooling", func(h *hashInput) { h.emb.Pooling = "cls" }},
 		{"embedder precision", func(h *hashInput) { h.emb.Precision = "fp32" }},
 		{"embedder prompt version", func(h *hashInput) { h.emb.PromptVersion = "gemma-search-v1" }},
-		{"embedder sparse params", func(h *hashInput) {
-			h.emb.SparseParams = map[string]string{"indices": "token_id", "values": "weight"}
-		}},
 	}
 
 	baseline := baselineHashInput().hash()
@@ -168,15 +164,18 @@ func TestComputePointHash_UpdatedDoesNotChangeHash(t *testing.T) {
 //
 // Updating this value is never a fix. It is a declaration that the index has to be rebuilt.
 //
-// It was re-pinned once, on 2026-08-10, and the circumstance is written down because it is the only
-// legitimate one: D-26 renamed this fixture's `vault` field, so the **input** changed by decision and
-// the expected digest had to follow. That is not the forbidden move — the forbidden move is the
+// It has been re-pinned twice, and the circumstances are written down because they are the only
+// legitimate ones. On 2026-11-15 the BGE-M3 profile was removed and the fixture's pins became the
+// EmbeddingGemma 2 ones (768 wide, mean pooling, bf16) with no `embedder_sparse_params` field in the
+// hash; that moved every digest, and it cost nothing because no EmbeddingGemma point had been
+// ingested yet. On 2026-08-10, D-26 renamed this fixture's `vault` field. In both the **input**
+// changed by decision and the expected digest had to follow. That is not the forbidden move — the forbidden move is the
 // digest changing while the input stands still. The order mattered and was chosen: this fixture was
 // the last value renamed in the whole migration, after a real ingestion had already reported
 // `skipped=735`, zero writes. Until that ran, this vector was the evidence that no point_hash had
 // moved, and rewriting it earlier would have destroyed the proof while it was still needed.
 func TestComputePointHash_KnownVector(t *testing.T) {
-	const want = "358b296630d91bf3469660a9482319afd471f186d179d81c504eada95863c829"
+	const want = "a9d34f2f5eaaa93b20ec20c74da613da3114af69b1dbe6bfa07ab9816b090a21"
 	if got := baselineHashInput().hash(); got != want {
 		t.Errorf("point_hash of the pinned input = %s, want %s — if this change is intentional, it is "+
 			"a full reindex of all three collections, not a test update (PRD-contrato §2.4)", got, want)
@@ -215,16 +214,6 @@ func TestNewPipelineConfig_FollowsChunkerConfig(t *testing.T) {
 	}
 	if got != want {
 		t.Errorf("NewPipelineConfig(%+v) = %+v, want %+v", cfg, got, want)
-	}
-}
-
-// PR 4 of the embedding migration: the baseline (BGE-M3, no task prefix) hashes to the value it had
-// BEFORE the prompt-version field existed, so nothing already indexed is re-embedded because of it. The
-// literal below was computed on the previous commit.
-func TestComputePointHash_NoPromptVersionKeepsTheOldHash(t *testing.T) {
-	const before = "358b296630d91bf3469660a9482319afd471f186d179d81c504eada95863c829"
-	if got := baselineHashInput().hash(); got != before {
-		t.Fatalf("the baseline point_hash moved to %s (was %s): a field was added for a model that has no prompt scheme", got, before)
 	}
 }
 

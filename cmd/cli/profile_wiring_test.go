@@ -14,16 +14,12 @@ import (
 	"github.com/danielmalka/go-knowrag/internal/schema"
 )
 
-// The cutover (PR 6): every command serves the model profile its configuration names, EmbeddingGemma 2
-// by default, and none of them reads the library's fallback profile (BGE-M3 until it is deleted).
+// Every command serves the one registered model profile, EmbeddingGemma 2, and refuses a collection that
+// belongs to another model before it opens a connection.
 
 func TestSchemaApply_ProvisionsTheDeployedProfilesCollections(t *testing.T) {
-	profile, err := schema.ResolveProfile("")
-	if err != nil {
-		t.Fatal(err)
-	}
 	var out bytes.Buffer
-	code, err := runSchemaApply(t.Context(), &out, cleanQdrant{}, schema.ManifestFor(profile), &memState{})
+	code, err := runSchemaApply(t.Context(), &out, cleanQdrant{}, schema.Manifest(), &memState{})
 	if err != nil || code != exitOK {
 		t.Fatalf("runSchemaApply = %d, %v", code, err)
 	}
@@ -79,9 +75,8 @@ func TestIngestChunkWindowFollowsTheProfile(t *testing.T) {
 	if cmd.Flags().Lookup("ceiling-tokens") == nil {
 		t.Fatal("ingest has no --ceiling-tokens flag")
 	}
-	profile, _ := schema.ResolveProfile("")
-	if got := profile.WindowTokens(); got != 8064 {
-		t.Errorf("deployed profile window = %d, want 8064", got)
+	if got := schema.DefaultProfile().WindowTokens(); got != 8064 {
+		t.Errorf("the profile's chunk window = %d, want 8064", got)
 	}
 }
 

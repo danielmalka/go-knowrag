@@ -263,7 +263,7 @@ func (r NoteResult) failed(err error) NoteResult {
 // embedTexts embeds the chunk texts of one note. When the backend's handshake reports a task-prefix
 // scheme (PromptVersion), the service builds the document prefix from the note title, so the title goes
 // with every chunk; an embedder that cannot pass titles is refused here rather than allowed to embed
-// the whole index under "title: none". Without a scheme (BGE-M3) the call is the plain one it always was.
+// the whole index under "title: none". Without a scheme the call is the plain one.
 func embedTexts(ctx context.Context, d Deps, title string, texts []string) ([]embed.Embedding, error) {
 	if d.Handshake.PromptVersion == "" {
 		return d.Embedder.EmbedDocuments(ctx, texts)

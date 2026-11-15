@@ -6,16 +6,7 @@ import (
 	"fmt"
 
 	"github.com/danielmalka/go-knowrag/internal/embed"
-	"github.com/danielmalka/go-knowrag/internal/schema"
 )
-
-// DefaultPrefetchMultiplier is provisional and knowingly uncalibrated.
-//
-// The floor is fixed (top_k + offset, PRD-contrato §2.3b); how far above it a prefetch leg should
-// reach is a recall question, and answering it needs the golden set that only exists in S10. Four
-// is the value this build ships until S10 measures one — S10 revisits the multiplier, not only the
-// fusion mode (S07 open question 1).
-const DefaultPrefetchMultiplier = 4
 
 // DefaultMaxChunksPerUID is how many chunks of the same note a search will keep. Two leaves a
 // neighbouring section in the window and still makes room for other notes; 0 disables the cap.
@@ -23,31 +14,15 @@ const DefaultMaxChunksPerUID = 2
 
 // Config is what a Searcher needs beyond its two dependencies.
 type Config struct {
-	PrefetchMultiplier int
-	// MaxChunksPerUID caps how many chunks of one note survive the fused ranking. 0 leaves
-	// Qdrant's order untouched. Search over-fetches by this factor so the cap can still fill TopK.
+	// MaxChunksPerUID caps how many chunks of one note survive the ranking. 0 leaves Qdrant's order
+	// untouched. Search over-fetches by this factor so the cap can still fill TopK.
 	MaxChunksPerUID int
-	// Profile is the model profile the Searcher queries. It decides the query shape (hybrid with a
-	// sparse head, single dense search without). The zero value means the default profile.
-	Profile schema.ModelProfile
-}
-
-// profile is Config.Profile with the zero value resolved to the default profile.
-func (c Config) profile() schema.ModelProfile {
-	if c.Profile.ID == "" {
-		return schema.DefaultProfile()
-	}
-	return c.Profile
 }
 
 // DefaultConfig is the provisional calibration above. It is a function rather than a var so no
 // caller can rewrite the default for the whole process.
 func DefaultConfig() Config {
-	return Config{
-		PrefetchMultiplier: DefaultPrefetchMultiplier,
-		MaxChunksPerUID:    DefaultMaxChunksPerUID,
-		Profile:            schema.DefaultProfile(),
-	}
+	return Config{MaxChunksPerUID: DefaultMaxChunksPerUID}
 }
 
 // queryExecutor executes an already-built request. It is deliberately the narrowest possible
@@ -72,43 +47,14 @@ func NewSearcher(embedder embed.Embedder, executor queryExecutor, cfg Config) *S
 	return &Searcher{embedder: embedder, executor: executor, cfg: cfg}
 }
 
-// Search embeds the query, builds the hybrid request and formats what comes back.
-//
-// Validate runs first and unconditionally: it is the only gate, and everything after it assumes a
-// Query that cleared it. An invalid Query therefore costs no embedding call and no round trip.
+// Search embeds the query, builds the request and formats what comes back. It is SearchTimed without
+// the timings, so the two can never run different query shapes.
 func (s *Searcher) Search(ctx context.Context, q Query) ([]Result, error) {
-	if s == nil || s.embedder == nil || s.executor == nil {
-		return nil, errors.New("retrieval: Searcher has no embedder or no executor")
-	}
-	if err := q.Validate(s.cfg.PrefetchMultiplier); err != nil {
-		return nil, err
-	}
-	mode, err := ResolveMode(q.Mode, s.cfg.profile())
-	if err != nil {
-		return nil, err
-	}
-
-	emb, err := s.embedder.EmbedQuery(ctx, q.Text)
-	if err != nil {
-		return nil, fmt.Errorf("retrieval: embedding the query: %w", err)
-	}
-
-	wide := q
-	wide.Mode = mode
-	wide.TopK = fetchWindow(q.TopK, s.cfg.MaxChunksPerUID)
-	req := buildQueryRequest(wide, emb, calibratedPrefetchLimit(wide, s.cfg.PrefetchMultiplier))
-	points, err := s.executor.ExecuteQuery(ctx, req)
-	if err != nil {
-		return nil, fmt.Errorf("retrieval: executing the query on %s: %w", q.Collection, err)
-	}
-	results, err := formatResults(points)
-	if err != nil {
-		return nil, err
-	}
-	return capPerUID(results, q.TopK, s.cfg.MaxChunksPerUID), nil
+	results, _, err := s.SearchTimed(ctx, q)
+	return results, err
 }
 
-// fetchWindow is how many fused hits to ask Qdrant for. The cap needs a wider pool than TopK or
+// fetchWindow is how many hits to ask Qdrant for. The cap needs a wider pool than TopK or
 // five chunks of one note fill the answer and the drop has nothing to replace them with.
 func fetchWindow(topK, maxPerUID int) int {
 	if maxPerUID <= 0 {
@@ -185,8 +131,7 @@ func (s *Searcher) FilterMatchesAnything(ctx context.Context, q Query) (bool, er
 
 	points, err := s.executor.ExecuteQuery(ctx, SearchRequest{
 		Collection: q.Collection,
-		// No prefetch leg and no fusion, so internal/store leaves the query itself unset and Qdrant
-		// reads the filter alone — the Query API's own filtered read, not a quirk: in the pinned
+		// No vector, so internal/store leaves the query itself unset and Qdrant reads the filter alone — the Query API's own filtered read, not a quirk: in the pinned
 		// client (go-client v1.19.0, internal/proto/points.proto:1114) a missing query is documented
 		// to return points ordered by ID. That is what makes this cost a fraction of the search it
 		// follows.
@@ -200,13 +145,4 @@ func (s *Searcher) FilterMatchesAnything(ctx context.Context, q Query) (bool, er
 		return false, fmt.Errorf("retrieval: probing the filter on %s: %w", q.Collection, err)
 	}
 	return len(points) > 0, nil
-}
-
-// Profile is the model profile this Searcher queries.
-func (s *Searcher) Profile() schema.ModelProfile { return s.cfg.profile() }
-
-// ResolvedMode is the mode a Query with this Mode would actually run as on this Searcher's profile.
-// internal/eval uses it to label a report with what ran, not with what was requested.
-func (s *Searcher) ResolvedMode(m SearchMode) (SearchMode, error) {
-	return ResolveMode(m, s.cfg.profile())
 }

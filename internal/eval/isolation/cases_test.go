@@ -75,57 +75,19 @@ func TestRequestsCarryTenant_RejectsWhatItShould(t *testing.T) {
 		t.Error("a request scoped to tenant-alfa was accepted as proof of scoping to tenant-beta")
 	}
 
-	// The outer filter alone, with the legs left intact. internal/retrieval builds both from the
-	// same Filter value, so stripping both at once cannot tell the two checks apart — and a defect
-	// plant that disabled the outer-filter check stayed green until this case existed. The outer
-	// filter is what survives if the request ever stops carrying prefetch legs.
-	//
-	// It runs before the strip-everything case below, and takes its own copy of the prefetch slice,
-	// because a SearchRequest copy shares that backing array: mutating the legs for one assertion
-	// silently disarmed this one, which is how it came to pass while proving nothing.
-	outerOnly := deepCopy(store.requests[0])
-	outerOnly.Filter.Must = []retrieval.Condition{{Field: "area", Value: "alfa"}}
-	if requestsCarryTenant([]retrieval.SearchRequest{outerOnly}, tenantA) == "" {
-		t.Error("a request whose outer filter lost the tenant condition was accepted because its " +
-			"prefetch legs still carried one")
+	// A filter that names some other field instead of the tenant, and a filter with nothing in it,
+	// are both caught. SearchRequest is copied by value and Filter.Must is replaced, not edited, so
+	// the request the probe logged is not touched.
+	otherField := store.requests[0]
+	otherField.Filter.Must = []retrieval.Condition{{Field: "area", Value: "alfa"}}
+	if requestsCarryTenant([]retrieval.SearchRequest{otherField}, tenantA) == "" {
+		t.Error("a request whose filter lost the tenant condition was accepted")
 	}
 
-	stripped := deepCopy(store.requests[0])
+	stripped := store.requests[0]
 	stripped.Filter.Must = nil
-	for i := range stripped.Prefetch {
-		stripped.Prefetch[i].Filter.Must = nil
-	}
 	if requestsCarryTenant([]retrieval.SearchRequest{stripped}, tenantA) == "" {
 		t.Error("a request carrying no tenant condition at all was accepted")
-	}
-}
-
-// deepCopy detaches a request's prefetch legs so one assertion's mutation cannot reach another's.
-func deepCopy(req retrieval.SearchRequest) retrieval.SearchRequest {
-	req.Prefetch = append([]retrieval.PrefetchLeg(nil), req.Prefetch...)
-	return req
-}
-
-// TestRequestsCarryTenant_ChecksEveryPrefetchLeg is the half most likely to rot. The hybrid query
-// has two legs and an outer filter; the tenant condition has to be on all three, and a check that
-// only read the outer one would miss a leg that lost it.
-func TestRequestsCarryTenant_ChecksEveryPrefetchLeg(t *testing.T) {
-	searcher, store := newProbe()
-	if _, err := searcher.Search(t.Context(), query(collClientes, tenantA, "contract renewal terms")); err != nil {
-		t.Fatalf("Search: %v", err)
-	}
-	req := store.requests[0]
-	if len(req.Prefetch) < 2 {
-		t.Fatalf("the request carries %d prefetch leg(s); this test needs the hybrid shape to have "+
-			"something to strip", len(req.Prefetch))
-	}
-
-	for i := range req.Prefetch {
-		mutated := deepCopy(req)
-		mutated.Prefetch[i].Filter.Must = nil
-		if requestsCarryTenant([]retrieval.SearchRequest{mutated}, tenantA) == "" {
-			t.Errorf("a request whose prefetch leg %d lost its tenant condition was accepted", i+1)
-		}
 	}
 }
 

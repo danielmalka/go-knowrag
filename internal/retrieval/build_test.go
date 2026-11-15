@@ -13,26 +13,12 @@ import (
 	"github.com/danielmalka/go-knowrag/internal/schema"
 )
 
-// fakeEmbedding is a structurally valid embedding with recognisable values, so an assertion that
-// the right half reached the right leg fails on content rather than on a length.
+// fakeEmbedding is a structurally valid embedding with recognisable values, so an assertion that the
+// vector reached the request fails on content rather than on a length.
 func fakeEmbedding() embed.Embedding {
 	dense := make([]float32, embed.DefaultDenseDim())
 	dense[0] = 0.5
-	return embed.Embedding{
-		Dense:  dense,
-		Sparse: embed.Sparse{Indices: []uint32{3, 9, 27}, Values: []float32{0.1, 0.2, 0.3}},
-	}
-}
-
-func legFor(t *testing.T, req SearchRequest, vector string) PrefetchLeg {
-	t.Helper()
-	for _, leg := range req.Prefetch {
-		if leg.Vector == vector {
-			return leg
-		}
-	}
-	t.Fatalf("no prefetch leg using %q; request has %d leg(s)", vector, len(req.Prefetch))
-	return PrefetchLeg{}
+	return embed.Embedding{Dense: dense}
 }
 
 func hasCondition(cs []Condition, field, value string) bool {
@@ -49,85 +35,29 @@ func countCondition(cs []Condition, field string) int {
 	return n
 }
 
-// TestCalibratedPrefetchLimit_MatchesValidatedLimit is T2's whole point: build.go must not carry a
-// second implementation of the floor arithmetic. Same inputs, same number, no exceptions.
-func TestCalibratedPrefetchLimit_MatchesValidatedLimit(t *testing.T) {
-	q := validQuery()
-	q.TopK, q.Offset = 5, 3
-
-	for _, multiplier := range []int{1, 2, DefaultPrefetchMultiplier, 10} {
-		want, err := prefetchLimit(q.TopK, q.Offset, multiplier)
-		if err != nil {
-			t.Fatalf("prefetchLimit(%d, %d, %d): %v", q.TopK, q.Offset, multiplier, err)
-		}
-		if got := calibratedPrefetchLimit(q, multiplier); got != want {
-			t.Errorf("calibratedPrefetchLimit(multiplier=%d) = %d, want %d", multiplier, got, want)
-		}
-	}
-}
-
-// TestCalibratedPrefetchLimit_UnvalidatedQueryFallsBackToTheFloor covers the branch that only a
-// caller who skipped Validate can reach. It must degrade to the floor, never to zero — zero would
-// be a search that silently returns nothing.
-func TestCalibratedPrefetchLimit_UnvalidatedQueryFallsBackToTheFloor(t *testing.T) {
-	q := validQuery()
-	q.TopK, q.Offset = 5, 3
-
-	if got, want := calibratedPrefetchLimit(q, 0), q.TopK+q.Offset; got != want {
-		t.Errorf("calibratedPrefetchLimit(multiplier=0) = %d, want the floor %d", got, want)
-	}
-}
-
-func TestBuildQueryRequest_ShapesHybridQuery(t *testing.T) {
+func TestBuildQueryRequest_ShapesADenseQuery(t *testing.T) {
 	q := validQuery()
 	q.TopK, q.Offset = 5, 3
 	emb := fakeEmbedding()
-	limit := calibratedPrefetchLimit(q, DefaultPrefetchMultiplier)
 
-	req := buildQueryRequest(q, emb, limit)
+	req := buildQueryRequest(q, emb)
 
 	if req.Collection != q.Collection {
 		t.Errorf("Collection = %q, want %q", req.Collection, q.Collection)
 	}
-	if len(req.Prefetch) != 2 {
-		t.Fatalf("%d prefetch leg(s), want exactly 2", len(req.Prefetch))
+	if !slices.Equal(req.Dense, emb.Dense) {
+		t.Error("the request does not carry the query vector")
 	}
-	if !req.FusionRRF {
-		t.Error("FusionRRF = false, want RRF fusion (PRD-contrato §2.3b)")
-	}
-	if req.Limit != q.TopK {
-		t.Errorf("Limit = %d, want TopK %d", req.Limit, q.TopK)
-	}
-	if req.Offset != q.Offset {
-		t.Errorf("Offset = %d, want Offset %d", req.Offset, q.Offset)
-	}
-
-	dense := legFor(t, req, schema.DenseVectorName)
-	if !slices.Equal(dense.Dense, emb.Dense) {
-		t.Error("the dense leg does not carry the dense half of the embedding")
-	}
-	if len(dense.Sparse.Indices) != 0 {
-		t.Error("the dense leg also carries a sparse vector")
-	}
-	if dense.Limit != limit {
-		t.Errorf("dense leg limit = %d, want the calibrated %d", dense.Limit, limit)
-	}
-
-	sparse := legFor(t, req, schema.SparseVectorName)
-	if !slices.Equal(sparse.Sparse.Indices, emb.Sparse.Indices) || !slices.Equal(sparse.Sparse.Values, emb.Sparse.Values) {
-		t.Error("the sparse leg does not carry the sparse half of the embedding")
-	}
-	if len(sparse.Dense) != 0 {
-		t.Error("the sparse leg also carries a dense vector")
-	}
-	if sparse.Limit != limit {
-		t.Errorf("sparse leg limit = %d, want the calibrated %d", sparse.Limit, limit)
-	}
-
-	// The vector names come from internal/schema, never from a literal here — a literal would be a
+	// The vector name comes from internal/schema, never from a literal here — a literal would be a
 	// second definition of what the collections were provisioned with.
-	if dense.Vector == sparse.Vector {
-		t.Error("both legs query the same named vector")
+	if req.DenseVector != schema.DenseVectorName {
+		t.Errorf("DenseVector = %q, want %q", req.DenseVector, schema.DenseVectorName)
+	}
+	if req.Limit != q.TopK || req.Offset != q.Offset {
+		t.Errorf("Limit/Offset = %d/%d, want %d/%d", req.Limit, req.Offset, q.TopK, q.Offset)
+	}
+	if !req.Acorn {
+		t.Error("Acorn = false: the filtered search must ask for ACORN (PRD-contrato §2.3c)")
 	}
 }
 
@@ -135,7 +65,7 @@ func TestBuildQueryRequest_ShapesHybridQuery(t *testing.T) {
 // the reader in step: a field added to Result without being requested comes back missing, and
 // formatResults would report every point as malformed.
 func TestBuildQueryRequest_ProjectsOnlyTheFieldsFormatResultsReads(t *testing.T) {
-	req := buildQueryRequest(validQuery(), fakeEmbedding(), 20)
+	req := buildQueryRequest(validQuery(), fakeEmbedding())
 	for _, want := range []string{fieldUID, fieldChunkIndex, fieldText, fieldHeadings, fieldPath, fieldTitle} {
 		if !slices.Contains(req.PayloadFields, want) {
 			t.Errorf("PayloadFields %v does not include %q", req.PayloadFields, want)
@@ -143,27 +73,15 @@ func TestBuildQueryRequest_ProjectsOnlyTheFieldsFormatResultsReads(t *testing.T)
 	}
 }
 
-// TestBuildQueryRequest_EnablesAcornOnBothPrefetches is PRD-contrato §2.3c: ACORN is a per-request
-// opt-in, and the filter runs on the prefetch legs, so both legs have to ask for it. The outer
-// stage only fuses two already-filtered lists, so it has nothing for ACORN to do.
-func TestBuildQueryRequest_EnablesAcornOnBothPrefetches(t *testing.T) {
-	req := buildQueryRequest(validQuery(), fakeEmbedding(), 20)
-	for _, leg := range req.Prefetch {
-		if !leg.Acorn {
-			t.Errorf("prefetch leg %q has Acorn = false, want true (PRD-contrato §2.3c)", leg.Vector)
-		}
-	}
-}
-
-// TestPrefetchLeg_CarriesNoSelectivityKnob is the other half of §2.3c, expressed structurally: the
-// contract says MaxSelectivity stays at the server default, because Qdrant decides per request from
-// a cardinality estimate this process does not have. There is deliberately no field to pin it with,
-// so a future "tuning" commit has to add one — and argue with this test first.
-func TestPrefetchLeg_CarriesNoSelectivityKnob(t *testing.T) {
-	tp := reflect.TypeOf(PrefetchLeg{})
+// TestSearchRequest_CarriesNoSelectivityKnob is the other half of §2.3c, expressed structurally: the
+// contract says MaxSelectivity stays at the server default, because Qdrant decides per request from a
+// cardinality estimate this process does not have. There is deliberately no field to pin it with, so a
+// future "tuning" commit has to add one — and argue with this test first.
+func TestSearchRequest_CarriesNoSelectivityKnob(t *testing.T) {
+	tp := reflect.TypeOf(SearchRequest{})
 	for i := range tp.NumField() {
 		if strings.Contains(strings.ToLower(tp.Field(i).Name), "selectivity") {
-			t.Errorf("PrefetchLeg has field %q: MaxSelectivity must stay at the server default "+
+			t.Errorf("SearchRequest has field %q: MaxSelectivity must stay at the server default "+
 				"(PRD-contrato §2.3c)", tp.Field(i).Name)
 		}
 	}
@@ -188,8 +106,8 @@ func TestBuildFilter_TenantAlwaysMust(t *testing.T) {
 		{"archived included", func(q *Query) { q.IncludeArchived = true }},
 		{"private included", func(q *Query) { q.IncludePrivate = true }},
 		{"every restriction lifted", func(q *Query) { q.IncludeArchived, q.IncludePrivate = true, true }},
-		{"other collection", func(q *Query) { q.Collection = "clientes" }},
-		{"third collection", func(q *Query) { q.Collection = "base_paga" }},
+		{"other collection", func(q *Query) { q.Collection = "clientes_eg2" }},
+		{"third collection", func(q *Query) { q.Collection = "base_paga_eg2" }},
 		{"other tenant", func(q *Query) { q.TenantID = "acme" }},
 	}
 
@@ -209,15 +127,10 @@ func TestBuildFilter_TenantAlwaysMust(t *testing.T) {
 				t.Errorf("MustNot %v mentions tenant_id, which can only weaken the scope", f.MustNot)
 			}
 
-			// The whole request, not just the filter helper: every leg and the outer stage.
-			req := buildQueryRequest(q, fakeEmbedding(), 20)
+			// The whole request, not just the filter helper.
+			req := buildQueryRequest(q, fakeEmbedding())
 			if !hasCondition(req.Filter.Must, fieldTenantID, q.TenantID) {
-				t.Errorf("the outer request filter has no tenant condition: %v", req.Filter.Must)
-			}
-			for _, leg := range req.Prefetch {
-				if !hasCondition(leg.Filter.Must, fieldTenantID, q.TenantID) {
-					t.Errorf("prefetch leg %q has no tenant condition: %v", leg.Vector, leg.Filter.Must)
-				}
+				t.Errorf("the request filter has no tenant condition: %v", req.Filter.Must)
 			}
 		})
 	}
@@ -226,7 +139,7 @@ func TestBuildFilter_TenantAlwaysMust(t *testing.T) {
 func TestBuildFilter(t *testing.T) {
 	archived := schema.StatusArchived().String()
 	private := schema.VisibilityPrivate().String()
-	collections := []string{"interno", "clientes", "base_paga"}
+	collections := []string{"interno_eg2", "clientes_eg2", "base_paga_eg2"}
 
 	t.Run("archived is excluded by default", func(t *testing.T) {
 		f := buildFilter(validQuery())

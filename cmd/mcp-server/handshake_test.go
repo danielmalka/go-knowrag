@@ -64,7 +64,7 @@ func (s *stubTransport) Info(ctx context.Context) (embed.BackendHandshakeInfo, e
 // and report nothing at all.
 func TestVerifyEmbedder_DivergentBackend_RefusesToStart(t *testing.T) {
 	info := embed.Expected()
-	info.Pooling = "mean"
+	info.Pooling = "cls"
 
 	err := verifyEmbedder(context.Background(), testConfig(), &stubTransport{info: info})
 	if err == nil {
@@ -88,11 +88,11 @@ func TestVerifyEmbedder_DivergentBackend_RefusesToStart(t *testing.T) {
 // by wrapping the context in a deadline gets min(30 s, profile) and no error saying which won. That
 // is D-32: the ceiling this check was documented to have was one another file silently overrode.
 //
-// It was called _OutlastsAModelLoad and asserted a floor of 11 s "because BGE-M3 takes that long to
-// load warm". That reason was wrong and the assertion was measuring nothing real: the service loads
-// the model before it binds its socket (scripts/embedder-service/server.py, main()), so a service
-// still coming up refuses instantly rather than answering slowly. No budget makes a loading service
-// distinguishable from an absent one. What remains true — and is what this now pins — is that boot
+// It was called _OutlastsAModelLoad and asserted a floor of 11 s "because the model takes that long
+// to load warm". That reason was wrong and the assertion was measuring nothing real: the service binds
+// its socket only after its start-up checks and loads no model for a handshake
+// (scripts/embedder-service/server.py), so a service still coming up refuses instantly rather than
+// answering slowly. No budget makes a starting service distinguishable from an absent one. What remains true — and is what this now pins — is that boot
 // must not be bounded by a number chosen for how long an agent waits for a search.
 //
 // The floor is kept, at the search path's own verification budget rather than at an invented
@@ -328,9 +328,9 @@ func TestRun_DivergentBackend_NeverServes(t *testing.T) {
 	want := embed.Expected()
 	body := fmt.Sprintf(
 		`{"model_revision":%q,"tokenizer_revision":%q,"dense_dim":%d,"normalized":true,`+
-			`"pooling":%q,"precision":%q,"sparse":{"kind":%q,"id_space":%q}}`,
+			`"pooling":%q,"precision":%q,"prompt_version":%q}`,
 		"0000000000000000000000000000000000000000", want.TokenizerRevision, want.Dim,
-		want.Pooling, want.Precision, want.SparseParams["kind"], want.SparseParams["id_space"])
+		want.Pooling, want.Precision, want.PromptVersion)
 
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/handshake" {
@@ -341,13 +341,12 @@ func TestRun_DivergentBackend_NeverServes(t *testing.T) {
 	}))
 	t.Cleanup(backend.Close)
 
-	t.Setenv(envCollection, "interno")
+	t.Setenv(envCollection, "interno_eg2")
 	t.Setenv(envTenantID, "tenant-a")
 	t.Setenv(envQdrantEndpoint, "127.0.0.1:6334")
 	t.Setenv(envQdrantAPIKey, "runtime-read-key")
 	t.Setenv(envEmbedderEndpoint, backend.URL)
 	t.Setenv(envAreas, "infra,research")
-	t.Setenv(envModelProfile, "bge-m3") // this test's backend body is BGE-M3's
 
 	err := run()
 	if err == nil {

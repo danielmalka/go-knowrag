@@ -332,7 +332,7 @@ func realTenant() string {
 	if t := os.Getenv("KNOWRAG_TENANT_ID"); t != "" {
 		return t
 	}
-	return "interno"
+	return "interno_eg2"
 }
 
 func qdrantClient(t *testing.T, cfg *config.Config) *qdrant.Client {

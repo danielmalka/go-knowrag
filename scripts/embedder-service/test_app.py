@@ -30,7 +30,7 @@ def test_a_passage_is_encoded_with_its_title():
     assert w.model.encoded == [["title: Plano | text: corpo"]]
 
 
-def test_a_passage_without_titles_uses_none_like_the_bge_shaped_request():
+def test_a_passage_without_titles_uses_none():
     w = Wiring()
     embed(w, inputs=["corpo"], kind="passage")
     assert w.model.encoded == [["title: none | text: corpo"]]

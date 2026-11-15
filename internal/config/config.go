@@ -49,11 +49,6 @@ type Config struct {
 	DefaultCollection string `yaml:"default_collection"` // DEFAULT_COLLECTION
 	LogLevel          string `yaml:"log_level"`          // LOG_LEVEL, optional, default "info"
 
-	// ModelProfile names the embedding model profile (internal/schema) every command uses: its
-	// collections, vector width, prompt scheme and token window. Empty means schema.DeployedProfileID
-	// (EmbeddingGemma 2). It is MODEL_PROFILE, optional.
-	ModelProfile string `yaml:"model_profile"`
-
 	// Vaults is the roster and its per-vault settings, keyed by vault name — the installation's
 	// vaults, not the domain's. KNOWRAG_VAULTS names the keys; KNOWRAG_VAULT_<NAME>_* fills each
 	// one. See vaultEnv for how <NAME> is spelled.
@@ -350,25 +345,22 @@ var fields = []field{
 			"runtime key is a different variable and is never read here"},
 	{env: "EMBEDDER_ENDPOINT", need: NeedEmbedder, ptr: func(c *Config) *string { return &c.EmbedderEndpoint }},
 	{env: "DEFAULT_COLLECTION", need: NeedCollection, ptr: func(c *Config) *string { return &c.DefaultCollection }},
-	{env: "MODEL_PROFILE", ptr: func(c *Config) *string { return &c.ModelProfile }},
 	{env: "LOG_LEVEL", ptr: func(c *Config) *string { return &c.LogLevel }},
 }
 
-// Profile resolves the configured model profile and checks that DEFAULT_COLLECTION, when set, belongs
-// to it. The second check is the point: a collection holds vectors of one width in one vector space,
-// so pairing a profile with another profile's collection (EmbeddingGemma 2 against `interno`, which
-// holds 1024-wide BGE-M3 vectors) either fails far from the cause, at the first upsert, or serves
-// queries from the wrong space with no error at all. It fails here, naming both.
+// Profile is the model profile every command serves (schema.DefaultProfile: EmbeddingGemma 2, the
+// only one registered), after checking that DEFAULT_COLLECTION, when set, belongs to it. The check is
+// the point: a collection holds the vectors of one model, so pairing this profile with a collection
+// of another one (the retired BGE-M3 `interno`, 1024 wide) either fails far from the cause, at the
+// first upsert, or serves queries from the wrong space with no error at all. It fails here, naming
+// both.
 func (c *Config) Profile() (schema.ModelProfile, error) {
-	p, err := schema.ResolveProfile(c.ModelProfile)
-	if err != nil {
-		return schema.ModelProfile{}, fmt.Errorf("MODEL_PROFILE: %w", err)
-	}
+	p := schema.DefaultProfile()
 	if c.DefaultCollection != "" && !p.HasCollection(c.DefaultCollection) {
 		return schema.ModelProfile{}, fmt.Errorf(
 			"DEFAULT_COLLECTION=%q is not a collection of model profile %q (%s): it would hold vectors of a "+
-				"different model; name one of those, or set MODEL_PROFILE to the profile that owns %q",
-			c.DefaultCollection, p.ID, strings.Join(p.Collections, ", "), c.DefaultCollection)
+				"different model; name one of those",
+			c.DefaultCollection, p.ID, strings.Join(p.Collections, ", "))
 	}
 	return p, nil
 }
@@ -469,7 +461,6 @@ func (c Config) LogValue() slog.Value {
 		slog.String("qdrant_api_key", c.redactedKey()),
 		slog.String("embedder_endpoint", c.EmbedderEndpoint),
 		slog.String("default_collection", c.DefaultCollection),
-		slog.String("model_profile", c.ModelProfile),
 		slog.String("log_level", c.LogLevel),
 		slog.String("vaults", c.vaultsString()),
 	)
@@ -494,8 +485,8 @@ func (c Config) vaultsString() string {
 func (c Config) String() string {
 	return fmt.Sprintf(
 		"config.Config{QdrantEndpoint:%q QdrantAPIKey:%q EmbedderEndpoint:%q DefaultCollection:%q "+
-			"ModelProfile:%q LogLevel:%q Vaults:{%s}}",
-		c.QdrantEndpoint, c.redactedKey(), c.EmbedderEndpoint, c.DefaultCollection, c.ModelProfile, c.LogLevel,
+			"LogLevel:%q Vaults:{%s}}",
+		c.QdrantEndpoint, c.redactedKey(), c.EmbedderEndpoint, c.DefaultCollection, c.LogLevel,
 		c.vaultsString())
 }
 

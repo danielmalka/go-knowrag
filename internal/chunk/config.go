@@ -6,11 +6,6 @@ import (
 	"github.com/danielmalka/go-knowrag/internal/schema"
 )
 
-// HardTokenLimit is BGE-M3's context window (PRD-contrato §2.3b), in tokens. It is not a tuning
-// knob: a chunk above it cannot be embedded at all, so the pipeline refuses it by name instead of
-// handing the embedder something it would silently truncate.
-const HardTokenLimit = 8192
-
 // Version identifies the chunking algorithm, and is one of the "pipeline config" inputs S06a hashes
 // into point_hash (PRD-contrato §2.4) — bumping it must change point_hash for every point.
 //
@@ -32,8 +27,9 @@ type Config struct {
 	FloorTokens   int
 	CeilingTokens int
 	// WindowTokens is the hard window a chunk must fit in: the model profile's input window minus the
-	// room its prompt prefix takes (schema.ModelProfile.WindowTokens). Zero means HardTokenLimit, the
-	// BGE-M3 window, which is what every caller that predates the model profiles gets.
+	// room its prompt prefix takes (schema.ModelProfile.WindowTokens). It is not a tuning knob: a chunk
+	// above it cannot be embedded at all, so the pipeline refuses it by name instead of handing the
+	// embedder something it would silently truncate. Zero means the default profile's window.
 	WindowTokens int
 }
 
@@ -43,12 +39,12 @@ func ConfigFor(p schema.ModelProfile, floor, ceiling int) Config {
 	return Config{FloorTokens: floor, CeilingTokens: ceiling, WindowTokens: p.WindowTokens()}
 }
 
-// window is WindowTokens with the zero value resolved to HardTokenLimit.
+// window is WindowTokens with the zero value resolved to the default profile's window.
 func (c Config) window() int {
 	if c.WindowTokens > 0 {
 		return c.WindowTokens
 	}
-	return HardTokenLimit
+	return schema.DefaultProfile().WindowTokens()
 }
 
 // Validate rejects a config that cannot describe a legal chunk. Every rule here fails loudly at the

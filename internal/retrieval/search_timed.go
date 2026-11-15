@@ -22,15 +22,15 @@ type Timing struct {
 	Total    time.Duration
 }
 
-// SearchTimed is Search with its NFR-1b decomposition attached. It runs the identical steps Search
-// does — same validation, same embed call, same executor call, same formatting — so a caller cannot
-// observe a different query shape depending on which of the two it calls; only the timers are new.
+// SearchTimed runs a search and attaches its NFR-1b decomposition. Search is this function with the
+// timings dropped, so a caller cannot observe a different query shape depending on which of the two
+// it calls.
 func (s *Searcher) SearchTimed(ctx context.Context, q Query) ([]Result, Timing, error) {
 	if s == nil || s.embedder == nil || s.executor == nil {
 		return nil, Timing{}, fmt.Errorf("retrieval: Searcher has no embedder or no executor")
 	}
 	start := time.Now()
-	if err := q.Validate(s.cfg.PrefetchMultiplier); err != nil {
+	if err := q.Validate(); err != nil {
 		return nil, Timing{}, err
 	}
 
@@ -41,7 +41,9 @@ func (s *Searcher) SearchTimed(ctx context.Context, q Query) ([]Result, Timing, 
 		return nil, Timing{}, fmt.Errorf("retrieval: embedding the query: %w", err)
 	}
 
-	req := buildQueryRequest(q, emb, calibratedPrefetchLimit(q, s.cfg.PrefetchMultiplier))
+	wide := q
+	wide.TopK = fetchWindow(q.TopK, s.cfg.MaxChunksPerUID)
+	req := buildQueryRequest(wide, emb)
 	t1 := time.Now()
 	points, err := s.executor.ExecuteQuery(ctx, req)
 	qdrantDur := time.Since(t1)
@@ -54,7 +56,7 @@ func (s *Searcher) SearchTimed(ctx context.Context, q Query) ([]Result, Timing, 
 	if err != nil {
 		return nil, Timing{}, err
 	}
-	return results, Timing{
+	return capPerUID(results, q.TopK, s.cfg.MaxChunksPerUID), Timing{
 		Embed:    embedDur,
 		Qdrant:   qdrantDur,
 		Overhead: total - embedDur - qdrantDur,

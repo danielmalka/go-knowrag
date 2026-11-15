@@ -13,7 +13,7 @@ import (
 // Profile configures *where* the embedding service is and *how* this client talks to it. Nothing
 // more: there is deliberately no model-revision field.
 //
-// PRD-contrato §2.3b pins BGE-M3 "by immutable revision (commit hash)" — a project-level constant
+// PRD-contrato §2.3b pins the model "by immutable revision (commit hash)" — a project-level constant
 // (a model profile in internal/schema: schema.ModelProfile.Revision), not a per-deployment setting. A ModelRevision field here would be exactly
 // the seam that rule forbids: a config file or env var disagreeing with the constant would point
 // the runtime at a different revision with nothing catching it before ingestion, and the symptom
@@ -116,8 +116,8 @@ func ParseProfile(data []byte) (Profile, error) {
 // VerifyTimeout is 30 s because the handshake happens once, at startup, with nothing waiting on it.
 // An ingestion is a 30-minute contract (NFR-4 in PRD.md), so 30 s spent confirming beats starting a
 // run against a backend nobody checked. A service merely still coming up does not consume this — it
-// binds its socket only after the model is loaded (scripts/embedder-service/server.py), so it
-// refuses instantly rather than answering slowly. What the budget covers is a wedged backend.
+// binds its socket only after its start-up checks (scripts/embedder-service/server.py; the handshake
+// loads no model), so it refuses instantly rather than answering slowly. What the budget covers is a wedged backend.
 //
 // Timeout, BatchSize, MaxConcurrent and MaxRetries are the ingestion's shape: batches of 32 with two
 // in flight, retried three times, against a service that serialises requests anyway.

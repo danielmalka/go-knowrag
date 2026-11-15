@@ -11,11 +11,9 @@ import (
 	"strings"
 )
 
-// HTTPTransport is the client for scripts/embedder-service/server.py, the runtime ADR-001 §7.2
-// settled on: a thin HTTP shell of our own around FlagEmbedding. TEI serves an ONNX graph that
-// never had BGE-M3's sparse head exported into it, and Infinity does not start on current
-// dependencies — so the sparse half of every vector, which PRD-contrato §2.3b requires, has exactly
-// one source here.
+// HTTPTransport is the client for scripts/embedder-service/server.py, the project's own thin HTTP
+// shell around sentence-transformers and EmbeddingGemma 2. The service owns the model, its GPU memory
+// and the task prefixes; this side only speaks the wire.
 //
 // It does nothing but speak the wire: encode the request, decode the response, translate the two
 // fields where the server's vocabulary differs from the contract's. It never sorts, filters or
@@ -26,11 +24,11 @@ type HTTPTransport struct {
 	client   *http.Client
 }
 
-// Kind is the /embed request's `kind` field. BGE-M3 uses no instruction prefix, so the server
-// produces the same vector either way, and the day a runtime does distinguish them, a query
-// embedded as a passage is a recall bug with no error attached.
+// Kind is the /embed request's `kind` field. The service applies a different task prefix to a query
+// and to a passage, so a query sent as a passage is a recall bug with no error attached, and the
+// service refuses any other value.
 //
-// It is not decoration in the meantime: the embedding service schedules on it. One resident model
+// The embedding service also schedules on it. One resident model
 // serialises inference, and `kind: "query"` is what admits an interactive request ahead of the
 // ingestion batches queued in front of it (D-27). Sending KindPassage for a query would not corrupt
 // the vector — it would put a human behind a 32-chunk batch for every batch already waiting.
@@ -58,15 +56,14 @@ func NewHTTPTransport(endpoint string) (*HTTPTransport, error) {
 	return &HTTPTransport{endpoint: endpoint, client: &http.Client{}}, nil
 }
 
-// embedRequest / embedResponse mirror POST /embed, verified against the running service on
-// 2026-08-09. `tokens` is decoded but unused: Embedding has nowhere to put it, and S03's
+// embedRequest / embedResponse mirror POST /embed. `tokens` is decoded but unused: Embedding has nowhere to put it, and S03's
 // clamp — the one consumer that wants token counts — asks /tokenize instead. See the note in
 // the package report about the two clients sharing this transport.
 type embedRequest struct {
 	Inputs []string `json:"inputs"`
 	Kind   Kind     `json:"kind"`
-	// Titles, when present, is one note title per input; it is sent only for a profile whose service
-	// builds a titled document prefix, so the BGE-M3 request is byte for byte what it always was.
+	// Titles, when present, is one note title per input, for the service to put in the document
+	// prefix; a query carries none.
 	Titles []string `json:"titles,omitempty"`
 }
 
@@ -79,11 +76,7 @@ var _ TitledTransport = (*HTTPTransport)(nil)
 
 type embedResponse struct {
 	Dense  [][]float32 `json:"dense"`
-	Sparse []struct {
-		Indices []uint32  `json:"indices"`
-		Values  []float32 `json:"values"`
-	} `json:"sparse"`
-	Tokens []int `json:"tokens"`
+	Tokens []int       `json:"tokens"`
 }
 
 func (t *HTTPTransport) Embed(ctx context.Context, texts []string, kind Kind) ([]Embedding, error) {
@@ -104,30 +97,9 @@ func (t *HTTPTransport) EmbedTitled(ctx context.Context, texts, titles []string,
 	if err := t.do(ctx, http.MethodPost, "/embed", body, &resp); err != nil {
 		return nil, err
 	}
-	// An absent or empty `sparse` array is a dense-only response (EmbeddingGemma); whether that is
-	// acceptable is the model profile's call (validateEmbedding), not the wire's. A non-empty array
-	// that does not line up with the dense one is a response-shape defect on any profile.
-	if len(resp.Sparse) != 0 && len(resp.Dense) != len(resp.Sparse) {
-		return nil, fmt.Errorf(
-			"embed: response has %d dense vectors but %d sparse ones; a model that produces both does so in one "+
-				"pass, so they cannot legitimately differ", len(resp.Dense), len(resp.Sparse))
-	}
-
 	out := make([]Embedding, len(resp.Dense))
 	for i := range resp.Dense {
-		if len(resp.Sparse) == 0 {
-			out[i] = Embedding{Dense: resp.Dense[i]}
-			continue
-		}
-		s := resp.Sparse[i]
-		// Checked here rather than left to validateEmbedding because a length mismatch is a
-		// response-shape defect: the pair never described a vector, so there is nothing to validate.
-		if len(s.Indices) != len(s.Values) {
-			return nil, fmt.Errorf(
-				"embed: item %d: sparse indices/values length mismatch (%d vs %d)",
-				i, len(s.Indices), len(s.Values))
-		}
-		out[i] = Embedding{Dense: resp.Dense[i], Sparse: Sparse{Indices: s.Indices, Values: s.Values}}
+		out[i] = Embedding{Dense: resp.Dense[i]}
 	}
 	return out, nil
 }
@@ -136,29 +108,27 @@ func (t *HTTPTransport) EmbedTitled(ctx context.Context, texts, titles []string,
 // distinguishable from an explicit false: absent means the backend did not report the field, which
 // Handshake treats as a divergence, while false is a backend that reports it is not normalizing.
 type handshakeResponse struct {
-	ModelRevision     string            `json:"model_revision"`
-	TokenizerRevision string            `json:"tokenizer_revision"`
-	DenseDim          int               `json:"dense_dim"`
-	Normalized        *bool             `json:"normalized"`
-	Pooling           string            `json:"pooling"`
-	Precision         string            `json:"precision"`
-	Sparse            map[string]string `json:"sparse"`
+	ModelRevision     string `json:"model_revision"`
+	TokenizerRevision string `json:"tokenizer_revision"`
+	DenseDim          int    `json:"dense_dim"`
+	Normalized        *bool  `json:"normalized"`
+	Pooling           string `json:"pooling"`
+	Precision         string `json:"precision"`
 	// PromptVersion is the task-prefix scheme the service applies to a query and to a document.
-	// Absent means the model takes no prefix (BGE-M3); the profile decides whether that is right.
+	// Absent means the model takes no prefix; the profile decides whether that is right. Any other
+	// key a backend sends (a sparse head, say) is ignored here: such a backend serves another model
+	// and is refused on the revision, width or pooling it reports instead.
 	PromptVersion string `json:"prompt_version"`
 }
 
-// dtypeNames maps torch's dtype spelling to the spelling this codebase hashes, and **this map is
-// where that set is decided** — nothing here is quoting another file. ADR-001 §4 row 7 pins one
-// value, fp16, and enumerates no vocabulary; it stopped enumerating when D-03 closed on 2026-08-09.
-// The sentence that used to sit here claimed the row fixed `fp32 | fp16 | int8`, which named a value
-// no torch dtype maps to and omitted `bf16`, which the map right below emits.
+// dtypeNames maps torch's dtype spelling to the spelling this codebase hashes, and this map is where
+// that set is decided. fp16 is listed so a backend that loaded the weights in fp16 is reported under
+// its own name and refused by the profile (EmbeddingGemma 2 lists bf16 and fp32 only), instead of
+// being flattened to "" and read as "the backend did not tell us".
 //
-// fp32 and bf16 exist so that a backend which switched precision diverges under a stable name
-// instead of under torch's. The translation lives here, at the wire, for one reason: this value goes
-// into point_hash, so it must not change the day the server's spelling does. An unrecognised dtype
-// passes through unchanged, so it diverges loudly against the pin instead of being flattened to ""
-// and reported as "the backend did not tell us".
+// The translation lives here, at the wire, for one reason: this value goes into point_hash, so it must
+// not change the day the server's spelling does. An unrecognised dtype passes through unchanged, so it
+// diverges loudly against the pin.
 var dtypeNames = map[string]string{
 	"float32":  "fp32",
 	"float16":  "fp16",
@@ -194,7 +164,6 @@ func (t *HTTPTransport) Info(ctx context.Context) (BackendHandshakeInfo, error) 
 		Normalization:     normalization,
 		Pooling:           resp.Pooling,
 		Precision:         precision,
-		SparseParams:      resp.Sparse,
 		PromptVersion:     resp.PromptVersion,
 	}, nil
 }

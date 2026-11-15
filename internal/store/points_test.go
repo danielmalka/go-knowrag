@@ -102,10 +102,7 @@ func testPoint(index int) ingest.Point {
 			"tags":        []string{"golang", "architecture"},
 			"oversize":    false,
 		},
-		Vector: embed.Embedding{
-			Dense:  make([]float32, embed.DefaultDenseDim()),
-			Sparse: embed.Sparse{Indices: []uint32{3, 9}, Values: []float32{0.5, 0.25}},
-		},
+		Vector: embed.Embedding{Dense: make([]float32, embed.DefaultDenseDim())},
 	}
 }
 
@@ -141,10 +138,10 @@ func TestClient_UpsertPoints_WritesIdentityVectorsAndPayload(t *testing.T) {
 
 	vectors := p.GetVectors().GetVectors().GetVectors()
 	if _, ok := vectors[schema.DenseVectorName]; !ok {
-		t.Errorf("no named vector %q; S07's PrefetchQuery has nothing to select", schema.DenseVectorName)
+		t.Errorf("no named vector %q; the query has nothing to select", schema.DenseVectorName)
 	}
-	if _, ok := vectors[schema.SparseVectorName]; !ok {
-		t.Errorf("no named vector %q", schema.SparseVectorName)
+	if len(vectors) != 1 {
+		t.Errorf("%d named vectors, want exactly the dense one: this schema has no sparse vector", len(vectors))
 	}
 
 	payload := p.GetPayload()

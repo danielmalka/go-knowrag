@@ -1,4 +1,4 @@
-// Command measure-search is the two-minute NFR-1b command: it runs a batch of real hybrid searches
+// Command measure-search is the two-minute NFR-1b command: it runs a batch of real searches
 // against the deployed Qdrant and embedding service, decomposes each one into the embedding-query,
 // Qdrant and overhead legs (internal/retrieval.SearchTimed), and reports p50/p95/p99 for every
 // column together with the pass/fail verdict against NFR-1's own gate (PRD.md: p95 <= 3s, p99 <=
@@ -173,9 +173,7 @@ func dialSearcher(cfg *config.Config, profile schema.ModelProfile) (*retrieval.S
 		return nil, nil, err
 	}
 
-	searchCfg := retrieval.DefaultConfig()
-	searchCfg.Profile = profile
-	return retrieval.NewSearcher(embedder, querier, searchCfg), release, nil
+	return retrieval.NewSearcher(embedder, querier, retrieval.DefaultConfig()), release, nil
 }
 
 func writeJSONReport(path string, report measure.SearchReport) error {

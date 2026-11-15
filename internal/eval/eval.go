@@ -4,12 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/danielmalka/go-knowrag/internal/eval/isolation"
 	"github.com/danielmalka/go-knowrag/internal/goldenset"
-	"github.com/danielmalka/go-knowrag/internal/retrieval"
-	"github.com/danielmalka/go-knowrag/internal/schema"
 )
 
 // ErrNotImplemented is what a mode whose harness does not exist answers with.
@@ -63,12 +60,6 @@ type Options struct {
 	MinRecall float64
 	// K is the cut-off. Zero means the default below.
 	K int
-
-	// CompareModes runs hybrid and dense-only over the same questions (S10 T11). The verdict is
-	// which ranking won, not whether recall cleared MinRecall — that gate stays on the single-mode
-	// path. CompareOut, when set, is where WriteHybridVsDenseReport writes the decision document.
-	CompareModes bool
-	CompareOut   string
 }
 
 // DefaultK is the cut-off every acceptance criterion in this project is written against: Recall@5.
@@ -146,9 +137,6 @@ func GoldenGate(ctx context.Context, opts Options) (Outcome, error) {
 		TenantID:   opts.TenantID,
 		K:          k,
 	}
-	if opts.CompareModes {
-		return compareModesGate(ctx, opts, set, cfg)
-	}
 	results, err := RunGolden(ctx, opts.Searcher, set.Questions, cfg)
 	if err != nil {
 		return Outcome{}, err
@@ -156,7 +144,7 @@ func GoldenGate(ctx context.Context, opts Options) (Outcome, error) {
 
 	report := Aggregate(results)
 	report.K = k
-	report.Mode = ranModeLabel(opts.Searcher, cfg.Mode)
+	report.Mode = rankingLabel
 	if cerr := goldenset.ValidateCoverage(set.Questions, set.Coverage); cerr != nil {
 		// Warn, do not fail: coverage is an authoring gate, not a run-time one (S10 open question 4,
 		// decided). The warning rides in the report so it reaches the operator who ran the eval.
@@ -170,36 +158,6 @@ func GoldenGate(ctx context.Context, opts Options) (Outcome, error) {
 		Passed:  report.Complete && recall >= opts.MinRecall,
 		Score:   &recall,
 		Summary: RenderReport(report),
-	}, nil
-}
-
-func compareModesGate(ctx context.Context, opts Options, set goldenset.GoldenSet, cfg RunConfig) (Outcome, error) {
-	if p, ok := opts.Searcher.(profiled); ok && !p.Profile().HasSparse() {
-		return Outcome{}, fmt.Errorf("%w (profile %q): there is only one ranking to measure, so run --golden without --compare-modes",
-			ErrNoHybridToCompare, p.Profile().ID)
-	}
-	hybrid, dense, err := CompareHybridVsDense(ctx, opts.Searcher, set.Questions, cfg)
-	if err != nil {
-		return Outcome{}, err
-	}
-	if opts.CompareOut != "" {
-		if werr := WriteHybridVsDenseReport(opts.CompareOut, hybrid, dense, time.Now()); werr != nil {
-			return Outcome{}, werr
-		}
-	}
-	recall := hybrid.Global.Recall()
-	summary := fmt.Sprintf("%s\n\nhybrid Recall@%d = %.4f (%d/%d)\ndense-only Recall@%d = %.4f (%d/%d)\n",
-		DecisionOutcome(hybrid, dense),
-		hybrid.K, hybrid.Global.Recall(), hybrid.Global.Hits, hybrid.Global.Total,
-		dense.K, dense.Global.Recall(), dense.Global.Hits, dense.Global.Total)
-	if opts.CompareOut != "" {
-		summary += "wrote " + opts.CompareOut + "\n"
-	}
-	return Outcome{
-		Mode:    "golden-compare",
-		Passed:  hybrid.Complete && dense.Complete,
-		Score:   &recall,
-		Summary: summary,
 	}, nil
 }
 
@@ -259,29 +217,14 @@ func IsolationGate(ctx context.Context, _ Options) (Outcome, error) {
 // stays — it is the Go end of the contract with scripts/ci/eval-gate.sh, whose pending list is
 // empty for the same reason and whose branch is kept for the next gate added before its harness.
 
-// ErrNoHybridToCompare is --compare-modes asked of a dense-only model profile: with no sparse head
-// there is no hybrid ranking to set against the dense one.
-var ErrNoHybridToCompare = errors.New("eval: the hybrid-vs-dense comparison needs a profile with a sparse head")
+// The helper that wrapped ErrNotImplemented into "gate X has no harness, story Y builds it" lived
+// here and has no caller left, because both gates measure. It is deleted rather than left unused:
+// golangci-lint's `unused` reports an unexported function nothing calls, and the mode and story it
+// named were arguments from the call site, so nothing of the wording is lost with it. The sentinel
+// stays — it is the Go end of the contract with scripts/ci/eval-gate.sh, whose pending list is
+// empty for the same reason and whose branch is kept for the next gate added before its harness.
 
-// profiled and modeResolver are the optional parts of a Searcher the harness can use. *retrieval.Searcher
-// has both; a fake or the hermetic CorpusSearcher has neither and is treated as the default profile,
-// which is what it has always been.
-type profiled interface{ Profile() schema.ModelProfile }
-
-type modeResolver interface {
-	ResolvedMode(retrieval.SearchMode) (retrieval.SearchMode, error)
-}
-
-// ranModeLabel is the label a golden report carries: the mode that actually ran, so a dense-only
-// profile's report says "dense-only" and the default profile's still says "hybrid".
-func ranModeLabel(s Searcher, requested retrieval.SearchMode) string {
-	if r, ok := s.(modeResolver); ok {
-		if m, err := r.ResolvedMode(requested); err == nil {
-			return m.String()
-		}
-	}
-	if requested == retrieval.SearchModeAuto {
-		return retrieval.SearchModeHybrid.String()
-	}
-	return requested.String()
-}
+// rankingLabel is the label a golden report carries for how the answers were ranked. There is one
+// ranking, a single dense search, so it is a constant; the report keeps the field because baselines
+// written before the cleanup carry one.
+const rankingLabel = "dense"

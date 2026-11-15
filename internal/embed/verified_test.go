@@ -285,9 +285,9 @@ func TestServiceEmbedder_WaiterWhoseContextDied_GetsAnErrorNotAZeroVector(t *tes
 
 	got, err := e.EmbedQuery(ctx, "the caller that gives up while waiting")
 	if err == nil {
-		t.Fatalf("a caller whose deadline expired was given a successful result: dense=%v sparse=%v — "+
+		t.Fatalf("a caller whose deadline expired was given a successful result: dense=%v — "+
 			"an all-zero vector returned as a real embedding is the one failure nothing downstream "+
-			"can detect", got.Dense, got.Sparse)
+			"can detect", got.Dense)
 	}
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("error = %v, want it to carry the caller's own deadline", err)

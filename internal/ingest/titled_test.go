@@ -8,9 +8,9 @@ import (
 	"github.com/danielmalka/go-knowrag/internal/embed"
 )
 
-// PR 4 of the embedding migration: when the backend reports a task-prefix scheme (EmbeddingGemma's
-// "title: <title> | text: <text>"), the note title goes to the service with every chunk. Without a
-// scheme (BGE-M3) the embedder is called exactly as before.
+// When the backend reports a task-prefix scheme (EmbeddingGemma's "title: <title> | text: <text>"), the
+// note title goes to the service with every chunk. Without a scheme the embedder is called with the
+// plain texts, as it always was.
 
 // titledSpy records which entry point ingest used and what the titled one was given.
 type titledSpy struct {
@@ -61,13 +61,13 @@ func TestProcessNote_NoPromptScheme_UsesThePlainEntryPoint(t *testing.T) {
 	spy := &titledSpy{}
 	deps := testDeps(newFakeStore(&journal{}), spy)
 	if deps.Handshake.PromptVersion != "" {
-		t.Fatal("the default test handshake must be the BGE-M3 one (no prompt scheme)")
+		t.Fatal("the default test handshake must be the one with no prompt scheme")
 	}
 	if res := ProcessNote(t.Context(), deps, testNote(t, "research/curadoria/nota.md", 2)); res.State != StatePruned {
 		t.Fatalf("State = %s (%v)", res.State, res.Err)
 	}
 	if spy.plain != 1 || len(spy.titled) != 0 {
-		t.Errorf("plain=%d titled=%d, want 1 and 0 — BGE-M3 ingestion must not change", spy.plain, len(spy.titled))
+		t.Errorf("plain=%d titled=%d, want 1 and 0 — ingestion without a prompt scheme must not change", spy.plain, len(spy.titled))
 	}
 }
 

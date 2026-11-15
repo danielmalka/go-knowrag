@@ -15,8 +15,9 @@ vaults e áreas em configuração, sem editar Go — mas os **nomes das coleçõ
 literais compilados no perfil de modelo (`internal/schema/model_profile.go`), e trocá-los é editar Go.
 
 > **Status: pipeline funcionando ponta a ponta, com os dois gates de performance passando.**
-> Ingestão, busca híbrida, CLI de operador e o servidor MCP estão implementados e rodando contra um
-> corpus real.
+> Ingestão, busca densa, CLI de operador e o servidor MCP estão implementados e rodaram contra um
+> corpus real (a medição abaixo é de 2026-08-11, com o modelo anterior, o BGE-M3, e ainda não foi
+> refeita com o EmbeddingGemma 2).
 >
 > Medido numa instalação real em 2026-08-11: 735 notas viram 3.690 pontos indexados; ingestão
 > completa em **6m50s** contra um orçamento de 30 min. A reingestão de um corpus inalterado já foi
@@ -57,12 +58,11 @@ uma nota que **encolheu** é removida sozinha, em toda ingestão, logo depois do
 Os pontos de uma nota **apagada** são detectados e listados em toda rodada, e removidos só quando
 alguém pede — `--prune`, que é destrutivo e por isso opt-in. Ver órfão é o default; apagar não é.
 
-**Busca híbrida.** Cada trecho é indexado com vetor denso *e* esparso no mesmo passo. A consulta roda
-as duas buscas e funde os resultados por *Reciprocal Rank Fusion* — o denso pega paráfrase e sinônimo,
-o esparso pega o termo exato, o nome próprio e a sigla que o denso dilui.
-O formato da consulta e das coleções segue o perfil de modelo (`internal/schema/model_profile.go`):
-com vetor esparso é a busca híbrida acima; um perfil só denso (o EmbeddingGemma 2, registrado mas ainda não
-padrão) cria coleções sem vetor esparso e faz uma única busca densa, sem pré-busca nem fusão.
+**Busca densa.** Cada trecho é indexado com um vetor denso (EmbeddingGemma 2, 768 dimensões, cosseno) e a
+consulta é uma única busca por vizinhança sob o filtro de tenant. Não há vetor esparso, BM25 nem fusão:
+a decisão do dono (2026-11-15) foi trocar o BGE-M3 híbrido por um modelo só denso, e o termo exato, o
+nome próprio e a sigla que o denso dilui são um risco aceito, coberto no golden set. O formato das
+coleções vem do perfil de modelo (`internal/schema/model_profile.go`).
 
 **Multi-tenancy desde o primeiro commit.** Coleções separadas por fronteira de confiança, com
 `tenant_id` indexado dentro de cada uma. O filtro de tenant é decidido **pelo servidor, a partir da
@@ -107,8 +107,7 @@ recall e o de isolamento.** Além deles existe um teste de isolamento atrás da 
 no CI e nunca contra uma PR.
 
 O que falta é **o número que importa**: o golden set real. As 60–90 perguntas contra a base real não
-existem, então não há Recall@5 medido deste deploy, e a escolha entre busca híbrida e densa continua
-sustentada por raciocínio e não por medição. Isso é conteúdo que só o dono produz — a pergunta
+existem, então não há Recall@5 medido deste deploy, e a qualidade da busca com o EmbeddingGemma 2 ainda não foi medida neste deploy. Isso é conteúdo que só o dono produz — a pergunta
 precisa ser dele, e precisa ser escrita **antes** de qualquer resultado ser visto. É para isso que
 existe o [`knowrag golden`](#knowrag-golden).
 
@@ -117,7 +116,7 @@ existe o [`knowrag golden`](#knowrag-golden).
 ```
     notas .md            ┌──────────────┐
    (frontmatter)  ─────► │   ingestão   │  chunking por ## + breadcrumb
-                         │     (Go)     │  embeddings denso + esparso
+                         │     (Go)     │  embeddings densos
                          └──────┬───────┘  upsert idempotente
                                 │
                                 ▼
@@ -127,7 +126,7 @@ existe o [`knowrag golden`](#knowrag-golden).
                                 │
                          ┌──────┴───────┐
                          │  retrieval   │  única implementação de busca
-                         │   (pacote)   │  hybrid + RRF + filtro de tenant
+                         │   (pacote)   │  busca densa + filtro de tenant
                          └──┬────────┬──┘
                             │        │
                    ┌────────┘        └────────┐
@@ -165,7 +164,7 @@ funcionar quando não olha para nada.
 | | |
 |---|---|
 | **Chunking com contexto** | Fronteira em `##`, breadcrumb `H1 → H2` embutido, clamp de tamanho em tokens, com piso e teto a calibrar contra o corpus real |
-| **Busca densa por perfil de modelo** | O perfil implantado é o EmbeddingGemma 2: uma consulta densa (768 dims, cosseno) no Qdrant. O caminho híbrido (denso + esparso fundidos por RRF) só existe para o perfil BGE-M3, que deixa de ser usado na virada e sai do código na limpeza |
+| **Busca densa** | Uma consulta densa (EmbeddingGemma 2, 768 dims, cosseno) no Qdrant, sob o filtro de tenant. Sem vetor esparso, BM25 nem fusão |
 | **Ingestão incremental** | Só reprocessa o que mudou, comparando uma fingerprint por ponto |
 | **Poda da cauda** | A cauda de uma nota que encolheu é removida em toda ingestão, depois do upsert confirmado. Ponto de nota **apagada** é detectado e listado em toda rodada, e só apagado sob `--prune` |
 | **Convergência sob falha** | Interromper a ingestão no meio nunca tira uma nota da busca — o pior caso é um ponto extra, que a rodada seguinte limpa |
@@ -198,12 +197,11 @@ Isso está **implementado** (o código existe e a suíte o cobre; ver o aviso ac
 desligado). Os campos da config efetiva têm valor pinado no **perfil de modelo**
 (`internal/schema/model_profile.go`) e são conferidos em `internal/embed/handshake.go` — revisão do
 modelo, revisão do tokenizer, dimensão, normalização, pooling, precisão (uma lista de dtypes
-permitidos; o EmbeddingGemma 2 recusa fp16), parâmetros esparsos (nenhum num perfil só denso) e o
-esquema de prefixos de tarefa — e a ingestão aborta nomeando o campo que divergir. O perfil de uma
-instalação é o que `MODEL_PROFILE` (CLI) ou `MCP_MODEL_PROFILE` (servidor MCP) nomeia, e, sem nada
-configurado, é o **EmbeddingGemma 2**; o BGE-M3 continua registrado só até a limpeza e não é mais
-usado. A collection configurada tem de ser uma das do perfil, ou o comando recusa antes de qualquer
-conexão: uma collection guarda os vetores de um modelo só. A
+permitidos; o EmbeddingGemma 2 recusa fp16) e o esquema de prefixos de tarefa — e a ingestão aborta
+nomeando o campo que divergir. Há um perfil só, o **EmbeddingGemma 2**, e não há seletor de perfil na
+configuração. A collection configurada tem de ser uma das do perfil (`*_eg2`), ou o comando recusa antes
+de qualquer conexão: uma collection guarda os vetores de um modelo só, e as do BGE-M3 (`interno`,
+`clientes`, `base_paga`) não são mais gerenciadas por este código. A
 forma de servir o modelo também foi decidida e medida: sidecar HTTP, um runtime só, no host de
 ingestão.
 
@@ -215,7 +213,7 @@ título de uma nota não tem limite, a ingestão **corta o título enviado ao em
 mesmo contador de tokens que dimensiona os chunks. Corta-se só o título, só na cópia enviada ao
 embedder: o texto do chunk nunca é cortado, e o título no payload e no `point_hash` continua inteiro.
 Assim um chunk que enche a janela mais o prefixo nunca passa de 8192, qualquer que seja o título. Perfil
-sem esquema de prefixos (BGE-M3) não envia título e não é afetado.
+sem esquema de prefixos não envia título e não é afetado.
 
 Os dois lados confirmam. A ingestão confere antes da primeira escrita; o servidor MCP confere na
 subida e **recusa subir** se o backend responder com uma configuração diferente da que o índice foi
@@ -363,7 +361,7 @@ knowrag ingest --vault both --dry-run  # conta chunks e lista órfãos, sem GPU 
 knowrag ingest --vault both
 ```
 
-`--dry-run` não é offline, e não é sequer desconectado. O clamp conta tokens reais do BGE-M3 e se
+`--dry-run` não é offline, e não é sequer desconectado. O clamp conta tokens reais do modelo e se
 recusa a aproximar, então ele exige `EMBEDDER_ENDPOINT` e faz um `POST /tokenize` por chunk; e ele
 **lê o índice**, para poder listar as notas que seriam podadas. O que ele economiza é a GPU e a
 escrita — uma contagem tirada de um contador aproximado reportaria um número de chunks que a rodada
@@ -445,8 +443,7 @@ do embedder, que ele nunca usa.
 | `QDRANT_ENDPOINT` | `host:6334` — gRPC, o único protocolo que o código fala |
 | `KNOWRAG_ADMIN_QDRANT_API_KEY` | chave **administrativa** do Qdrant — a CLI aceita qualquer `--tenant` e qualquer `--collection`, então a credencial dela é a do operador. O servidor MCP lê `MCP_QDRANT_API_KEY`, que é a [chave read-only](#as-duas-chaves-do-qdrant-e-por-que-são-duas), e nenhuma das duas cai para a outra |
 | `EMBEDDER_ENDPOINT` | URL do serviço de embedding, ex.: `http://127.0.0.1:7999` |
-| `DEFAULT_COLLECTION` | collection alvo, uma das do perfil — no EmbeddingGemma 2: `interno_eg2`, `clientes_eg2` ou `base_paga_eg2` |
-| `MODEL_PROFILE` | opcional: o perfil de modelo (`embeddinggemma-2`, o padrão). Define collections, largura do vetor, esquema de prefixos e janela de tokens |
+| `DEFAULT_COLLECTION` | collection alvo, uma das do perfil: `interno_eg2`, `clientes_eg2` ou `base_paga_eg2` |
 | `LOG_LEVEL` | opcional, default `info` |
 | `KNOWRAG_VAULTS` | os vaults desta instalação, separados por vírgula — ex.: `pessoal,trabalho` |
 | `KNOWRAG_VAULT_<NOME>_PATH` | raiz do vault no disco |
@@ -700,7 +697,6 @@ set, não um campo dentro dele.
 | `MCP_QDRANT_API_KEY` | a chave **read-only** do Qdrant — a de `QDRANT_READ_ONLY_API_KEY`, [nunca a administrativa](#as-duas-chaves-do-qdrant-e-por-que-são-duas). Nenhuma das duas cai para a outra |
 | `MCP_EMBEDDER_ENDPOINT` | URL do serviço de embedding |
 | `MCP_COLLECTION` | collection consultada, uma das do perfil (`interno_eg2`, `clientes_eg2` ou `base_paga_eg2`) |
-| `MCP_MODEL_PROFILE` | opcional: o perfil de modelo (`embeddinggemma-2`, o padrão); tem de ser o mesmo com que o índice foi ingerido |
 | `MCP_TENANT_ID` | tenant de toda busca |
 | `MCP_AREAS` | lista de `area` válida, separada por vírgula, que o servidor anuncia ao cliente MCP |
 
@@ -774,7 +770,7 @@ tinha feito. Rode uma vez para convergir o corpus, e meça na seguinte.
 
 ### `measure-search` — NFR-1b
 
-Roda um lote de buscas híbridas reais, decompõe cada uma nas pernas de embedding da consulta, Qdrant
+Roda um lote de buscas reais, decompõe cada uma nas pernas de embedding da consulta, Qdrant
 e overhead, e reporta p50/p95/p99 de cada coluna mais o total, contra o teto do NFR-1 (p95 ≤ 3 s,
 p99 ≤ 5 s). Concorrência 1, sequencial, que é a condição de medição do próprio requisito — um
 benchmark disparando em paralelo mediria um sistema diferente do que o teto descreve.

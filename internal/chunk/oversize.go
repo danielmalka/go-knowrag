@@ -3,10 +3,12 @@ package chunk
 import (
 	"fmt"
 	"strings"
+
+	"github.com/danielmalka/go-knowrag/internal/schema"
 )
 
-// HardLimitError reports a chunk that no configuration can rescue: it is larger than BGE-M3's
-// 8192-token window, so it cannot be embedded at all.
+// HardLimitError reports a chunk that no configuration can rescue: it is larger than the model's
+// token window, so it cannot be embedded at all.
 //
 // It names the file and the chunk's breadcrumb, for the same reason vault.FrontmatterError names
 // both a path and a field: an operator holding this message has to know which of 731 notes to open
@@ -17,7 +19,7 @@ type HardLimitError struct {
 	Path       string
 	Breadcrumb []string
 	Tokens     int
-	// Window is the window the chunk was measured against; zero (a hand-built error) means HardTokenLimit.
+	// Window is the window the chunk was measured against; zero (a hand-built error) means the default profile's window.
 	Window int
 }
 
@@ -54,5 +56,5 @@ func (e *HardLimitError) window() int {
 	if e.Window > 0 {
 		return e.Window
 	}
-	return HardTokenLimit
+	return schema.DefaultProfile().WindowTokens()
 }

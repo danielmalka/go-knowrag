@@ -3,7 +3,6 @@ package embed
 import (
 	"context"
 	"errors"
-	"maps"
 	"strings"
 	"testing"
 
@@ -21,7 +20,7 @@ func fullyPinned() BackendHandshakeInfo {
 		Normalization:     schema.DefaultProfile().Normalization,
 		Pooling:           schema.DefaultProfile().Pooling,
 		Precision:         schema.DefaultProfile().PrimaryPrecision(),
-		SparseParams:      map[string]string{"kind": "lexical_weights", "id_space": "tokenizer_vocab"},
+		PromptVersion:     schema.DefaultProfile().PromptVersion,
 	}
 }
 
@@ -31,7 +30,7 @@ func TestValidateHandshake_MatchingBackend_ReturnsNil(t *testing.T) {
 	}
 }
 
-// TestValidateHandshake_DivergingField is the story's "um teste por campo": all seven fields of the
+// TestValidateHandshake_DivergingField is the story's "um teste por campo": every field of the
 // "config efetiva do embedder" (PRD-contrato §2.4), each diverging on its own.
 func TestValidateHandshake_DivergingField(t *testing.T) {
 	cases := map[string]struct {
@@ -50,9 +49,9 @@ func TestValidateHandshake_DivergingField(t *testing.T) {
 			wantValue: "1111111111111111111111111111111111111111",
 		},
 		"Dim": {
-			mutate:    func(i *BackendHandshakeInfo) { i.Dim = 768 },
+			mutate:    func(i *BackendHandshakeInfo) { i.Dim = 1024 },
 			wantField: "Dim",
-			wantValue: "768",
+			wantValue: "1024",
 		},
 		"Normalization": {
 			mutate:    func(i *BackendHandshakeInfo) { i.Normalization = "none" },
@@ -60,28 +59,25 @@ func TestValidateHandshake_DivergingField(t *testing.T) {
 			wantValue: "none",
 		},
 		"Pooling": {
-			mutate:    func(i *BackendHandshakeInfo) { i.Pooling = "mean" },
+			mutate:    func(i *BackendHandshakeInfo) { i.Pooling = "cls" },
 			wantField: "Pooling",
-			wantValue: "mean",
+			wantValue: "cls",
 		},
 		"Precision": {
 			mutate:    func(i *BackendHandshakeInfo) { i.Precision = "int8" },
 			wantField: "Precision",
 			wantValue: "int8",
 		},
-		"SparseParams": {
-			mutate: func(i *BackendHandshakeInfo) {
-				i.SparseParams = map[string]string{"kind": "splade", "id_space": "tokenizer_vocab"}
-			},
-			wantField: "SparseParams",
-			wantValue: "splade",
+		"PromptVersion": {
+			mutate:    func(i *BackendHandshakeInfo) { i.PromptVersion = "gemma-search-v2" },
+			wantField: "PromptVersion",
+			wantValue: "gemma-search-v2",
 		},
 	}
 
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			got := fullyPinned()
-			got.SparseParams = maps.Clone(got.SparseParams)
 			tc.mutate(&got)
 
 			err := validateHandshake(got, fullyPinned())
@@ -103,7 +99,8 @@ func TestValidateHandshake_DivergingField(t *testing.T) {
 
 // TestValidateHandshake_UnpinnedExpectedField_FailsClosed encodes ADR-001 §4's policy: an absent pin
 // is not a skipped check. Guessing a plausible-looking value would be worse — the wrong test would
-// fail for the wrong reason.
+// fail for the wrong reason. (PromptVersion is the one field where "" is a legal pin; it has its own
+// test below.)
 func TestValidateHandshake_UnpinnedExpectedField_FailsClosed(t *testing.T) {
 	blanks := map[string]func(*BackendHandshakeInfo){
 		"ModelRevision":     func(i *BackendHandshakeInfo) { i.ModelRevision = "" },
@@ -112,7 +109,6 @@ func TestValidateHandshake_UnpinnedExpectedField_FailsClosed(t *testing.T) {
 		"Normalization":     func(i *BackendHandshakeInfo) { i.Normalization = "" },
 		"Pooling":           func(i *BackendHandshakeInfo) { i.Pooling = "" },
 		"Precision":         func(i *BackendHandshakeInfo) { i.Precision = "" },
-		"SparseParams":      func(i *BackendHandshakeInfo) { i.SparseParams = nil },
 	}
 	for field, blank := range blanks {
 		t.Run(field, func(t *testing.T) {
@@ -123,12 +119,6 @@ func TestValidateHandshake_UnpinnedExpectedField_FailsClosed(t *testing.T) {
 			if err == nil {
 				t.Fatalf("an unpinned %s was silently accepted from the backend", field)
 			}
-			if !strings.Contains(err.Error(), field) {
-				t.Errorf("error %q does not name %s", err, field)
-			}
-			// The message must blame the field itself, not one key inside it: "the backend reports
-			// key X, which is not pinned" would send the reader looking for a key-level problem
-			// when the whole field has no pin.
 			if !strings.Contains(err.Error(), field+" is not pinned") {
 				t.Errorf("error %q does not say %s itself is not pinned; it reads as a divergence", err, field)
 			}
@@ -144,7 +134,7 @@ func TestValidateHandshake_BackendOmitsField_FailsNamingIt(t *testing.T) {
 		"Normalization":     func(i *BackendHandshakeInfo) { i.Normalization = "" },
 		"Pooling":           func(i *BackendHandshakeInfo) { i.Pooling = "" },
 		"Precision":         func(i *BackendHandshakeInfo) { i.Precision = "" },
-		"SparseParams":      func(i *BackendHandshakeInfo) { i.SparseParams = nil },
+		"PromptVersion":     func(i *BackendHandshakeInfo) { i.PromptVersion = "" },
 	}
 	for field, omit := range omissions {
 		t.Run(field, func(t *testing.T) {
@@ -155,11 +145,6 @@ func TestValidateHandshake_BackendOmitsField_FailsNamingIt(t *testing.T) {
 			if err == nil {
 				t.Fatalf("a backend that did not report %s was accepted", field)
 			}
-			if !strings.Contains(err.Error(), field) {
-				t.Errorf("error %q does not name %s", err, field)
-			}
-			// Same reasoning as the unpinned case: a field that is absent entirely must be named as
-			// absent, not reduced to a complaint about one key that happens to be missing with it.
 			if !strings.Contains(err.Error(), "did not report "+field) {
 				t.Errorf("error %q does not say the backend failed to report %s", err, field)
 			}
@@ -167,49 +152,42 @@ func TestValidateHandshake_BackendOmitsField_FailsNamingIt(t *testing.T) {
 	}
 }
 
-// TestExpected_MatchesADR001 pins the values ADR-001 §4/§6.2 measured, so a silent edit to one of
-// them shows up as a failing test rather than as a different point_hash months later.
-func TestExpected_MatchesADR001(t *testing.T) {
-	e := Expected()
-	if e.ModelRevision != schema.DefaultProfile().Revision {
-		t.Errorf("ModelRevision = %q, want schema.DefaultProfile().Revision", e.ModelRevision)
-	}
-	if e.TokenizerRevision != schema.DefaultProfile().Revision {
-		t.Errorf("TokenizerRevision = %q, want schema.DefaultProfile().Revision", e.TokenizerRevision)
-	}
-	if e.Dim != DefaultDenseDim() {
-		t.Errorf("Dim = %d, want %d", e.Dim, DefaultDenseDim())
-	}
-	if e.Normalization != "l2" {
-		t.Errorf("Normalization = %q, want %q (BGE-M3 model card, ADR-001 §4)", e.Normalization, "l2")
-	}
-	if e.Pooling != "cls" {
-		t.Errorf("Pooling = %q, want %q (BGE-M3 model card, ADR-001 §4)", e.Pooling, "cls")
-	}
-	if e.Precision != "fp16" {
-		t.Errorf("Precision = %q, want %q (measured, ADR-001 §6.2 round 2)", e.Precision, "fp16")
+// A backend that carries a task-prefix scheme the profile does not pin is a different system: the
+// "" pin means "this model takes no prefix", and hearing one is a divergence.
+func TestValidateHandshake_PromptVersionOnAPrefixlessProfileIsRefused(t *testing.T) {
+	want := fullyPinned()
+	want.PromptVersion = ""
+	err := validateHandshake(fullyPinned(), want)
+	if err == nil || !strings.Contains(err.Error(), "takes no prefix") {
+		t.Fatalf("validateHandshake = %v, want a refusal saying the profile takes no prefix", err)
 	}
 }
 
-// TestExpected_IsACopy stops one caller's mutation from poisoning the pins for the whole process —
-// the map makes that possible in a way the string fields do not.
-func TestExpected_IsACopy(t *testing.T) {
+// TestExpected_MatchesTheModelCard pins the values the model card and the pinned repository fix, so a
+// silent edit to one of them shows up as a failing test rather than as a different point_hash months
+// later.
+func TestExpected_MatchesTheModelCard(t *testing.T) {
 	e := Expected()
-	e.SparseParams = map[string]string{"poisoned": "yes"}
-	if _, bad := Expected().SparseParams["poisoned"]; bad {
-		t.Fatal("Expected() hands out a shared map; a caller can rewrite the pins")
+	if e.ModelRevision != "f9972ac22e696a105c482202646979e33e4b5a1e" || e.TokenizerRevision != e.ModelRevision {
+		t.Errorf("revisions = %q/%q, want the pinned EmbeddingGemma 2 commit for both", e.ModelRevision, e.TokenizerRevision)
+	}
+	if e.Dim != 768 || e.Dim != DefaultDenseDim() {
+		t.Errorf("Dim = %d, want 768", e.Dim)
+	}
+	if e.Normalization != "l2" || e.Pooling != "mean" {
+		t.Errorf("Normalization/Pooling = %q/%q, want l2/mean (model card)", e.Normalization, e.Pooling)
+	}
+	if e.Precision != "bf16" || e.PromptVersion != "gemma-search-v1" {
+		t.Errorf("Precision/PromptVersion = %q/%q, want bf16/gemma-search-v1", e.Precision, e.PromptVersion)
 	}
 }
 
-// TestExpected_IsFullyPinned is what unblocked S04: with ADR-001 §7.2 closed, no field is left
-// without a pin, so the handshake can actually pass instead of failing closed on the last unknown.
-// A future field added to BackendHandshakeInfo without a pin trips this immediately.
+// TestExpected_IsFullyPinned: no field is left without a pin, so the handshake can actually pass
+// instead of failing closed on an unknown. A future field added to BackendHandshakeInfo without a pin
+// trips this immediately.
 func TestExpected_IsFullyPinned(t *testing.T) {
 	if err := validateHandshake(Expected(), Expected()); err != nil {
 		t.Fatalf("this build's own pins do not satisfy the handshake: %v", err)
-	}
-	if !maps.Equal(Expected().SparseParams, schema.DefaultProfile().SparseParams) {
-		t.Error("Expected() and schema.DefaultProfile().SparseParams disagree")
 	}
 }
 
@@ -244,14 +222,6 @@ func TestServiceEmbedder_Handshake_ReturnsWhatTheBackendReported(t *testing.T) {
 	if got.ModelRevision != reported.ModelRevision || got.Precision != reported.Precision {
 		t.Errorf("Handshake returned %+v, want the backend's own report %+v", got, reported)
 	}
-
-	// On the success path every field of the report equals its pin, so field comparison alone
-	// cannot tell "returned the report" from "returned the pins". Identity can: handing back the
-	// embedder's own SparseParams map would let the caller rewrite the pins for the process.
-	got.SparseParams["poisoned"] = "yes"
-	if _, bad := e.expected.SparseParams["poisoned"]; bad {
-		t.Error("Handshake returned the embedder's own pins, not the backend's report")
-	}
 }
 
 // PR 1 of the embedding migration: the pins come from a model profile, not from package constants.
@@ -259,7 +229,7 @@ func TestExpectedFor_DefaultProfileEqualsExpected(t *testing.T) {
 	got := ExpectedFor(schema.DefaultProfile())
 	want := Expected()
 	if got.ModelRevision != want.ModelRevision || got.Dim != want.Dim || got.Precision != want.Precision ||
-		!maps.Equal(got.SparseParams, want.SparseParams) {
+		got.PromptVersion != want.PromptVersion {
 		t.Fatalf("ExpectedFor(default) = %+v, Expected() = %+v", got, want)
 	}
 }

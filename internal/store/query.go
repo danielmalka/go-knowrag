@@ -13,8 +13,7 @@ import (
 // This file is the one query-shaped thing internal/store owns, and it owns it for a single reason:
 // this package holds the Qdrant connection and the Qdrant client import, and both are confined here
 // by internal/archtest (S09 T11 invariant 1). Nothing below decides anything about a search.
-// internal/retrieval chooses the collection, the filter conditions, the fusion mode, the per-leg
-// limits and whether ACORN is on; this file transcribes that finished decision into the wire types
+// internal/retrieval chooses the collection, the filter conditions, the limits and whether ACORN is on; this file transcribes that finished decision into the wire types
 // and hands back what came off the wire. It is the same division internal/schema.CollectionManifest
 // already uses for provisioning: the caller says what, this package says how.
 //
@@ -53,12 +52,7 @@ func NewQuerier(api QueryAPI) (*Querier, error) {
 // making it impossible to arrive that way is internal/retrieval's job, and duplicating the check
 // here would create a second place the rule lives and therefore a second place it can drift.
 func (q *Querier) ExecuteQuery(ctx context.Context, req retrieval.SearchRequest) ([]retrieval.ScoredPoint, error) {
-	request, err := queryPoints(req)
-	if err != nil {
-		return nil, err
-	}
-
-	points, err := q.api.Query(ctx, request)
+	points, err := q.api.Query(ctx, queryPoints(req))
 	if err != nil {
 		return nil, fmt.Errorf("querying %s: %w", req.Collection, err)
 	}
@@ -82,7 +76,7 @@ func (q *Querier) ExecuteQuery(ctx context.Context, req retrieval.SearchRequest)
 // queryPoints transcribes a SearchRequest. Every field it sets comes from the request; the only
 // thing it supplies on its own is WithVectors(false), because nothing reads vectors back and they
 // are three orders of magnitude larger than the payload.
-func queryPoints(req retrieval.SearchRequest) (*qdrant.QueryPoints, error) {
+func queryPoints(req retrieval.SearchRequest) *qdrant.QueryPoints {
 	out := &qdrant.QueryPoints{
 		CollectionName: req.Collection,
 		Filter:         qdrantFilter(req.Filter),
@@ -91,64 +85,18 @@ func queryPoints(req retrieval.SearchRequest) (*qdrant.QueryPoints, error) {
 		WithPayload:    withPayload(req.PayloadFields),
 		WithVectors:    qdrant.NewWithVectors(false),
 	}
-	// Refused rather than resolved. The two describe different searches, and honouring either one
-	// would send a query the caller did not build — the failure mode this whole file exists to make
-	// impossible. It is a check on the request's own shape, not a filter condition invented here.
-	if len(req.Dense) > 0 && (len(req.Prefetch) > 0 || req.FusionRRF) {
-		return nil, fmt.Errorf("building the query for %s: the request carries both a top-level "+
-			"dense query and %d prefetch leg(s) (fusion=%t); exactly one of the two is a search",
-			req.Collection, len(req.Prefetch), req.FusionRRF)
-	}
-
-	switch {
-	case req.FusionRRF:
-		// nil leaves k and the per-leg weights at the server's defaults, which is what "RRF" with no
-		// further qualification means in PRD-contrato §2.3b.
-		out.Query = qdrant.NewQueryRRF(nil)
-	case len(req.Dense) > 0:
+	// No vector means the filter alone: Qdrant orders by point ID, which is what the "is this filter
+	// alive" probe wants (retrieval.Searcher.FilterMatchesAnything).
+	if len(req.Dense) > 0 {
 		out.Query = qdrant.NewQueryDense(req.Dense)
 		out.Using = qdrant.PtrOf(req.DenseVector)
 	}
 	if req.Acorn {
-		// Same enable-only shape as a prefetch leg's, and for the same reason (PRD-contrato §2.3c):
-		// MaxSelectivity stays at the server default because Qdrant estimates cardinality per
-		// request and this process cannot.
+		// Enable only (PRD-contrato §2.3c): MaxSelectivity stays at the server default because Qdrant
+		// estimates cardinality per request and this process cannot.
 		out.Params = &qdrant.SearchParams{Acorn: &qdrant.AcornSearchParams{Enable: qdrant.PtrOf(true)}}
 	}
-	for i, leg := range req.Prefetch {
-		p, err := prefetchQuery(leg)
-		if err != nil {
-			return nil, fmt.Errorf("building the query for %s: prefetch %d: %w", req.Collection, i, err)
-		}
-		out.Prefetch = append(out.Prefetch, p)
-	}
-	return out, nil
-}
-
-func prefetchQuery(leg retrieval.PrefetchLeg) (*qdrant.PrefetchQuery, error) {
-	out := &qdrant.PrefetchQuery{
-		Using:  qdrant.PtrOf(leg.Vector),
-		Filter: qdrantFilter(leg.Filter),
-		Limit:  qdrant.PtrOf(wireCount(leg.Limit)),
-	}
-
-	dense, sparse := len(leg.Dense) > 0, len(leg.Sparse.Indices) > 0
-	switch {
-	case dense && !sparse:
-		out.Query = qdrant.NewQueryDense(leg.Dense)
-	case sparse && !dense:
-		out.Query = qdrant.NewQuerySparse(leg.Sparse.Indices, leg.Sparse.Values)
-	default:
-		return nil, fmt.Errorf("leg %q carries %d dense element(s) and %d sparse index(es); "+
-			"exactly one of the two is a query", leg.Vector, len(leg.Dense), len(leg.Sparse.Indices))
-	}
-
-	if leg.Acorn {
-		// Enable only. MaxSelectivity stays at the server default because Qdrant decides per request
-		// from a cardinality estimate this process does not have (PRD-contrato §2.3c).
-		out.Params = &qdrant.SearchParams{Acorn: &qdrant.AcornSearchParams{Enable: qdrant.PtrOf(true)}}
-	}
-	return out, nil
+	return out
 }
 
 func qdrantFilter(f retrieval.Filter) *qdrant.Filter {

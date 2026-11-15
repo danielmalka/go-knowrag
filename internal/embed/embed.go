@@ -6,30 +6,15 @@ import (
 	"github.com/danielmalka/go-knowrag/internal/schema"
 )
 
-// DefaultDenseDim is the dense vector width of the default model profile (schema.DefaultProfile,
-// BGE-M3: PRD-contrato §2.3b, confirmed in ADR-001 §6.2 against the pinned revision's config.json).
-// The width is a property of the model, not a setting: a backend returning any other width is a
-// backend serving a different model. An embedder built for another profile (NewServiceEmbedderFor)
-// validates against that profile's width; this is only what fixtures that use the default want.
+// DefaultDenseDim is the dense vector width of the default model profile (schema.DefaultProfile). The
+// width is a property of the model, not a setting: a backend returning any other width is a backend
+// serving a different model. An embedder built for another profile (NewServiceEmbedderFor) validates
+// against that profile's width; this is only what fixtures that use the default want.
 func DefaultDenseDim() int { return schema.DefaultProfile().DenseWidth() }
 
-// Sparse is the lexical half of a BGE-M3 embedding, in the shape PRD-contrato §2.3b fixes:
-// the model's `token_id` becomes Indices (uint32) and its `lexical_weight` becomes Values
-// (float32), positionally paired.
-//
-// A valid Sparse has strictly ascending Indices and no zero Value. Note the phrasing: that
-// describes what a *valid* vector looks like, not a repair this package performs. Duplicates and
-// zeros arriving from a backend are defects (validateEmbedding rejects them) — see validate.go.
-type Sparse struct {
-	Indices []uint32
-	Values  []float32
-}
-
-// Embedding is one text's BGE-M3 output: both halves from the same forward pass, which is why they
-// travel together and never separately.
+// Embedding is one text's dense vector, L2-normalized by the model's own Normalize module.
 type Embedding struct {
-	Dense  []float32
-	Sparse Sparse
+	Dense []float32
 }
 
 // Document is one text to embed together with the title of the note it came from. EmbeddingGemma's
@@ -42,7 +27,7 @@ type Document struct {
 
 // TitledEmbedder is the optional capability of an Embedder that can pass the note title to a service
 // that builds a titled document prefix. It is a separate interface rather than a change to Embedder
-// so the profiles without a prefix (BGE-M3) and every fake keep the contract they have: ingest uses it
+// so a profile without a prefix and every fake keep the contract they have: ingest uses it
 // only when the profile asks for a title (schema.ModelProfile.NeedsTitle).
 type TitledEmbedder interface {
 	EmbedTitledDocuments(ctx context.Context, docs []Document) ([]Embedding, error)

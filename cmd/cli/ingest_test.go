@@ -217,7 +217,7 @@ func TestIngestCmd_RegistersItsFlags(t *testing.T) {
 }
 
 // tokenizeStub answers /tokenize the way the real service does, counting whitespace-separated
-// fields. The count rule does not have to match BGE-M3 here — what is under test is the command's
+// fields. The count rule does not have to match the real model here — what is under test is the command's
 // wiring, and internal/chunk owns what the counter does with the answer.
 //
 // It also answers /handshake with this build's own pins, which is what lets a real (non-dry) run
@@ -250,16 +250,11 @@ func tokenizeStub(t *testing.T) string {
 // embed.ExpectedFor instead of written out by hand: a stub carrying literal revisions would go red the
 // day a pin moves, for a reason that has nothing to do with the command under test. `precision`
 // travels in the contract's spelling rather than torch's, which the transport passes through
-// untranslated. The profile is the one a command resolves with no MODEL_PROFILE set (EmbeddingGemma 2),
-// which is what these runs go through.
+// untranslated. The profile is the one every command serves (EmbeddingGemma 2).
 func writeHandshake(t *testing.T, w http.ResponseWriter) {
 	t.Helper()
-	profile, err := schema.ResolveProfile("")
-	if err != nil {
-		t.Fatal(err)
-	}
-	expected := embed.ExpectedFor(profile)
-	err = json.NewEncoder(w).Encode(map[string]any{
+	expected := embed.ExpectedFor(schema.DefaultProfile())
+	err := json.NewEncoder(w).Encode(map[string]any{
 		"model_revision":     expected.ModelRevision,
 		"tokenizer_revision": expected.TokenizerRevision,
 		"dense_dim":          expected.Dim,

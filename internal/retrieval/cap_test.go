@@ -92,12 +92,6 @@ func TestSearch_OverFetchesThenCapsPerUID(t *testing.T) {
 		t.Errorf("Limit = %d, want the over-fetch window %d",
 			x.requests[0].Limit, q.TopK*DefaultMaxChunksPerUID)
 	}
-	wantPrefetch := calibratedPrefetchLimit(Query{TopK: q.TopK * DefaultMaxChunksPerUID}, s.cfg.PrefetchMultiplier)
-	if x.requests[0].Prefetch[0].Limit != wantPrefetch {
-		t.Errorf("prefetch limit = %d, want %d so RRF still has a wide enough pool",
-			x.requests[0].Prefetch[0].Limit, wantPrefetch)
-	}
-
 	if len(got) != 3 {
 		t.Fatalf("%d result(s), want topK 3 after the cap", len(got))
 	}
@@ -116,7 +110,7 @@ func TestSearch_CapDisabled_KeepsQdrantWindow(t *testing.T) {
 		notePointUID("p2", "note-a", 2, 0.7),
 	}
 	e, x := &spyEmbedder{}, &spyExecutor{points: points}
-	s := NewSearcher(e, x, Config{PrefetchMultiplier: DefaultPrefetchMultiplier})
+	s := NewSearcher(e, x, Config{})
 
 	q := validQuery()
 	q.TopK = 3

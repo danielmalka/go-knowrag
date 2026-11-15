@@ -3,7 +3,6 @@ package eval
 import (
 	"context"
 	"errors"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -175,40 +174,17 @@ func TestGoldenGate_MeasuresAgainstTheThreshold(t *testing.T) {
 	}
 }
 
-func TestGoldenGate_CompareModes_WritesTheDecision(t *testing.T) {
+func TestGoldenGate_ReportNamesTheRankingThatRan(t *testing.T) {
 	path, _ := goldenGateFixture(t)
-	out := filepath.Join(t.TempDir(), "hybrid-vs-dense.md")
-	s := &modeSearcher{byMode: map[retrieval.SearchMode][]retrieval.Result{
-		retrieval.SearchModeHybrid:    {result(uidA, 0, 0.9)},
-		retrieval.SearchModeDenseOnly: {result(uidA, 0, 0.9), result(uidB, 0, 0.8)},
-	}}
-
 	got, err := GoldenGate(t.Context(), Options{
-		Collection:    "interno",
-		TenantID:      "tenant-a",
-		Searcher:      s,
-		GoldenSetPath: path,
-		CompareModes:  true,
-		CompareOut:    out,
+		Collection: "interno_eg2", TenantID: "tenant-a", GoldenSetPath: path,
+		Searcher: &fakeSearcher{answers: [][]retrieval.Result{{result(uidA, 0, 0.9)}}},
 	})
 	if err != nil {
 		t.Fatalf("GoldenGate: %v", err)
 	}
-	if got.Mode != "golden-compare" {
-		t.Errorf("Mode = %q, want golden-compare", got.Mode)
-	}
-	if !got.Passed {
-		t.Error("a complete comparison did not pass")
-	}
-	if !strings.Contains(got.Summary, OutcomeDenseWins) {
-		t.Errorf("summary does not state the decision:\n%s", got.Summary)
-	}
-	body, err := os.ReadFile(out) // #nosec G304 -- out is the file this test just had GoldenGate write under t.TempDir()
-	if err != nil {
-		t.Fatalf("reading the decision document: %v", err)
-	}
-	if !strings.Contains(string(body), OutcomeDenseWins) {
-		t.Errorf("the document does not state the decision:\n%s", body)
+	if !strings.Contains(got.Summary, "Mode: dense") {
+		t.Errorf("the report does not name the ranking that ran:\n%s", got.Summary)
 	}
 }
 

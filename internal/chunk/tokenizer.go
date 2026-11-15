@@ -15,8 +15,8 @@ import (
 
 // TokenCounter counts tokens the way the embedding model sees them.
 //
-// "Token" here means the tokenizer of the model the embedding service serves — BGE-M3 today, whichever
-// model profile is active tomorrow (schema.ModelProfile). The counter asks the SAME service the embedder
+// "Token" here means the tokenizer of the model the embedding service serves — EmbeddingGemma 2 today, whichever
+// model profile is registered tomorrow (schema.ModelProfile). The counter asks the SAME service the embedder
 // handshake verified (same endpoint, tokenizer revision confirmed there), so there is no per-profile
 // tokenizer to select on the Go side, only the profile's window (ConfigFor). Counting words or
 // characters/4 makes the clamp diverge from what the model reads and invalidates the calibration
@@ -32,7 +32,7 @@ type TokenCounter interface {
 }
 
 // FakeTokenCounter counts whitespace-separated fields. It is a test fixture, not an approximation
-// of BGE-M3 — it exists so the chunking logic can be tested deterministically and offline, with
+// of the model's tokenizer — it exists so the chunking logic can be tested deterministically and offline, with
 // fixtures whose token counts are countable by eye.
 //
 // It must never be used for the calibration report (T10): a report written against this counter

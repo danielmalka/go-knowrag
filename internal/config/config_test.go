@@ -815,7 +815,7 @@ func TestConfig_Redaction_EmptyKeyStaysEmpty(t *testing.T) {
 	}
 }
 
-func TestConfig_Profile_DefaultsToTheDeployedProfileAndChecksTheCollection(t *testing.T) {
+func TestConfig_Profile_IsEmbeddingGemma2AndChecksTheCollection(t *testing.T) {
 	cfg := &Config{DefaultCollection: "interno_eg2"}
 	p, err := cfg.Profile()
 	if err != nil || p.ID != "embeddinggemma-2" {
@@ -826,49 +826,34 @@ func TestConfig_Profile_DefaultsToTheDeployedProfileAndChecksTheCollection(t *te
 	}
 }
 
-func TestConfig_Profile_RefusesACollectionOfAnotherModel(t *testing.T) {
-	_, err := (&Config{DefaultCollection: "interno"}).Profile()
-	if err == nil {
-		t.Fatal("EmbeddingGemma 2 was paired with the BGE-M3 collection `interno` without an error")
-	}
-	for _, want := range []string{"DEFAULT_COLLECTION", `"interno"`, "embeddinggemma-2", "interno_eg2", "MODEL_PROFILE"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error %q does not name %q", err, want)
+func TestConfig_Profile_RefusesTheRetiredBGEM3Collections(t *testing.T) {
+	for _, old := range []string{"interno", "clientes", "base_paga"} {
+		_, err := (&Config{DefaultCollection: old}).Profile()
+		if err == nil {
+			t.Fatalf("DEFAULT_COLLECTION=%s (a retired BGE-M3 collection, 1024 wide) was accepted for EmbeddingGemma 2", old)
+		}
+		for _, want := range []string{"DEFAULT_COLLECTION", `"` + old + `"`, "embeddinggemma-2", "interno_eg2"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not name %q", err, want)
+			}
 		}
 	}
 }
 
-func TestConfig_Profile_FollowsModelProfileFromTheEnvironmentAndTheFile(t *testing.T) {
+func TestConfig_ModelProfileIsNotConfigurable(t *testing.T) {
+	// One profile is registered, so there is nothing to select: MODEL_PROFILE is not a setting any
+	// more, and a leftover one in the environment must not change what runs.
 	clearEnv(t)
 	t.Setenv("MODEL_PROFILE", "bge-m3")
-	t.Setenv("DEFAULT_COLLECTION", "interno")
+	t.Setenv("DEFAULT_COLLECTION", "interno_eg2")
 	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := cfg.Profile()
-	if err != nil || p.ID != "bge-m3" {
-		t.Fatalf("Profile() = %q, %v; want bge-m3 from MODEL_PROFILE", p.ID, err)
+	if p, err := cfg.Profile(); err != nil || p.ID != "embeddinggemma-2" {
+		t.Fatalf("Profile() = %q, %v; a stale MODEL_PROFILE changed the profile", p.ID, err)
 	}
-
-	clearEnv(t)
-	file := filepath.Join(t.TempDir(), "knowrag.yaml")
-	if err := os.WriteFile(file, []byte("model_profile: bge-m3\ndefault_collection: interno\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv(configFileEnv, file)
-	cfg, err = Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if p, err := cfg.Profile(); err != nil || p.ID != "bge-m3" {
-		t.Fatalf("Profile() = %q, %v; want bge-m3 from the config file", p.ID, err)
-	}
-}
-
-func TestConfig_Profile_UnknownProfileIsRefusedNamingTheVariable(t *testing.T) {
-	_, err := (&Config{ModelProfile: "gemma-typo"}).Profile()
-	if err == nil || !strings.Contains(err.Error(), "MODEL_PROFILE") || !strings.Contains(err.Error(), "gemma-typo") {
-		t.Fatalf("Profile() = %v; want an error naming MODEL_PROFILE and the bad value", err)
+	if slices.Contains(fixedEnvVars, "MODEL_PROFILE") {
+		t.Error("MODEL_PROFILE is still a setting Load reads")
 	}
 }

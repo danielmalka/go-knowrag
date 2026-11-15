@@ -49,22 +49,20 @@ func newSpySearcher() (*Searcher, *spyEmbedder, *spyExecutor) {
 
 func TestSearch_InvalidQueryTouchesNeitherDependency(t *testing.T) {
 	cases := []struct {
-		name       string
-		mutate     func(*Query)
-		multiplier int
-		want       error
+		name   string
+		mutate func(*Query)
+		want   error
 	}{
-		{"no tenant", func(q *Query) { q.TenantID = "" }, DefaultPrefetchMultiplier, ErrEmptyTenant},
-		{"no collection", func(q *Query) { q.Collection = "" }, DefaultPrefetchMultiplier, ErrEmptyCollection},
-		{"no text", func(q *Query) { q.Text = "" }, DefaultPrefetchMultiplier, ErrEmptyQuery},
-		{"zero top_k", func(q *Query) { q.TopK = 0 }, DefaultPrefetchMultiplier, ErrInvalidTopK},
-		{"prefetch floor not cleared", func(q *Query) { q.Offset = 3 }, 0, ErrPrefetchLimitTooLow},
+		{"no tenant", func(q *Query) { q.TenantID = "" }, ErrEmptyTenant},
+		{"no collection", func(q *Query) { q.Collection = "" }, ErrEmptyCollection},
+		{"no text", func(q *Query) { q.Text = "" }, ErrEmptyQuery},
+		{"zero top_k", func(q *Query) { q.TopK = 0 }, ErrInvalidTopK},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			e, x := &spyEmbedder{}, &spyExecutor{}
-			s := NewSearcher(e, x, Config{PrefetchMultiplier: tc.multiplier})
+			s := NewSearcher(e, x, DefaultConfig())
 
 			q := validQuery()
 			tc.mutate(&q)
@@ -140,21 +138,16 @@ func TestSearch_HappyPath(t *testing.T) {
 	}
 	wide := q
 	wide.TopK = fetchWindow(q.TopK, DefaultMaxChunksPerUID)
-	want := buildQueryRequest(wide, emb, calibratedPrefetchLimit(wide, DefaultPrefetchMultiplier))
+	want := buildQueryRequest(wide, emb)
 	if x.requests[0].Collection != want.Collection || x.requests[0].Limit != want.Limit ||
-		x.requests[0].Offset != want.Offset || !x.requests[0].FusionRRF {
+		x.requests[0].Offset != want.Offset || !slices.Equal(x.requests[0].Dense, want.Dense) {
 		t.Errorf("the executed request %+v does not match the built one %+v", x.requests[0], want)
 	}
 	if !hasCondition(x.requests[0].Filter.Must, fieldTenantID, q.TenantID) {
 		t.Error("the request that reached the executor carries no tenant condition")
 	}
-	for _, leg := range x.requests[0].Prefetch {
-		if !leg.Acorn {
-			t.Errorf("prefetch leg %q reached the executor with ACORN off", leg.Vector)
-		}
-	}
-	if len(x.requests[0].Prefetch) != 2 {
-		t.Errorf("%d prefetch leg(s) reached the executor, want 2", len(x.requests[0].Prefetch))
+	if !x.requests[0].Acorn {
+		t.Error("the request reached the executor with ACORN off")
 	}
 
 	// The return value is formatResults then the per-uid cap, not a second mapping.
@@ -258,14 +251,13 @@ func TestFilterMatchesAnything_ProbesUnderTheSearchsGuards(t *testing.T) {
 		}
 	}
 
-	// The rest is what makes it cheap: no embedding, no prefetch leg to fuse, one point, and a
+	// The rest is what makes it cheap: no embedding, no vector to rank by, one point, and a
 	// projection that leaves the chunk text on the server.
 	if e.calls != 1 {
 		t.Errorf("the embedder was called %d time(s); the probe embeds nothing", e.calls)
 	}
-	if len(probe.Prefetch) != 0 || probe.FusionRRF {
-		t.Errorf("the probe carries %d prefetch leg(s) and FusionRRF=%v, want a plain filtered read",
-			len(probe.Prefetch), probe.FusionRRF)
+	if len(probe.Dense) != 0 {
+		t.Errorf("the probe carries a %d-element query vector, want a plain filtered read", len(probe.Dense))
 	}
 	if probe.Limit != 1 {
 		t.Errorf("the probe asks for %d points, want 1", probe.Limit)
@@ -352,28 +344,15 @@ func TestFilterMatchesAnything_UnwiredSearcher(t *testing.T) {
 	}
 }
 
-// TestSearch_UsesTheSchemaVectorNames pins the names to internal/schema's constants rather than to
-// literals: the collections were provisioned with those, and a search naming anything else asks
+// TestSearch_UsesTheSchemaVectorName pins the name to internal/schema's constant rather than to a
+// literal: the collections were provisioned with that one, and a search naming anything else asks
 // Qdrant for a vector that does not exist.
-func TestSearch_UsesTheSchemaVectorNames(t *testing.T) {
+func TestSearch_UsesTheSchemaVectorName(t *testing.T) {
 	s, _, x := newSpySearcher()
 	if _, err := s.Search(t.Context(), validQuery()); err != nil {
 		t.Fatalf("Search: %v", err)
 	}
-
-	names := make([]string, 0, 2)
-	for _, leg := range x.requests[0].Prefetch {
-		names = append(names, leg.Vector)
-	}
-	for _, want := range []string{schema.DenseVectorName, schema.SparseVectorName} {
-		found := false
-		for _, n := range names {
-			if n == want {
-				found = true
-			}
-		}
-		if !found {
-			t.Errorf("no prefetch leg uses %q; legs use %v", want, names)
-		}
+	if got := x.requests[0].DenseVector; got != schema.DenseVectorName {
+		t.Errorf("the search uses vector %q, want %q", got, schema.DenseVectorName)
 	}
 }
