@@ -70,7 +70,11 @@ scan "a macOS user path"      '/Users/[a-zA-Z<]'                  "$placeholder"
 reserved_ip='(^|[^0-9.])(127\.|0\.0\.0\.0|192\.0\.2\.|198\.51\.100\.|203\.0\.113\.)'
 reserved_mail='@(example\.(com|org|net)|.*\.invalid|localhost)'
 
-scan "an IPv4 address"   '\b(([0-9]{1,3}\.){3}[0-9]{1,3})\b'   "$reserved_ip"
+# A pinned four-part version (`nvidia-cublas==13.4.1.3`) has the shape of an address and is not one;
+# the exception is a whole `name==version` line of a requirements file and nothing looser, so an
+# address anywhere else in such a file, or any other file, still fires.
+pinned_version='requirements[^:]*\.txt:[0-9]+:[A-Za-z0-9_.-]+==[0-9.]+$'
+scan "an IPv4 address"   '\b(([0-9]{1,3}\.){3}[0-9]{1,3})\b'   "$reserved_ip|$pinned_version"
 scan "an e-mail address" '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' "$reserved_mail"
 
 # 2. Names. Absent the file, this says so — the one outcome that must never look like a pass.

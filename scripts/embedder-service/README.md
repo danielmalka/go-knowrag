@@ -1,141 +1,229 @@
 # The embedding service
 
-`server.py` is the only embedding runtime this system has. It holds BGE-M3 resident on the GPU and
-answers `/health`, `/handshake`, `/tokenize` and `/embed` over plain HTTP on loopback.
+`server.py` is the only embedding runtime this system has. It serves **EmbeddingGemma 2**
+(`google/embeddinggemma-2`, text only, dense 768) over plain HTTP on loopback, **on the GPU only**:
+no CPU fallback, no sparse vector, no float16.
 
-It runs on the **operator's host**, not on the VPS. ADR-001 §0 moved it there on 2026-08-08: the VPS
-runs Qdrant and nothing else of this system. Everything embeds against this one process — `knowrag
-ingest` calls `/tokenize` at every chunk boundary and `/embed` per batch, `knowrag search` and the
-MCP server embed one query each.
+It runs on the **operator's host**, not on the VPS (the VPS runs Qdrant and nothing else of this
+system). `knowrag ingest` calls `/tokenize` at every chunk boundary and `/embed` per batch;
+`knowrag search` and the MCP server embed one query each. Ingest and query are two *callers* of one
+model.
 
-## Why ingest and query are not two services
+## How it behaves (owner's decision, 2026-11-15)
 
-They are already two *callers*. They are not two *models*.
+- **The process is always up; the model is not.** Starting the service touches no GPU memory. The
+  first call that needs the model (`/embed`, `/tokenize`, `/load`) loads it, and after
+  `KNOWRAG_EMBEDDER_IDLE_UNLOAD` seconds without one (default 600) it is unloaded and the VRAM comes
+  back. `/health` and `/handshake` never load it and never count as use.
+- **GPU only.** Without a CUDA device the service refuses to start (exit status **78**, one line in
+  the journal) and `/handshake` answers 503. "No CPU fallback" is about the *device*: bf16 (default)
+  and fp32 both run on the GPU. **fp16 is refused** at startup, because the model card says not to
+  use it and the failure is silent (vectors of the right shape that are wrong).
+- **One call on the GPU at a time**, with an interactive query (`kind: "query"`) admitted ahead of
+  queued batches (`gpu_gate.py`).
+- **Loading, unloading and calls never overlap** (`model_host.py`): a call during a load waits for it,
+  a call during an unload waits and then loads again, and a model in use is never unloaded.
+- **Ingestion is scheduled** (`knowrag-ingest.timer`, fixed times) and needs no start/stop window.
 
-BGE-M3 is one set of weights. `kind: query` vs `kind: passage` is a scheduling flag on this
-server (interactive requests jump the ingest queue). It is not a smaller encoder. A search
-without this process is not a search: Qdrant holds BGE-M3 dense+sparse vectors, and the only
-thing that produces a query vector in that space is this process. A keyword/BM25 path over the
-`text` payload would be a different product, with different recall, and is not built.
+## Endpoints
 
-The MCP search deadline is 10 s. Loading the weights is 28–37 s. Starting this service from
-inside a search therefore always reports an outage. That is why the daytime timer starts it
-at 07:00, *before* anyone asks, and why on-demand idle-stop is an optional trade (first
-search of the afternoon fails) rather than the default.
+All JSON. The Go client is `internal/embed/http.go`.
 
-## Schedule (the unit is not enabled)
+| Method and path | Request | Response |
+|---|---|---|
+| `GET /health` | | `{"status":"ok","loaded":bool,"cuda":bool}` |
+| `GET /handshake` | | the pinned configuration (below); 503 without a GPU |
+| `POST /load` | `{}` | `{"loaded":true}` after loading the model |
+| `POST /tokenize` | `{"inputs":[str]}` | `{"counts":[int]}` — the text alone, special tokens included |
+| `POST /embed` | `{"inputs":[str],"kind":"query"\|"passage","titles":[str]?}` | `{"dense":[[float]],"tokens":[int]}` |
 
-| When | What |
-|---|---|
-| boot | nothing — do not `enable knowrag-embedder` |
-| 03:00 | `knowrag-ingest.timer` — start, `ingest --vault both`, stop |
-| 07:00 | `knowrag-embedder-up.timer` — start, stay up |
-| 12:00 and 18:00 | `knowrag-ingest-day.timer` — incremental ingest, leave the model up |
-| 23:00 | `knowrag-embedder-down.timer` — stop |
+- **`kind` is required** and must be exactly `query` or `passage`: the task prefix depends on it, and
+  a missing or wrong prefix does not fail, it silently degrades search. Anything else is a 400.
+- **Prefixes are applied here, never by the caller** (`prompts.py`): a query reads
+  `task: search result | query: <text>`, a document `title: <title or "none"> | text: <text>`.
+  `titles` (documents only, one per input, `""` means `none`) is what the Go ingest sends. The scheme
+  is versioned: `/handshake` reports `prompt_version: "gemma-search-v1"`, and it is part of
+  `point_hash`, so changing a prefix string without changing that version makes stored points and
+  new queries disagree without an error.
+- **`/embed` refuses what it would have to truncate.** The count is of the *prompted* text (prefix and
+  title included), special tokens included, against `KNOWRAG_EMBEDDER_MAX_INPUT_TOKENS`; over it is a
+  400 naming the index, the tokens and the limit. `tokens` in the response is that same count.
+  `/tokenize` counts the text alone, which is what the chunker sizes; the Go profile keeps 128 tokens
+  in reserve for the prefix and a title (the prefix is 7 tokens; a 300-character title adds ~70), and
+  ingest cuts the title it sends to 96 tokens (`ModelProfile.TitleMaxTokens`), so a chunk filling its
+  window plus its prefix always fits; the 400 below is the service's backstop, not the normal path.
+- **`/handshake` reports the pinned configuration without loading the model**, because the MCP server
+  verifies it at start-up with a short deadline and nothing is searching yet. The load is what makes
+  the report true: `st_adapter.load_verified_model` refuses to return a model whose width, dtype,
+  pooling or vector norm differ from it.
 
-The 03:00 job and the daytime job are different units on purpose. The night script
-stops the model when it is done. The day script must not: a search after noon still
-has a 10 s deadline.
-
-Install the timers next to the unit (`~/.config/systemd/user/`), copy `ingest.env.example` to
-`~/.config/knowrag/ingest.env`, then:
-
-```sh
-systemctl --user daemon-reload
-systemctl --user disable knowrag-embedder          # must not be in default.target
-systemctl --user enable --now knowrag-ingest.timer \
-    knowrag-ingest-day.timer \
-    knowrag-embedder-up.timer knowrag-embedder-down.timer
+```
+GET /handshake
+{"model_id":"google/embeddinggemma-2",
+ "model_revision":"f9972ac22e696a105c482202646979e33e4b5a1e",
+ "tokenizer_revision":"f9972ac22e696a105c482202646979e33e4b5a1e",
+ "dense_dim":768,"normalized":true,"pooling":"mean","precision":"bfloat16",
+ "prompt_version":"gemma-search-v1","max_input_tokens":8192}
 ```
 
-`--idle-timeout` exists for a host that drops the daytime window. Leave it at 0 while the
-timers own the lifetime.
+`precision` is `bfloat16` or `float32` (the Go client maps them to `bf16`/`fp32`); there is no
+`sparse` key. The revision is the head of the Hugging Face repository as read on 2026-11-15 (last
+commit 2026-10-28), the same value as `schema.ModelProfile` on the Go side.
 
-This file describes how to stand it up on a machine that does not have it yet. It is a record of
-what already runs, not a plan: the unit below has been serving a real corpus since S06.
+## Settings
 
-## What it needs
+Flags win over environment variables, which win over the defaults. The systemd unit reads the
+environment from `~/.config/knowrag/embedder.env` (`knowrag-embedder.env.example`).
 
-- An NVIDIA GPU with CUDA available to the OS running Python. Measured on an RTX 3060: 1176 MiB of
-  VRAM at fp16 (ADR-001 §6.2), so the card is not the constraint — system RAM during load is.
-- Python with `torch` and `FlagEmbedding` installed, in a virtualenv of its own.
-- Roughly 2.2 GB of disk for the weights, downloaded once into the Hugging Face cache under the
-  user's home. First start pays that download; every later start loads from cache in ~11 s.
+| Variable | Flag | Default | Meaning |
+|---|---|---|---|
+| `KNOWRAG_EMBEDDER_HOST` / `_PORT` | `--host` / `--port` | `127.0.0.1` / `7999` | Bind address, **loopback only** (`127.0.0.1`, `::1`; `localhost` is accepted and bound as `127.0.0.1`); any other value is refused (below). |
+| `KNOWRAG_EMBEDDER_DEVICE` | `--device` | `cuda:0` | A CUDA device. `cpu` is refused. |
+| `KNOWRAG_EMBEDDER_PRECISION` | `--precision` | `bf16` | `bf16` or `fp32`. `fp16` is refused. |
+| `KNOWRAG_EMBEDDER_IDLE_UNLOAD` | `--idle-unload` | `600` | Seconds idle before unloading; `0` never unloads. |
+| `KNOWRAG_EMBEDDER_BATCH_SIZE` | `--batch-size` | `4` | Texts per forward pass. |
+| `KNOWRAG_EMBEDDER_MAX_INPUT_TOKENS` | `--max-input-tokens` | `8192` | Longest input `/embed` accepts, prefix included. Up to 8192, the model's window. |
+
+**Loopback only, by design.** The service has no authentication of any kind, and `/load`, `/embed` and
+`/tokenize` run arbitrary work on the GPU for whoever can reach them. It is acceptable only because it
+listens on loopback, so that is enforced and not left to a default. The bind always receives a literal
+(`localhost` is normalized to `127.0.0.1` first, since a name is resolved by the system at bind time and
+could map elsewhere; `::ffff:127.0.0.1` is refused). Any other `--host` (`0.0.0.0`, a LAN address, a name) ends the process with status 78 and a message naming the value. There is no
+opt-in to a network address; exposing the service would first need authentication, as its own
+decision. A machine that must reach it remotely goes through something that authenticates (an SSH
+tunnel, the private network's own access control), not through the bind address.
+
+Refusals (fp16, a CPU device, a non-loopback host, a bad number, no CUDA device) end the process with status 78 and a
+message naming the value; the unit lists 78 in `RestartPreventExitStatus` so it is one clear failure
+and not a restart loop.
+
+### Batch and token ceiling
+
+Activation memory grows **linearly** with batch × tokens (measured: 4.4× the tokens gave 4.4× the
+activations). Measured on 2026-11-15 on an RTX 3060 (12 GB), bf16, torch allocation at the peak of
+one `/embed` call, weights included (517 MiB):
+
+| Input length | Batch 4 | Batch 8 | Batch 16 |
+|---|---|---|---|
+| ~890 tokens | 0.9 GB | 1.4 GB | 2.2 GB |
+| ~3,900 tokens (the longest chunk of the trial) | 2.4 GB | 4.3 GB | 7.9 GB |
+| ~8,000 tokens (the most `/embed` accepts) | 4.3 GB | 8.1 GB | — |
+
+The trial's 5.2 GB figure was batch 16 over a *mix* of lengths with a few chunks near 3,900 tokens;
+the 7.9 GB above is batch 16 with *every* text at 3,900, the worst case for that batch.
+
+Throughput barely depends on the batch for the sizes that matter: 128 chunks of ~370 tokens (the
+corpus median) took 2.15 s at batch 4 (60 texts/s) and 1.71 s at batch 32 (75 texts/s). That is why
+the default is **4**: the worst input the service accepts peaks at 4.3 GB and typical ingestion
+loses about 15%. Raise it only with the table in hand and the card's other users in mind (a desktop
+takes about 1 GB). Lowering `MAX_INPUT_TOKENS` also lowers the peak, but **the chunker may emit
+chunks up to the profile's window** (8,064 tokens of text, flagged `oversize` above its ceiling), so
+a service ceiling below that makes ingestion fail on those chunks; lower the two together or not at
+all.
+
+### Memory (host RAM)
+
+`MemoryHigh=3G` and `MemoryMax=5G` in the unit bound **system RAM**, not VRAM. Measured: the process
+peaks at about **1.95 GiB** resident after loading and encoding (torch and the CUDA libraries are
+most of it) and does not give it back on unload (1.8 GiB after). `MemoryHigh` is what does the work
+(above it the kernel reclaims page cache first, which throttles rather than kills); `MemoryMax` is
+the backstop above the measured peak.
+
+### What an unload gives back
+
+Measured on the same card with the service's own process (idle unload set to 8 s for the test),
+`nvidia-smi` total used:
+
+| State | VRAM used (whole card) |
+|---|---|
+| before the service started | 759 MiB |
+| service up, model not loaded | 759 MiB |
+| model loaded (one query served) | 1,436 MiB |
+| after the idle unload | 895 MiB |
+
+The process keeps its **CUDA context** (about 136 MiB here) until it exits; everything else, the
+517 MiB of weights and the allocator cache, is returned. If that residue ever matters, the plan's
+alternative is systemd socket activation, which ends the process and frees everything at the cost of
+a slower first search.
+
+Load time: **5.9 s** for the first load in a fresh process, **3.0 s** for a reload (page cache warm);
+a first-ever load also downloads about 0.5 GB of weights. The first search after an idle period pays
+that, so the MCP client's timeout has to be above it.
 
 ## Install
 
-1. **Create the virtualenv and install the two dependencies.** They are not in this repository's
-   dependency set — this is a Python service beside a Go project — so the interpreter path is
-   configuration, not a fixed location.
+Requires an NVIDIA GPU with CUDA visible to the OS that runs Python (on WSL2, the Windows driver
+provides it; `nvidia-smi` must work) and about 6 GB of disk for the virtualenv (the CUDA libraries
+are most of it) plus 0.5 GB of weights in the Hugging Face cache.
+
+1. **Create the virtualenv from the pinned requirements** (versions are exact; see the header of
+   `requirements.txt` for why each direct dependency is there):
 
    ```sh
    python3 -m venv ~/.venvs/knowrag-embedder
-   ~/.venvs/knowrag-embedder/bin/pip install torch FlagEmbedding
+   ~/.venvs/knowrag-embedder/bin/pip install -r scripts/embedder-service/requirements.txt
    ```
 
-2. **Write the environment file** that carries every install-specific path. Copy
-   `knowrag-embedder.env.example` to `~/.config/knowrag/embedder.env` and fill in the four values it
-   documents: the virtualenv's interpreter, this checkout's path, and the host and port to bind.
-
-   Keep the host on loopback. The service has no authentication of any kind, so an address something
-   else can reach hands the GPU to whoever asks.
-
-3. **Install the unit and start it.**
+2. **Write the environment file**: copy `knowrag-embedder.env.example` to
+   `~/.config/knowrag/embedder.env` and fill in the interpreter, this checkout and the bind address.
+3. **Install the units** and the ingest wrapper (the project is shut down; do not enable anything
+   until the owner reopens it):
 
    ```sh
-   cp knowrag-embedder.service ~/.config/systemd/user/
+   mkdir -p ~/.config/systemd/user ~/.config/knowrag
+   cp scripts/embedder-service/knowrag-embedder.service \
+      scripts/embedder-service/knowrag-ingest.service \
+      scripts/embedder-service/knowrag-ingest.timer ~/.config/systemd/user/
+   cp scripts/embedder-service/scheduled-ingest.sh scripts/embedder-service/ensure-embedder.sh \
+      ~/.config/knowrag/
+   cp scripts/embedder-service/ingest.env.example ~/.config/knowrag/ingest.env   # then edit it
    systemctl --user daemon-reload
-   systemctl --user disable knowrag-embedder   # must not start at boot
-   # copy the ingest/up/down units and enable the three timers; see "Schedule" above
-   loginctl enable-linger "$USER"   # without this user timers die with the login session
    ```
 
-4. **Point the CLI and the MCP server at it.** Two variables on this same host, each read by a
-   different process: `EMBEDDER_ENDPOINT` for `knowrag`, `MCP_EMBEDDER_ENDPOINT` for the MCP server.
-   Both are `http://<host>:<port>` with the values from step 2.
+4. **Point the CLI and the MCP server at it**: `EMBEDDER_ENDPOINT` for `knowrag`,
+   `MCP_EMBEDDER_ENDPOINT` for the MCP server, both `http://<host>:<port>`.
+
+When it is time to run, `systemctl --user enable --now knowrag-embedder knowrag-ingest.timer` and
+`loginctl enable-linger "$USER"` (without it user units die with the login session).
+
+## Schedule
+
+`knowrag-ingest.timer` runs `scheduled-ingest.sh` at 03:00, 12:00 and 18:00 (kept from the previous
+design until the owner picks others; edit `OnCalendar`), `Persistent=true` so a missed run happens
+once when the machine is back. The wrapper calls `ensure-embedder.sh` (start the service if needed,
+check `/health` reports a CUDA device, `POST /load` and wait for it) and then
+`knowrag ingest --vault both`. Nothing is stopped afterwards: the idle unload returns the VRAM.
 
 ## Confirming it is really on the GPU
 
-The startup line names the device it was **asked** for:
+`/health` reports `"cuda": true` when torch sees a device, and the startup line names the device the
+service was configured for. What proves the model is *in* VRAM is the card:
 
 ```sh
-journalctl --user -u knowrag-embedder | grep loading
-# loading BAAI/bge-m3@... on cuda:0 ...
+nvidia-smi        # total used rises by ~0.7 GB after the first call and falls after the idle unload
+journalctl --user -u knowrag-embedder | grep -E "loaded|unloaded|reserved"
+# model loaded in 5.9s
+# cuda memory reserved by this process: 540 MiB -> 0 MiB
+# model unloaded: idle for 600s (limit 600s)
 ```
-
-That line is the request, not the confirmation, and the HTTP surface cannot supply the
-confirmation either: `/handshake` reports the seven fields ADR-001 §4 pins — model, revisions,
-dimension, normalization, pooling, precision, sparse shape — and **the device is not among them**. A
-`precision` of `float16` is a hint, since fp16 on CPU is unusual, but it is not proof.
-
-What proves it is the card:
-
-```sh
-nvidia-smi
-```
-
-The python process must appear in the process table holding on the order of 1.2 GB of VRAM. If it
-does not, the model is on the CPU: the service will still answer every request, correctly, and an
-ingestion that took seven minutes will take hours instead.
-
-Confirm the service is up and answering at all with:
-
-```sh
-curl -s localhost:7999/health     # {"status":"ok","loaded":true}
-curl -s localhost:7999/handshake  # the seven pinned fields
-```
-
-## The two memory numbers in the unit
-
-`MemoryHigh=4G` and `MemoryMax=7G` are in `knowrag-embedder.service` because this is the largest
-consumer on a WSL2 guest, where an unbounded cgroup holds every page it ever read — measured at
-6.2 GB held against 2.5 GB of actual RSS, the difference being page cache of the weights. `MemoryHigh`
-does the work by making the kernel reclaim that cache; `MemoryMax` is a backstop above the measured
-load peak. The reasoning is written out at the lines themselves, and the numbers live there, not
-here.
 
 ## When it dies
 
-`Restart=always` with `RestartSec=5` brings it back, and `StartLimitBurst=5` in a 300 s window stops
-a crash loop from thrashing the GPU. What the operator sees while it is down, and what to do about
-it, is in the runbook's "the embedder is dead" section.
+`Restart=on-failure` with `RestartSec=5` brings it back after a crash, and `StartLimitBurst=5` in a
+300 s window stops a crash loop from thrashing the GPU. A refusal to start (status 78) is not
+retried: read the journal line, fix the setting or the driver, start it again. What the operator sees
+while it is down is in the runbook's "the embedder is dead" section.
+
+## Tests
+
+```sh
+make test-embedder                                    # fake model, needs only pytest, no GPU
+KNOWRAG_GPU_TESTS=1 <venv>/bin/python -m pytest -q test_gpu_real.py   # real model, in scripts/embedder-service
+```
+
+The first needs only `pytest` (`requirements-test.txt`): the service's modules import torch lazily.
+The second loads the real model and checks what a fake cannot: that the service's prefixes equal the
+model's own `query` and `document` prompts, that an unload returns the VRAM and the next call loads
+again, that bf16 and fp32 agree (cosine above 0.98, so allowing both is one vector space), and that
+the 128-token reserve covers the prefix with a long title. CI runs neither (it has no Python
+toolchain for this and no GPU); run them before changing the service or any pinned version.

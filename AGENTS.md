@@ -79,19 +79,26 @@ sorteia uma nota e pede uma pergunta por vez.
 
 Reabre por vontade do dono. Não reabre porque um documento de story ainda lista a tarefa.
 
-## Embedder não é 24 h — decisão de 2026-08-16
+## Embedder: processo de pé, modelo sob demanda, só GPU — decisão de 2026-11-15
 
-O BGE-M3 **não sobe no boot**. Ingestão de reconstrução é um job das 03:00 (liga, `ingest --vault both`, desliga).
-De dia, `knowrag-ingest-day.timer` roda incremental às 12:00 e 18:00 e **não** desliga o modelo.
-Busca de dia é uma janela 07:00–23:00, porque o deadline do MCP é 10 s e a carga do modelo é
-28–37 s: ligar o serviço *de dentro* da busca é outage, não latência.
+Substitui a de 2026-08-16 ("não é 24 h", janela 07:00–23:00) e a do item 10 da lista de 2026-11-15
+("sempre de pé na GPU, com fallback em CPU").
 
-Ingest e query já são dois *chamadores* do mesmo processo. Não são dois modelos. Um encoder
-leve só para query, no mesmo espaço vetorial, não existe neste stack. Separar de verdade é
-trocar o produto da busca (ex.: BM25 no payload), não o agendamento.
-
-Unidades: `scripts/embedder-service/knowrag-*.timer` e o README do mesmo diretório. Não
-`enable` o `knowrag-embedder.service`.
+- **Só CUDA, sem fallback em CPU.** Sem GPU o serviço **não sobe** (sai com status 78, mensagem clara) e o
+  `/handshake` falha com 503. "Sem CPU" é sobre o dispositivo, não a precisão: bf16 (padrão) e fp32 rodam na
+  GPU; **fp16 é recusado** pelo próprio serviço.
+- **O processo fica de pé; o modelo não.** `knowrag-embedder.service` não carrega nada ao subir. O modelo carrega
+  na primeira chamada que precisa dele e é **descarregado** (referência solta, `gc`, `empty_cache`) depois de
+  `KNOWRAG_EMBEDDER_IDLE_UNLOAD` segundos sem chamada (padrão 600; 0 = nunca). A primeira busca depois de uma
+  pausa paga a carga, então o timeout do cliente MCP tem de ficar acima dela.
+- **Ingestão em horário fixo** (`knowrag-ingest.timer`), sem janela de ligar/desligar o embedder e sem
+  `embedder-up`/`embedder-down`. O serviço roda uma chamada de cada vez (a busca passa à frente dos lotes).
+- **Só loopback, por desenho.** O serviço não tem autenticação; por isso `--host`/`KNOWRAG_EMBEDDER_HOST` só
+  aceita `127.0.0.1`, `::1` ou `localhost` (este vira o literal `127.0.0.1` antes do bind, para o sistema nunca
+  resolver um nome), e qualquer outro valor encerra o processo com status 78. Não há
+  opt-in para rede: expor o serviço exigiria antes uma autenticação, como decisão própria.
+- **Dependências Python com versões exatas** em `scripts/embedder-service/requirements.txt`.
+- Detalhes, números medidos e operação: `scripts/embedder-service/README.md`.
 
 ## `docs/` fica fora do git, e isso é decisão fechada
 
@@ -273,14 +280,15 @@ Kit version: 2.1.0
 
 O dono parou de usar a busca e mandou desligar tudo. Não trate nada disto como quebrado:
 
-- os quatro timers de usuário (`knowrag-ingest`, `knowrag-ingest-day`, `knowrag-embedder-up`,
-  `knowrag-embedder-down`) estão **stopped e disabled**;
+- os timers de usuário instalados nesta máquina (`knowrag-ingest`, `knowrag-ingest-day`, `knowrag-embedder-up`,
+  `knowrag-embedder-down`) estão **stopped e disabled** (o repositório hoje só tem `knowrag-ingest.timer`; os
+  outros três são cópias antigas instaladas, a remover ao religar);
 - o `knowrag-embedder.service` está parado e o venv com os pesos do BGE-M3 foi **apagado do disco**;
 - o servidor MCP saiu do config do cliente de agente, então as duas ferramentas não existem mais;
 - o Qdrant da VPS foi derrubado com `docker compose down` **sem `-v`** — o volume
   `knowrag_qdrant_storage` continua lá, com as 3.901 entradas da collection `interno` intactas.
 
-Religar é reinstalar o venv, baixar o BGE-M3 de novo, subir o compose e reabilitar os timers. O
+Religar é reinstalar o venv, baixar o modelo de novo, subir o compose e reabilitar os timers. O
 índice não precisa ser reconstruído enquanto o volume existir — e, se for apagado, a reingestão o
 reconstrói, porque ele é derivado do vault.
 
@@ -299,8 +307,8 @@ escolha de embedding ficam em seção própria.
   confiável na rede — a mesma condição da decisão de rede acima.
 - **A `main` passa a exigir o CI (`test` + `lint`)**, por proteção de branch do GitHub, em vez de
   depender só de disciplina local. `lint` vermelho na `main` é bloqueio, não ruído.
-- **As dependências Python do embedder serão fixadas** (versões exatas) **junto com a decisão de troca
-  de embedding** (cartão 173), não antes: fixar agora seria fixar o que pode mudar.
+- **As dependências Python do embedder são fixadas** (versões exatas) **junto com a troca de embedding**
+  (cartão 173): `scripts/embedder-service/requirements.txt`.
 - **O volume do Qdrant na VPS é mantido** até essa mesma decisão. Não o apague nem o recrie antes dela.
 - **O dossiê de código fica fora do git**, em `docs/dossier/` local, como o resto de `docs/` (D-14, ver
   acima). Não o versione nem copie trecho dele para arquivo rastreado.
@@ -330,8 +338,9 @@ Decisões do dono, que valem para qualquer trabalho de troca de modelo:
    de uma revisão do dono.
 9. **Critério de virada:** Recall@5 de produção ≥ 0,70 no golden v2 e nenhuma área com zero acertos, medido na
    cópia de referência do vault. A troca para o vault atual vem depois da revisão do dono.
-10. **O embedder fica sempre de pé na GPU, com fallback em CPU.** Isso fecha o D-41 (a janela diária do embedder),
-    depois de medir o pico de memória da ingestão.
+10. **O embedder roda só na GPU, sem fallback em CPU; o processo fica de pé e o modelo carrega sob demanda e
+    descarrega por ociosidade** (seção "Embedder: processo de pé…" acima). Isso fecha o D-41 (a janela diária do
+    embedder).
 11. **Uma ADR-008, local, substitui a ADR-001**; o resumo público fica no README e neste arquivo.
 12. **Sem CHANGELOG.**
 13. **As violações de contrato do vault são corrigidas antes de reingerir** (cartão 184); a produção recusa um

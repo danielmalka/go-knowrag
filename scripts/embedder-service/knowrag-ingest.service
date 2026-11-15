@@ -1,5 +1,5 @@
 [Unit]
-Description=go-knowrag nightly ingest
+Description=go-knowrag scheduled ingest
 Documentation=file://%h/.config/knowrag/embedder.env
 After=network-online.target
 Wants=network-online.target
@@ -13,6 +13,6 @@ Type=oneshot
 # KNOWRAG_ENSURE  = ensure-embedder.sh
 EnvironmentFile=-%h/.config/knowrag/ingest.env
 WorkingDirectory=%h
-ExecStart=%h/.config/knowrag/nightly-ingest.sh
+ExecStart=%h/.config/knowrag/scheduled-ingest.sh
 # Incremental no-op is ~30 s; a full rebuild has a 30 min gate. 45 min is the backstop.
 TimeoutStartSec=2700

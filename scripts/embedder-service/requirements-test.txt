@@ -1,0 +1,2 @@
+# Test-only dependency of the embedder service suite (make test-embedder). No torch, no GPU.
+pytest==9.0.2

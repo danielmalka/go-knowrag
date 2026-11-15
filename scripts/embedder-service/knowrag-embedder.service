@@ -1,17 +1,17 @@
 [Unit]
-# Serves BGE-M3 on loopback. `knowrag ingest` calls /tokenize at every chunk boundary and /embed
-# per batch; the MCP server embeds every query. The same process does both — there is no
-# query-only half of this model (see the embedder README, "Why ingest and query are not two
-# services").
+# Serves EmbeddingGemma 2 (text, dense 768) on loopback, on the GPU only. `knowrag ingest` calls
+# /tokenize at every chunk boundary and /embed per batch; the MCP server embeds every query. The
+# same process does both -- there is one model and no query-only half of it.
 #
-# This unit is NOT enabled. Boot must not load 2+ GB of weights. Two timers start it: the
-# nightly ingest oneshot, and the daytime window so a search does not miss the MCP's 10 s
-# deadline while the model is still loading (28-37 s).
+# The PROCESS is always up; the MODEL is not. The service starts without touching the GPU, loads the
+# weights on the first call that needs them (a few seconds) and gives the VRAM back after
+# KNOWRAG_EMBEDDER_IDLE_UNLOAD seconds without one (default 600). So enabling this unit at login costs
+# a Python process and one CUDA context, not a resident model. Ingestion has its own timer
+# (knowrag-ingest.timer); it needs no start/stop window around it.
 #
-# StartLimit* live here and not under [Service]. systemd ignores them there — silently, with only a
-# line in `systemd-analyze verify` to say so — which is how the first version of this file ended up
-# running with the 10 s default while its comment claimed 300.
-Description=go-knowrag embedding service (BGE-M3)
+# StartLimit* live here and not under [Service]. systemd ignores them there -- silently, with only a
+# line in `systemd-analyze verify` to say so.
+Description=go-knowrag embedding service (EmbeddingGemma 2, GPU only)
 After=network.target
 StartLimitIntervalSec=300
 StartLimitBurst=5
@@ -19,54 +19,38 @@ StartLimitBurst=5
 [Service]
 Type=simple
 
-# Every install-specific path is read from here, so this file carries none. See
+# Every install-specific path and every tunable is read from here, so this file carries none. See
 # knowrag-embedder.env.example for the keys. Without the `-`, a missing file is a start failure
 # rather than a service that comes up pointing at nothing.
 EnvironmentFile=%h/.config/knowrag/embedder.env
 
 # systemd expands variables in arguments but not in the executable itself, so the command runs
-# through `sh -c`. The quoting is what makes a path with a space work, and `exec` is what keeps
-# systemd supervising python rather than the shell that spawned it.
-# KNOWRAG_EMBEDDER_IDLE_TIMEOUT is seconds of no /embed|/tokenize|/handshake before the
-# process exits 0. Default 0: the daytime stop timer is what takes it down. Set it only if
-# you drop the daytime window and accept that the first search after idle is an outage
-# (MCP search deadline is 10 s; load is 28-37 s).
-ExecStart=/bin/sh -c 'exec "$KNOWRAG_PYTHON" "$KNOWRAG_REPO/scripts/embedder-service/server.py" --host "$KNOWRAG_EMBEDDER_HOST" --port "$KNOWRAG_EMBEDDER_PORT" --idle-timeout "${KNOWRAG_EMBEDDER_IDLE_TIMEOUT:-0}"'
+# through `sh -c`; the quoting is what makes a path with a space work, and `exec` keeps systemd
+# supervising python rather than the shell. server.py reads KNOWRAG_EMBEDDER_* from the environment.
+ExecStart=/bin/sh -c 'exec "$KNOWRAG_PYTHON" "$KNOWRAG_REPO/scripts/embedder-service/server.py"'
 
-# There is deliberately no WorkingDirectory: server.py opens no file and builds no relative path, and
-# the model comes from the Hugging Face cache under the user's home. An earlier version of this unit
-# pinned a working directory and claimed the model cache depended on it. It does not.
+# There is deliberately no WorkingDirectory: server.py opens no file by relative path, and the model
+# comes from the Hugging Face cache under the user's home.
 
-# Start to ready is ~9 s for a restart like this one, where the page cache is still warm, and 28-37 s
-# from a cold boot (measured off this unit's own journal; ADR-001 §6.2). Restarting is not free and a
-# crash loop would thrash the GPU.
-#
-# on-failure, not always: an idle-timeout shutdown is exit 0, and Restart=always would bring the
-# weights back the moment they were released. A crash still restarts.
+# on-failure, not always: a refusal to start (exit 78: no CUDA device, a CPU device or fp16 asked
+# for) is a clear one-line failure in the journal, and restarting it would only repeat the line.
+# RestartPreventExitStatus makes that explicit. A crash still restarts, after 5 s; StartLimitBurst
+# stops a crash loop from thrashing the GPU.
 Restart=on-failure
 RestartSec=5
+RestartPreventExitStatus=78
 
-# The two numbers exist because this service is the largest single consumer on the machine and the
-# machine is a WSL2 guest, where "out of memory" is not a Linux OOM kill: the guest still reported
-# 5 GB available when the VM died. What the guest holds, Windows cannot reclaim, and an unbounded
-# cgroup holds everything it ever read — measured at 6.2 GB current against 2.5 GB of actual RSS,
-# the difference being page cache of the weights that nothing was asking it to give back.
-#
-# MemoryHigh is the one that does the work: above it the kernel reclaims, and page cache is what it
-# reclaims first, which is exactly the part that was never needed. It throttles, it does not kill.
-# MemoryMax is the backstop, set above the measured load peak so it never fires in normal operation.
-# If it ever does, Restart=always brings the service back and the VM stays alive — which is the
-# whole point. A dead embedder is a failed ingestion; a dead VM is a lost session.
-MemoryHigh=4G
-MemoryMax=7G
+# Host-RAM bounds for the largest consumer on a WSL2 guest, where "out of memory" is not a Linux OOM
+# kill: the guest can report GBs available while the VM dies, and what the guest holds Windows cannot
+# reclaim. MemoryHigh does the work (above it the kernel reclaims page cache first, which throttles,
+# it does not kill); MemoryMax is the backstop above the measured peak, so it never fires in normal
+# operation. These bound system RAM, not VRAM: the batch and token ceiling in the env file are what
+# bound the card. The measured numbers and how to change them are in README.md ("Memory").
+MemoryHigh=3G
+MemoryMax=5G
 
-# The server refuses to start when the model stops normalising its vectors or returns an empty sparse
-# half, so a failed start is a real signal and belongs in the journal.
 StandardOutput=journal
 StandardError=journal
 
 [Install]
-# Intentionally not wanted by default.target. Enabling this unit would load the model at
-# every WSL boot. The timers start it; `systemctl --user start knowrag-embedder` is the
-# manual path.
 WantedBy=default.target
