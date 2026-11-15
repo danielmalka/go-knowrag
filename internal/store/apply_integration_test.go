@@ -203,7 +203,11 @@ func assertLiveCollectionMatches(t *testing.T, client *qdrant.Client, c schema.C
 	if want := qdrantDistance(c.Distance); dense.GetDistance() != want {
 		t.Errorf("%s: distance = %v, want %v", c.Name, dense.GetDistance(), want)
 	}
-	if _, ok := params.GetSparseVectorsConfig().GetMap()[c.SparseVectorName]; !ok {
+	if c.SparseVectorName == "" {
+		if n := len(params.GetSparseVectorsConfig().GetMap()); n != 0 {
+			t.Errorf("%s: a dense-only collection has %d sparse vector(s)", c.Name, n)
+		}
+	} else if _, ok := params.GetSparseVectorsConfig().GetMap()[c.SparseVectorName]; !ok {
 		t.Errorf("%s: no named sparse vector %q", c.Name, c.SparseVectorName)
 	}
 	if !info.GetConfig().GetStrictModeConfig().GetEnabled() {

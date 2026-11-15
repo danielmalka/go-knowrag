@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/qdrant/go-client/qdrant"
 
+	"github.com/danielmalka/go-knowrag/internal/embed"
 	"github.com/danielmalka/go-knowrag/internal/ingest"
 	"github.com/danielmalka/go-knowrag/internal/schema"
 )
@@ -67,6 +68,18 @@ var _ ingest.Store = (*Client)(nil)
 // reports when the write did not finish in time — is ambiguous, because the write may still land
 // afterwards. Only an explicit RPC error is reported as failed, and even that never authorizes a
 // prune (see ingest.ProcessNote): the distinction exists so the report can say which happened.
+// pointVectors is the named vectors one point carries: the dense one always, and the sparse one only
+// when the embedding has it. A dense-only profile's embedding has no sparse half (embed validates that
+// per profile), and sending an empty sparse vector to a collection that has no sparse config is a
+// request Qdrant rejects; a hybrid profile's embedding always has one, so its points are unchanged.
+func pointVectors(e embed.Embedding) map[string]*qdrant.Vector {
+	out := map[string]*qdrant.Vector{schema.DenseVectorName: qdrant.NewVectorDense(e.Dense)}
+	if len(e.Sparse.Indices) > 0 {
+		out[schema.SparseVectorName] = qdrant.NewVectorSparse(e.Sparse.Indices, e.Sparse.Values)
+	}
+	return out
+}
+
 func (c *Client) UpsertPoints(
 	ctx context.Context,
 	tenantID string,
@@ -80,11 +93,8 @@ func (c *Client) UpsertPoints(
 			return ingest.UpsertFailed, fmt.Errorf("%s/%s chunk %d: %w", c.collection, uid, p.ChunkIndex, err)
 		}
 		structs[i] = &qdrant.PointStruct{
-			Id: qdrant.NewIDUUID(schema.PointID(tenantID, uid, p.ChunkIndex).String()),
-			Vectors: qdrant.NewVectorsMap(map[string]*qdrant.Vector{
-				schema.DenseVectorName:  qdrant.NewVectorDense(p.Vector.Dense),
-				schema.SparseVectorName: qdrant.NewVectorSparse(p.Vector.Sparse.Indices, p.Vector.Sparse.Values),
-			}),
+			Id:      qdrant.NewIDUUID(schema.PointID(tenantID, uid, p.ChunkIndex).String()),
+			Vectors: qdrant.NewVectorsMap(pointVectors(p.Vector)),
 			Payload: payload,
 		}
 	}

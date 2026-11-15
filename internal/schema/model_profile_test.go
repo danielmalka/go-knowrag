@@ -178,3 +178,40 @@ func TestProfile_AllowsPrecision(t *testing.T) {
 		t.Errorf("BGE-M3 allows only fp16, got %v", bge.Precisions)
 	}
 }
+
+// Two profiles must never share a collection name: it would put two models' vectors, of possibly
+// different widths, into one collection. This is also the guard for the final EG2 names.
+func TestProfiles_CollectionNamesAreDisjoint(t *testing.T) {
+	owner := map[string]string{}
+	for _, p := range Profiles() {
+		for _, c := range p.Collections {
+			if other, dup := owner[c]; dup {
+				t.Errorf("collection %q is claimed by both %q and %q", c, other, p.ID)
+			}
+			owner[c] = p.ID
+		}
+	}
+}
+
+func TestEmbeddingGemmaProfile_FinalCollectionNames(t *testing.T) {
+	p, _ := ProfileByID("embeddinggemma-2")
+	want := []string{"interno_eg2", "clientes_eg2", "base_paga_eg2"}
+	if !slices.Equal(p.Collections, want) {
+		t.Errorf("Collections = %v, want %v", p.Collections, want)
+	}
+}
+
+// A dense-only manifest entry names no sparse vector; a hybrid one still does.
+func TestManifestFor_SparseVectorNameFollowsTheProfile(t *testing.T) {
+	eg2, _ := ProfileByID("embeddinggemma-2")
+	for _, c := range ManifestFor(eg2) {
+		if c.SparseVectorName != "" {
+			t.Errorf("%s: dense-only entry names sparse vector %q", c.Name, c.SparseVectorName)
+		}
+	}
+	for _, c := range Manifest() {
+		if c.SparseVectorName != SparseVectorName {
+			t.Errorf("%s: default entry lost its sparse vector: %q", c.Name, c.SparseVectorName)
+		}
+	}
+}

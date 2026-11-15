@@ -178,6 +178,7 @@ func buildFilter(q Query) Filter {
 func buildQueryRequest(q Query, emb embed.Embedding, legLimit int) SearchRequest {
 	f := buildFilter(q)
 
+	// q.Mode arrives resolved (Searcher.Search); Auto reaching here is a bug in a caller of this file.
 	if q.Mode == SearchModeDenseOnly {
 		return SearchRequest{
 			Collection:    q.Collection,

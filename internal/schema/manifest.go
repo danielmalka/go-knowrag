@@ -73,10 +73,12 @@ func (f FieldType) String() string {
 // ModelRevision. Qdrant has no attribute for "which embedding model wrote these vectors", so that
 // one is compared against the applied-state record (applied_state.go), never against Qdrant.
 type CollectionManifest struct {
-	Name             string
-	DenseVectorName  string
-	DenseDim         uint64
-	Distance         Distance
+	Name            string
+	DenseVectorName string
+	DenseDim        uint64
+	Distance        Distance
+	// SparseVectorName is the named sparse vector the collection carries, or "" for the collection of a
+	// dense-only profile (no sparse vector is created, written or queried there).
 	SparseVectorName string
 
 	// ModelRevision is the embedding model revision these vectors were produced by. Changing it
@@ -131,7 +133,7 @@ func newCollectionManifest(p ModelProfile, name string) CollectionManifest {
 		DenseVectorName:  DenseVectorName,
 		DenseDim:         p.DenseDim,
 		Distance:         DistanceCosine,
-		SparseVectorName: SparseVectorName,
+		SparseVectorName: sparseVectorNameFor(p),
 		ModelRevision:    p.Revision,
 		// This list is derived from who filters, not from what looks important. Strict mode
 		// (store.Apply) refuses a filter on an unindexed field, so a field this list misses is not a
@@ -159,4 +161,12 @@ func newCollectionManifest(p ModelProfile, name string) CollectionManifest {
 			keyword("tags"),
 		},
 	}
+}
+
+// sparseVectorNameFor is SparseVectorName for a profile with a sparse head and "" for a dense-only one.
+func sparseVectorNameFor(p ModelProfile) string {
+	if p.HasSparse() {
+		return SparseVectorName
+	}
+	return ""
 }

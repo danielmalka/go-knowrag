@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/danielmalka/go-knowrag/internal/schema"
 )
 
 // The structural rejections. They are sentinels rather than ad-hoc strings because two callers
@@ -35,6 +37,10 @@ var (
 	// prove which one it measured (internal/eval/hybrid_compare.go).
 	ErrInvalidSearchMode = errors.New("retrieval: search mode is not one of the defined modes")
 
+	// ErrHybridUnavailable is a hybrid search asked of a dense-only model profile: there is no sparse
+	// vector to prefetch and fuse. The caller either asked for the wrong thing or has the wrong profile.
+	ErrHybridUnavailable = errors.New("retrieval: hybrid search needs a sparse vector, and this model profile has none")
+
 	ErrEmptyUID   = errors.New("retrieval: uid is empty")
 	ErrInvalidUID = errors.New("retrieval: uid is not a UUID")
 	// ErrNoteTooLarge is a lookup that hit noteLookupLimit: we cannot tell a 64-chunk note from a
@@ -45,20 +51,26 @@ var (
 // SearchMode selects the query shape: the §2.3b hybrid (two prefetch legs fused with RRF) or a
 // single dense vector search.
 //
-// The zero value is the hybrid, so every Query written before this field existed keeps the shape it
-// had. Dense-only exists for one reason: S07 could not answer whether the sparse leg earns its
+// The zero value is SearchModeAuto: the shape the Searcher's model profile supports — the hybrid for a
+// profile with a sparse head (so every Query written before this field existed keeps the shape it
+// had on BGE-M3) and the single dense search for a dense-only profile. Asking for SearchModeHybrid
+// explicitly on a dense-only profile is an error (ErrHybridUnavailable), not a silent downgrade.
+// Dense-only exists for one reason: S07 could not answer whether the sparse leg earns its
 // place because there was no golden set to measure it with, and S10 is where that measurement
 // happens. Which one this build ships as the default is not decided in this file — S10 T11 adds
 // DefaultSearchMode from the measured comparison, and until then no caller here reads a default.
 type SearchMode int
 
 const (
-	SearchModeHybrid SearchMode = iota
+	SearchModeAuto SearchMode = iota
+	SearchModeHybrid
 	SearchModeDenseOnly
 )
 
 func (m SearchMode) String() string {
 	switch m {
+	case SearchModeAuto:
+		return "auto"
 	case SearchModeHybrid:
 		return "hybrid"
 	case SearchModeDenseOnly:
@@ -69,7 +81,9 @@ func (m SearchMode) String() string {
 }
 
 // Valid reports whether m names a defined mode.
-func (m SearchMode) Valid() bool { return m == SearchModeHybrid || m == SearchModeDenseOnly }
+func (m SearchMode) Valid() bool {
+	return m == SearchModeAuto || m == SearchModeHybrid || m == SearchModeDenseOnly
+}
 
 // maxTopK and maxOffset bound the result window. They are not a policy about how much a caller may
 // read — they are what keeps topK+offset and the multiplication in prefetchLimit inside int, so an
@@ -166,4 +180,22 @@ func prefetchLimit(topK, offset, multiplier int) (int, error) {
 			ErrPrefetchLimitTooLow, floor, multiplier)
 	}
 	return limit, nil
+}
+
+// ResolveMode turns a requested mode into the one that runs for a profile: Auto becomes the hybrid
+// when the profile has a sparse head and the single dense search when it does not; DenseOnly runs on
+// any profile; an explicit Hybrid on a dense-only profile is ErrHybridUnavailable.
+func ResolveMode(m SearchMode, p schema.ModelProfile) (SearchMode, error) {
+	switch {
+	case !m.Valid():
+		return m, fmt.Errorf("%w: mode = %d", ErrInvalidSearchMode, int(m))
+	case m == SearchModeDenseOnly:
+		return m, nil
+	case m == SearchModeHybrid && !p.HasSparse():
+		return m, fmt.Errorf("%w (profile %q)", ErrHybridUnavailable, p.ID)
+	case p.HasSparse():
+		return SearchModeHybrid, nil
+	default:
+		return SearchModeDenseOnly, nil
+	}
 }

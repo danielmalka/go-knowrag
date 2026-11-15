@@ -60,6 +60,9 @@ alguém pede — `--prune`, que é destrutivo e por isso opt-in. Ver órfão é 
 **Busca híbrida.** Cada trecho é indexado com vetor denso *e* esparso no mesmo passo. A consulta roda
 as duas buscas e funde os resultados por *Reciprocal Rank Fusion* — o denso pega paráfrase e sinônimo,
 o esparso pega o termo exato, o nome próprio e a sigla que o denso dilui.
+O formato da consulta e das coleções segue o perfil de modelo (`internal/schema/model_profile.go`):
+com vetor esparso é a busca híbrida acima; um perfil só denso (o EmbeddingGemma 2, registrado mas ainda não
+padrão) cria coleções sem vetor esparso e faz uma única busca densa, sem pré-busca nem fusão.
 
 **Multi-tenancy desde o primeiro commit.** Coleções separadas por fronteira de confiança, com
 `tenant_id` indexado dentro de cada uma. O filtro de tenant é decidido **pelo servidor, a partir da

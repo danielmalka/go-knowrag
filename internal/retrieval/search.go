@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/danielmalka/go-knowrag/internal/embed"
+	"github.com/danielmalka/go-knowrag/internal/schema"
 )
 
 // DefaultPrefetchMultiplier is provisional and knowingly uncalibrated.
@@ -26,6 +27,17 @@ type Config struct {
 	// MaxChunksPerUID caps how many chunks of one note survive the fused ranking. 0 leaves
 	// Qdrant's order untouched. Search over-fetches by this factor so the cap can still fill TopK.
 	MaxChunksPerUID int
+	// Profile is the model profile the Searcher queries. It decides the query shape (hybrid with a
+	// sparse head, single dense search without). The zero value means the default profile.
+	Profile schema.ModelProfile
+}
+
+// profile is Config.Profile with the zero value resolved to the default profile.
+func (c Config) profile() schema.ModelProfile {
+	if c.Profile.ID == "" {
+		return schema.DefaultProfile()
+	}
+	return c.Profile
 }
 
 // DefaultConfig is the provisional calibration above. It is a function rather than a var so no
@@ -34,6 +46,7 @@ func DefaultConfig() Config {
 	return Config{
 		PrefetchMultiplier: DefaultPrefetchMultiplier,
 		MaxChunksPerUID:    DefaultMaxChunksPerUID,
+		Profile:            schema.DefaultProfile(),
 	}
 }
 
@@ -70,6 +83,10 @@ func (s *Searcher) Search(ctx context.Context, q Query) ([]Result, error) {
 	if err := q.Validate(s.cfg.PrefetchMultiplier); err != nil {
 		return nil, err
 	}
+	mode, err := ResolveMode(q.Mode, s.cfg.profile())
+	if err != nil {
+		return nil, err
+	}
 
 	emb, err := s.embedder.EmbedQuery(ctx, q.Text)
 	if err != nil {
@@ -77,6 +94,7 @@ func (s *Searcher) Search(ctx context.Context, q Query) ([]Result, error) {
 	}
 
 	wide := q
+	wide.Mode = mode
 	wide.TopK = fetchWindow(q.TopK, s.cfg.MaxChunksPerUID)
 	req := buildQueryRequest(wide, emb, calibratedPrefetchLimit(wide, s.cfg.PrefetchMultiplier))
 	points, err := s.executor.ExecuteQuery(ctx, req)
@@ -182,4 +200,13 @@ func (s *Searcher) FilterMatchesAnything(ctx context.Context, q Query) (bool, er
 		return false, fmt.Errorf("retrieval: probing the filter on %s: %w", q.Collection, err)
 	}
 	return len(points) > 0, nil
+}
+
+// Profile is the model profile this Searcher queries.
+func (s *Searcher) Profile() schema.ModelProfile { return s.cfg.profile() }
+
+// ResolvedMode is the mode a Query with this Mode would actually run as on this Searcher's profile.
+// internal/eval uses it to label a report with what ran, not with what was requested.
+func (s *Searcher) ResolvedMode(m SearchMode) (SearchMode, error) {
+	return ResolveMode(m, s.cfg.profile())
 }
