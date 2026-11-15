@@ -81,7 +81,13 @@ func run() error {
 		return err
 	}
 
-	searcher := retrieval.NewSearcher(embedder, querier, retrieval.DefaultConfig())
+	profile, err := cfg.Profile()
+	if err != nil {
+		return err
+	}
+	searchCfg := retrieval.DefaultConfig()
+	searchCfg.Profile = profile
+	searcher := retrieval.NewSearcher(embedder, querier, searchCfg)
 
 	logger.Info("mcp-server starting", "config", cfg, "version", serverVersion)
 	return newServer(cfg, searcher).Run(ctx, &mcp.StdioTransport{})
@@ -100,7 +106,11 @@ func run() error {
 // after a verified boot — the embedder confirms for itself rather than inheriting a verdict from an
 // object it has no reference to (D-33). Measured in milliseconds, once per process.
 func newSearchEmbedder(cfg Config, transport embed.Transport) (*embed.ServiceEmbedder, error) {
-	return embed.NewServiceEmbedder(embedProfile(cfg.EmbedderEndpoint), transport)
+	profile, err := cfg.Profile()
+	if err != nil {
+		return nil, err
+	}
+	return embed.NewServiceEmbedderFor(embedProfile(cfg.EmbedderEndpoint), transport, profile)
 }
 
 // bootHandshakeTimeout is the whole budget of the startup check, and it lives in the profile
@@ -218,7 +228,11 @@ func bootProfile(endpoint string) embed.Profile {
 // value feeds point_hash and is written to every point; here nothing consumes it — this call is made
 // for its verdict alone.
 func verifyEmbedder(ctx context.Context, cfg Config, transport embed.Transport) error {
-	embedder, err := embed.NewServiceEmbedder(bootProfile(cfg.EmbedderEndpoint), transport)
+	profile, err := cfg.Profile()
+	if err != nil {
+		return err
+	}
+	embedder, err := embed.NewServiceEmbedderFor(bootProfile(cfg.EmbedderEndpoint), transport, profile)
 	if err != nil {
 		return err
 	}
@@ -255,17 +269,29 @@ func verifyEmbedder(ctx context.Context, cfg Config, transport embed.Transport) 
 // so the batching knobs the ingestion path needs are irrelevant here; the timeout is short because
 // a search that takes a minute has already failed as far as the agent asking is concerned.
 //
-// Timeout is per attempt, so the whole embedding leg is bounded by 2×4 s plus 0,25 s of backoff =
-// 8,25 s. That total is the number that matters, and it has to stay below searchDeadline: a search
-// deadline that could fire while this leg was still retrying would silently shorten MaxRetries,
-// turning a blip the retry absorbs into a reported outage and dropping the last transport failure
-// from the error.
+// Timeout is per attempt, and it is one attempt of 8 s since the cutover to EmbeddingGemma 2. That
+// model is loaded on the first call after an idle period and unloaded after a configurable idle time
+// (scripts/embedder-service/README.md), so the first search after a pause pays the load: measured
+// 5,9 s for a fresh process and 3,0 s for a reload with the page cache warm (2026-11-15, RTX 3060,
+// bf16). The per-attempt budget has to outlast that, and 4 s did not: the first attempt would give up
+// at 4 s, the service would keep loading, and the answer would depend on a second attempt landing
+// after the load finished. One attempt of 8 s covers the measured cold load with 2,1 s to spare, and
+// a query behind a busy ingestion batch (a batch is bounded at the service by its batch size and token
+// ceiling) with room left. What it gives up is the second attempt: a transport blip now reports the
+// outage instead of absorbing it, which is the right trade for a leg that cannot also fit a retry
+// inside searchDeadline (1,5 s of verification + 8 s = 9,5 s, with the ordering pinned by
+// TestSearchDeadline_ExceedsTheEmbedderBudget) — and a retry that came after a timed-out cold load
+// would only wait for the same load.
+//
+// The whole embedding leg is bounded by that 8 s. It has to stay below searchDeadline: a search
+// deadline that could fire while this leg was still running would cut the call mid-attempt and drop
+// the last transport failure from the error.
 //
 // Since D-33 the first search of every process also pays a handshake, because an embedder that has
 // not confirmed its backend confirms it before embedding anything — and this one has not, being a
 // different object from the one the boot check verified (newSearchEmbedder). That leg has to fit
-// inside the same 10 s, which is what VerifyTimeout is for and why it is 1,5 s here: 1,5 + 8,25 =
-// 9,75 s, still under the deadline, with the ordering pinned by TestSearchDeadline_ExceedsTheEmbedderBudget.
+// inside the same 10 s, which is what VerifyTimeout is for and why it is 1,5 s here: 1,5 + 8 =
+// 9,5 s, still under the deadline, with the ordering pinned by TestSearchDeadline_ExceedsTheEmbedderBudget.
 //
 // An earlier version of this comment defended a 4 s verification that made the total 12,25 s, on
 // the grounds that the deadline would cut it and the resulting KNOWLEDGE BASE UNAVAILABLE would be
@@ -316,22 +342,24 @@ func verifyEmbedder(ctx context.Context, cfg Config, transport embed.Transport) 
 // anything. What does not depend on the payload is the shape — before, the wait is depth × batch;
 // after, it is one batch.
 //
-// Four seconds is ~3,2× that bound and stays. Re-measuring it against the new floor would trade
-// real headroom for nothing: the failure it prevents is reporting KNOWLEDGE BASE UNAVAILABLE for a
-// service that is up, healthy and busy, and that error is expensive in a way 3 s of a timeout that
-// almost never fires is not.
+// Those rows are BGE-M3's and are kept for their shape, which carries to any model behind the same
+// gate: a query waits for the one batch in flight, never one per queued batch. The EmbeddingGemma 2
+// service bounds that batch itself (KNOWRAG_EMBEDDER_BATCH_SIZE, default 4: 16 chunks of
+// ~3,900 tokens took 4,97 s, so about 1,2 s per batch of 4, and 128 chunks of ~370 tokens took 2,15 s,
+// so under 0,1 s per batch of 4), and the 8 s attempt covers the cold load first and a busy batch
+// second. The failure it prevents is
+// reporting KNOWLEDGE BASE UNAVAILABLE for a service that is up, healthy and either loading or busy,
+// and that error is expensive in a way 4 s of extra timeout that almost never fires is not.
 //
-// MaxRetries is 2 rather than 3 for the same reason, and it is the trade that lets the budget fit:
-// a longer single attempt beats more short ones, because a retry rejoins the same serialised
-// service. Two attempts of 4 s ride out a longer stall than three of 2 s and cost 1,5 s less wall
-// clock.
+// MaxRetries is 1, which is what lets 8 s fit: a longer single attempt beats more short ones,
+// because a retry rejoins the same serialised service (and, after a cold load, the same load).
 func embedProfile(endpoint string) embed.Profile {
 	return embed.Profile{
 		Endpoint:      endpoint,
-		Timeout:       4 * time.Second,
+		Timeout:       8 * time.Second,
 		VerifyTimeout: 1500 * time.Millisecond,
 		BatchSize:     1,
 		MaxConcurrent: 1,
-		MaxRetries:    2,
+		MaxRetries:    1,
 	}
 }

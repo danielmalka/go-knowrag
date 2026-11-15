@@ -165,7 +165,7 @@ funcionar quando não olha para nada.
 | | |
 |---|---|
 | **Chunking com contexto** | Fronteira em `##`, breadcrumb `H1 → H2` embutido, clamp de tamanho em tokens, com piso e teto a calibrar contra o corpus real |
-| **Busca híbrida nativa** | Denso (1024-dim) + esparso, fundidos por RRF no próprio Qdrant |
+| **Busca densa por perfil de modelo** | O perfil implantado é o EmbeddingGemma 2: uma consulta densa (768 dims, cosseno) no Qdrant. O caminho híbrido (denso + esparso fundidos por RRF) só existe para o perfil BGE-M3, que deixa de ser usado na virada e sai do código na limpeza |
 | **Ingestão incremental** | Só reprocessa o que mudou, comparando uma fingerprint por ponto |
 | **Poda da cauda** | A cauda de uma nota que encolheu é removida em toda ingestão, depois do upsert confirmado. Ponto de nota **apagada** é detectado e listado em toda rodada, e só apagado sob `--prune` |
 | **Convergência sob falha** | Interromper a ingestão no meio nunca tira uma nota da busca — o pior caso é um ponto extra, que a rodada seguinte limpa |
@@ -182,7 +182,7 @@ funcionar quando não olha para nada.
 |---|---|
 | Linguagem | Go |
 | Vector store | Qdrant self-hosted, via gRPC |
-| Embeddings | BGE-M3 (licença MIT), denso + esparso no mesmo passo |
+| Embeddings | EmbeddingGemma 2 (`google/embeddinggemma-2`, só texto, denso 768; bf16 ou fp32, só GPU) |
 | Protocolo | Model Context Protocol, SDK oficial em Go, transporte stdio |
 
 O modelo de embedding é fixado por revisão imutável, e a revisão é **confirmada pelo backend** — não
@@ -199,8 +199,11 @@ desligado). Os campos da config efetiva têm valor pinado no **perfil de modelo*
 (`internal/schema/model_profile.go`) e são conferidos em `internal/embed/handshake.go` — revisão do
 modelo, revisão do tokenizer, dimensão, normalização, pooling, precisão (uma lista de dtypes
 permitidos; o EmbeddingGemma 2 recusa fp16), parâmetros esparsos (nenhum num perfil só denso) e o
-esquema de prefixos de tarefa — e a ingestão aborta nomeando o campo que divergir. O perfil padrão
-continua sendo o do BGE-M3; o do EmbeddingGemma 2 está registrado mas não é o padrão. A
+esquema de prefixos de tarefa — e a ingestão aborta nomeando o campo que divergir. O perfil de uma
+instalação é o que `MODEL_PROFILE` (CLI) ou `MCP_MODEL_PROFILE` (servidor MCP) nomeia, e, sem nada
+configurado, é o **EmbeddingGemma 2**; o BGE-M3 continua registrado só até a limpeza e não é mais
+usado. A collection configurada tem de ser uma das do perfil, ou o comando recusa antes de qualquer
+conexão: uma collection guarda os vetores de um modelo só. A
 forma de servir o modelo também foi decidida e medida: sidecar HTTP, um runtime só, no host de
 ingestão.
 
@@ -442,7 +445,8 @@ do embedder, que ele nunca usa.
 | `QDRANT_ENDPOINT` | `host:6334` — gRPC, o único protocolo que o código fala |
 | `KNOWRAG_ADMIN_QDRANT_API_KEY` | chave **administrativa** do Qdrant — a CLI aceita qualquer `--tenant` e qualquer `--collection`, então a credencial dela é a do operador. O servidor MCP lê `MCP_QDRANT_API_KEY`, que é a [chave read-only](#as-duas-chaves-do-qdrant-e-por-que-são-duas), e nenhuma das duas cai para a outra |
 | `EMBEDDER_ENDPOINT` | URL do serviço de embedding, ex.: `http://127.0.0.1:7999` |
-| `DEFAULT_COLLECTION` | collection alvo |
+| `DEFAULT_COLLECTION` | collection alvo, uma das do perfil — no EmbeddingGemma 2: `interno_eg2`, `clientes_eg2` ou `base_paga_eg2` |
+| `MODEL_PROFILE` | opcional: o perfil de modelo (`embeddinggemma-2`, o padrão). Define collections, largura do vetor, esquema de prefixos e janela de tokens |
 | `LOG_LEVEL` | opcional, default `info` |
 | `KNOWRAG_VAULTS` | os vaults desta instalação, separados por vírgula — ex.: `pessoal,trabalho` |
 | `KNOWRAG_VAULT_<NOME>_PATH` | raiz do vault no disco |
@@ -695,9 +699,16 @@ set, não um campo dentro dele.
 | `MCP_QDRANT_ENDPOINT` | `host:6334` |
 | `MCP_QDRANT_API_KEY` | a chave **read-only** do Qdrant — a de `QDRANT_READ_ONLY_API_KEY`, [nunca a administrativa](#as-duas-chaves-do-qdrant-e-por-que-são-duas). Nenhuma das duas cai para a outra |
 | `MCP_EMBEDDER_ENDPOINT` | URL do serviço de embedding |
-| `MCP_COLLECTION` | collection consultada |
+| `MCP_COLLECTION` | collection consultada, uma das do perfil (`interno_eg2`, `clientes_eg2` ou `base_paga_eg2`) |
+| `MCP_MODEL_PROFILE` | opcional: o perfil de modelo (`embeddinggemma-2`, o padrão); tem de ser o mesmo com que o índice foi ingerido |
 | `MCP_TENANT_ID` | tenant de toda busca |
 | `MCP_AREAS` | lista de `area` válida, separada por vírgula, que o servidor anuncia ao cliente MCP |
+
+**A primeira busca depois de uma pausa é mais lenta.** O serviço de embedding carrega o modelo na
+primeira chamada e o descarrega depois de um tempo ocioso (padrão 10 min): medido, 5,9 s num processo
+novo e 3,0 s numa recarga com o cache de página quente. A tentativa de embedding do servidor MCP tem
+8 s para cobrir isso (`embedProfile`, `cmd/mcp-server/main.go`); as buscas seguintes levam dezenas de
+milissegundos. O handshake na partida não carrega o modelo.
 
 `MCP_TENANT_ID` vem do ambiente e **não existe** como parâmetro da ferramenta. Não é validado e
 rejeitado — está ausente do schema publicado, então não é um valor que o modelo possa nomear,

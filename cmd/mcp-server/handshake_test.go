@@ -347,6 +347,7 @@ func TestRun_DivergentBackend_NeverServes(t *testing.T) {
 	t.Setenv(envQdrantAPIKey, "runtime-read-key")
 	t.Setenv(envEmbedderEndpoint, backend.URL)
 	t.Setenv(envAreas, "infra,research")
+	t.Setenv(envModelProfile, "bge-m3") // this test's backend body is BGE-M3's
 
 	err := run()
 	if err == nil {

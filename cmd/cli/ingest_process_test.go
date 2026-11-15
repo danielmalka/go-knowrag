@@ -38,8 +38,8 @@ const (
 	// The collections and tenants below are the lock scopes these tests contend on. Nothing is ever
 	// written to a collection by either name — QDRANT_ENDPOINT points at deadQdrant — so each only
 	// has to be a name, not a provisioned collection.
-	processCollection      = "knowrag_lock_test"
-	processOtherCollection = "knowrag_lock_test_other"
+	processCollection      = "interno_eg2"
+	processOtherCollection = "clientes_eg2"
 	processTenantA         = "tenant-a"
 	processTenantB         = "tenant-b"
 

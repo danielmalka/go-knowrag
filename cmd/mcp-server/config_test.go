@@ -19,6 +19,7 @@ func setInstanceEnv(t *testing.T) {
 	t.Setenv(envQdrantAPIKey, "runtime-read-key")
 	t.Setenv(envEmbedderEndpoint, "http://embedder.internal:8080")
 	t.Setenv(envAreas, "infra,research")
+	t.Setenv(envModelProfile, "bge-m3") // the fixtures name BGE-M3's collection; see testConfig
 }
 
 // TestLoadConfig_FixedCollectionAndTenant is S08 T1: the scope this instance serves comes from the

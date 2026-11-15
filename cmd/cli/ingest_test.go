@@ -19,6 +19,7 @@ import (
 	"github.com/danielmalka/go-knowrag/internal/config"
 	"github.com/danielmalka/go-knowrag/internal/embed"
 	"github.com/danielmalka/go-knowrag/internal/ingest/lock"
+	"github.com/danielmalka/go-knowrag/internal/schema"
 )
 
 // rosterCfg builds a config with two rostered vaults, neither pointed at a real directory: tests
@@ -127,7 +128,7 @@ func TestRunIngest_MalformedArea_RefusedBeforeAnythingIsScanned(t *testing.T) {
 	cfg := &config.Config{
 		QdrantEndpoint:    deadQdrant,
 		QdrantAPIKey:      "not-a-real-key",
-		DefaultCollection: "knowrag_test",
+		DefaultCollection: "interno_eg2",
 		EmbedderEndpoint:  tokenizeStub(t),
 		Vaults: map[string]config.VaultSettings{
 			"trabalho": {Path: writeVault(t, map[string]string{
@@ -245,21 +246,27 @@ func tokenizeStub(t *testing.T) string {
 	return srv.URL
 }
 
-// writeHandshake answers GET /handshake with this build's own pins, read from embed.Expected()
-// instead of written out by hand: a stub carrying literal revisions would go red the day a pin
-// moves, for a reason that has nothing to do with the command under test. `precision` travels in
-// the contract's spelling rather than torch's, which the transport passes through untranslated.
+// writeHandshake answers GET /handshake with the deployed profile's own pins, read from
+// embed.ExpectedFor instead of written out by hand: a stub carrying literal revisions would go red the
+// day a pin moves, for a reason that has nothing to do with the command under test. `precision`
+// travels in the contract's spelling rather than torch's, which the transport passes through
+// untranslated. The profile is the one a command resolves with no MODEL_PROFILE set (EmbeddingGemma 2),
+// which is what these runs go through.
 func writeHandshake(t *testing.T, w http.ResponseWriter) {
 	t.Helper()
-	expected := embed.Expected()
-	err := json.NewEncoder(w).Encode(map[string]any{
+	profile, err := schema.ResolveProfile("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := embed.ExpectedFor(profile)
+	err = json.NewEncoder(w).Encode(map[string]any{
 		"model_revision":     expected.ModelRevision,
 		"tokenizer_revision": expected.TokenizerRevision,
 		"dense_dim":          expected.Dim,
 		"normalized":         expected.Normalization == "l2",
 		"pooling":            expected.Pooling,
 		"precision":          expected.Precision,
-		"sparse":             expected.SparseParams,
+		"prompt_version":     expected.PromptVersion,
 	})
 	if err != nil {
 		t.Errorf("encoding /handshake response: %v", err)
@@ -415,7 +422,7 @@ func TestRunIngest_UnreadableVault_FailsBeforeTouchingAnything(t *testing.T) {
 	cfg := &config.Config{
 		QdrantEndpoint:    deadQdrant,
 		QdrantAPIKey:      "not-a-real-key",
-		DefaultCollection: "knowrag_test",
+		DefaultCollection: "interno_eg2",
 		EmbedderEndpoint:  tokenizeStub(t),
 		Vaults: map[string]config.VaultSettings{
 			"trabalho": {Path: filepath.Join(t.TempDir(), "absent"), Areas: "00-inbox"},
@@ -476,7 +483,7 @@ func TestRunIngest_LockHeld_RefusedBeforeAnythingIsScanned(t *testing.T) {
 	cfg := &config.Config{
 		QdrantEndpoint:    deadQdrant,
 		QdrantAPIKey:      "not-a-real-key",
-		DefaultCollection: "knowrag_test",
+		DefaultCollection: "interno_eg2",
 		EmbedderEndpoint:  tokenizeStub(t),
 		Vaults: map[string]config.VaultSettings{
 			"trabalho": {Path: filepath.Join(t.TempDir(), "absent"), Areas: "00-inbox"},
@@ -521,7 +528,7 @@ func TestRunIngest_SuccessfulRun_ReleasesTheLock(t *testing.T) {
 	cfg := &config.Config{
 		QdrantEndpoint:    deadQdrant,
 		QdrantAPIKey:      "not-a-real-key",
-		DefaultCollection: "knowrag_test",
+		DefaultCollection: "interno_eg2",
 		EmbedderEndpoint:  tokenizeStub(t),
 		Vaults:            map[string]config.VaultSettings{"trabalho": {Path: root, Areas: "00-inbox"}},
 	}
@@ -585,7 +592,7 @@ func emptyVaultCfg(t *testing.T) *config.Config {
 	return &config.Config{
 		QdrantEndpoint:    deadQdrant,
 		QdrantAPIKey:      "not-a-real-key",
-		DefaultCollection: "knowrag_test",
+		DefaultCollection: "interno_eg2",
 		EmbedderEndpoint:  tokenizeStub(t),
 		Vaults:            map[string]config.VaultSettings{"trabalho": {Path: root, Areas: "00-inbox"}},
 	}

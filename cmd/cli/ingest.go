@@ -77,7 +77,9 @@ func newIngestCmd(cfg *config.Config) *cobra.Command {
 		vaultFlag:   bothVaults,
 		tenantID:    defaultTenantID,
 		gracePeriod: defaultGracePeriod,
-		chunkCfg:    chunk.ConfigFor(schema.DefaultProfile(), defaultFloorTokens, defaultCeilingTokens),
+		// The window is set at run time from the configured model profile (runIngest): the command
+		// tree is built before configuration is read, so it cannot know the profile yet.
+		chunkCfg: chunk.Config{FloorTokens: defaultFloorTokens, CeilingTokens: defaultCeilingTokens},
 	}
 
 	cmd := &cobra.Command{
@@ -210,6 +212,14 @@ func runIngest(ctx context.Context, out, errOut io.Writer, cfg *config.Config, o
 	if err := errors.Join(cfg.Require(need), cfg.RequireVaults(names...)); err != nil {
 		return err
 	}
+	// The model profile decides the collection's vector width, the chunk window and whether notes go
+	// to the embedder with a title; resolving it here, with the collection check, refuses a
+	// DEFAULT_COLLECTION that belongs to another model before anything is scanned or written.
+	profile, err := cfg.Profile()
+	if err != nil {
+		return err
+	}
+	opts.chunkCfg.WindowTokens = profile.WindowTokens()
 
 	// The lock is taken before the scan rather than before the first write. Scanning the vaults is
 	// ~15 s of reading, and a run that is going to be refused should be refused before it spends
@@ -284,7 +294,7 @@ func runIngest(ctx context.Context, out, errOut io.Writer, cfg *config.Config, o
 		ctx, stop, release = withInterrupt(ctx, opts.gracePeriod)
 		defer release()
 	}
-	return ingestScans(ctx, out, errOut, cfg, opts, scans, counted, stop)
+	return ingestScans(ctx, out, errOut, cfg, profile, opts, scans, counted, stop)
 }
 
 // scanVaults turns each selected vault into a ScanResult, with the areas and exclusions the
@@ -329,6 +339,7 @@ func ingestScans(
 	ctx context.Context,
 	out, errOut io.Writer,
 	cfg *config.Config,
+	profile schema.ModelProfile,
 	opts ingestOptions,
 	scans []vault.ScanResult,
 	tokens *chunk.CountingTokenCounter,
@@ -352,7 +363,7 @@ func ingestScans(
 	if err != nil {
 		return err
 	}
-	embedder, err := embed.NewServiceEmbedder(embedProfile(cfg.EmbedderEndpoint), transport)
+	embedder, err := embed.NewServiceEmbedderFor(embedProfile(cfg.EmbedderEndpoint), transport, profile)
 	if err != nil {
 		return err
 	}
@@ -369,7 +380,7 @@ func ingestScans(
 		Handshake:      handshake,
 		Chunk:          opts.chunkCfg,
 		Tokens:         tokens,
-		TitleMaxTokens: schema.DefaultProfile().TitleMaxTokens(),
+		TitleMaxTokens: profile.TitleMaxTokens(),
 		DryRun:         opts.dryRun,
 		Interrupt:      stop,
 		Full:           opts.full,

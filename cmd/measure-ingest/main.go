@@ -85,6 +85,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "measure-ingest: %v\n", err)
 		return 1
 	}
+	profile, err := cfg.Profile()
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "measure-ingest: %v\n", err)
+		return 1
+	}
 	if err := cfg.RequireVaults(names...); err != nil {
 		_, _ = fmt.Fprintf(stderr, "measure-ingest: %v\n", err)
 		return 1
@@ -115,7 +120,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	scanDur := time.Since(t1)
 
 	t2 := time.Now()
-	report, err := runOrchestrate(ctx, cfg, *tenant, scans)
+	report, err := runOrchestrate(ctx, cfg, profile, *tenant, scans)
 	orchestrateDur := time.Since(t2)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "measure-ingest: %v\n", err)
@@ -185,7 +190,7 @@ func scanVaults(cfg *config.Config, names []string) ([]vault.ScanResult, error) 
 
 // runOrchestrate mirrors cmd/cli/ingest.go's ingestScans: dial, handshake, ingest.Orchestrate. No
 // --dry-run, no --prune, no --only, no --full — the plain incremental run NFR-5 measures.
-func runOrchestrate(ctx context.Context, cfg *config.Config, tenant string, scans []vault.ScanResult) (ingest.Report, error) {
+func runOrchestrate(ctx context.Context, cfg *config.Config, profile schema.ModelProfile, tenant string, scans []vault.ScanResult) (ingest.Report, error) {
 	client, err := store.NewQdrantClient(store.Config{Endpoint: cfg.QdrantEndpoint, APIKey: cfg.QdrantAPIKey})
 	if err != nil {
 		return ingest.Report{}, err
@@ -206,7 +211,7 @@ func runOrchestrate(ctx context.Context, cfg *config.Config, tenant string, scan
 	if err != nil {
 		return ingest.Report{}, err
 	}
-	embedder, err := embed.NewServiceEmbedder(embed.OperatorProfile(cfg.EmbedderEndpoint), transport)
+	embedder, err := embed.NewServiceEmbedderFor(embed.OperatorProfile(cfg.EmbedderEndpoint), transport, profile)
 	if err != nil {
 		return ingest.Report{}, err
 	}
@@ -221,9 +226,9 @@ func runOrchestrate(ctx context.Context, cfg *config.Config, tenant string, scan
 		Store:          points,
 		Embedder:       embedder,
 		Handshake:      handshake,
-		Chunk:          chunk.ConfigFor(schema.DefaultProfile(), 256, 1024),
+		Chunk:          chunk.ConfigFor(profile, 256, 1024),
 		Tokens:         tokens,
-		TitleMaxTokens: schema.DefaultProfile().TitleMaxTokens(),
+		TitleMaxTokens: profile.TitleMaxTokens(),
 		UpsertAttempts: 3,
 	}, scans...)
 	if err != nil {

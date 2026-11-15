@@ -716,6 +716,23 @@ func TestSearchDeadline_ExceedsTheEmbedderBudget(t *testing.T) {
 	}
 }
 
+// TestEmbedProfile_AttemptOutlastsTheMeasuredColdModelLoad pins the reason the per-attempt timeout is
+// 8 s and not the 4 s it was for the resident BGE-M3: the EmbeddingGemma 2 service loads its model on
+// the first call after an idle period, measured at 5,9 s in a fresh process and 3,0 s for a reload
+// (2026-11-15, RTX 3060, bf16). An attempt shorter than that load gives up while the service is still
+// loading, and the search would then depend on a retry that the deadline cannot fit.
+func TestEmbedProfile_AttemptOutlastsTheMeasuredColdModelLoad(t *testing.T) {
+	const measuredColdLoad = 6 * time.Second // 5,9 s, rounded up
+	p := embedProfile("http://embedder.internal:8080")
+	if p.Timeout <= measuredColdLoad {
+		t.Errorf("per-attempt Timeout %v does not outlast the measured cold model load (%v): the first search "+
+			"after an idle period would time out while the service is still loading", p.Timeout, measuredColdLoad)
+	}
+	if want := measuredColdLoad + time.Second; p.Timeout < want {
+		t.Errorf("per-attempt Timeout %v leaves under 1 s of margin over the cold load; want at least %v", p.Timeout, want)
+	}
+}
+
 // TestSearchKnowledge_NonAvailabilityFailure_KeepsItsOwnMessage is the other half, and the one that
 // decides whether the classifier is worth having: a server that answered, however badly, must not be
 // reported as an outage. Getting this wrong would teach the caller to excuse real bugs.

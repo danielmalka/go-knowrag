@@ -18,7 +18,7 @@ import (
 
 // statsReader answers the counts for every collection the manifest describes, optionally narrowed
 // to one tenant. It is one function rather than a per-collection reader plus a loop because the
-// loop is the part that must not be reinvented: the collections come from schema.Manifest(), so no
+// loop is the part that must not be reinvented: the collections come from the model profile's manifest (schema.ManifestFor), so no
 // caller here ever names `interno`.
 type statsReader func(ctx context.Context, tenantID string) (map[string]store.Stats, error)
 
@@ -89,6 +89,10 @@ func readStats(ctx context.Context, cfg *config.Config, tenantID string) (map[st
 	if err := cfg.Require(config.NeedQdrant); err != nil {
 		return nil, err
 	}
+	profile, err := cfg.Profile()
+	if err != nil {
+		return nil, err
+	}
 	client, err := store.NewQdrantClient(store.Config{
 		Endpoint: cfg.QdrantEndpoint,
 		APIKey:   cfg.QdrantAPIKey,
@@ -99,7 +103,7 @@ func readStats(ctx context.Context, cfg *config.Config, tenantID string) (map[st
 	defer func() { _ = client.Close() }()
 
 	out := map[string]store.Stats{}
-	for _, c := range schema.Manifest() {
+	for _, c := range schema.ManifestFor(profile) {
 		points, err := store.NewClient(client, c.Name)
 		if err != nil {
 			return nil, err
