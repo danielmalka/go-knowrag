@@ -369,6 +369,7 @@ func ingestScans(
 		Handshake:      handshake,
 		Chunk:          opts.chunkCfg,
 		Tokens:         tokens,
+		TitleMaxTokens: schema.DefaultProfile().TitleMaxTokens(),
 		DryRun:         opts.dryRun,
 		Interrupt:      stop,
 		Full:           opts.full,

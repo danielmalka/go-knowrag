@@ -56,7 +56,9 @@ type ModelProfile struct {
 	// PromptReserveTokens is the part of that window the service's task prefix and the note title take
 	// (EmbeddingGemma: "title: <title> | text: " in front of every document). The chunker is given
 	// MaxInputTokens minus this, so a chunk that fills its ceiling still fits once the prefix is added.
-	// It is an upper bound chosen with margin, not a measurement of every title.
+	// It is an upper bound chosen with margin, not a measurement of every title: a note title has no
+	// length limit of its own, so ingest cuts the title the service is sent to TitleMaxTokens (below),
+	// which is what makes this reserve a guarantee and not a hope.
 	PromptReserveTokens int
 	// Collections are the Qdrant collection names that hold this profile's vectors, in provisioning
 	// order. They are deliberately identical in shape (design brief §2.1).
@@ -180,6 +182,22 @@ func (p ModelProfile) DenseWidth() int {
 // WindowTokens is the token window a chunk may fill: the input window minus the prompt reserve.
 func (p ModelProfile) WindowTokens() int { return p.MaxInputTokens - p.PromptReserveTokens }
 
+// promptFramingTokens is what the fixed words of the document prefix ("title: " and " | text: ") take
+// out of PromptReserveTokens, with slack for the token boundaries a title can merge into. Measured at
+// 7 tokens with the EmbeddingGemma tokenizer (README of the embedder service); 32 leaves a wide margin.
+const promptFramingTokens = 32
+
+// TitleMaxTokens is the most tokens a note title may take in the document prefix: the prompt reserve
+// minus the framing. Ingest truncates the title it sends to this (never the chunk text), so a chunk
+// of WindowTokens plus its prefix never passes MaxInputTokens, whatever the note is titled. Zero for a
+// profile with no prompt scheme, whose requests carry no title.
+func (p ModelProfile) TitleMaxTokens() int {
+	if !p.NeedsTitle() {
+		return 0
+	}
+	return p.PromptReserveTokens - promptFramingTokens
+}
+
 // NeedsTitle reports whether the service builds a document prefix that includes the note title, which
 // is the case for every profile that pins a prompt scheme.
 func (p ModelProfile) NeedsTitle() bool { return p.PromptVersion != "" }
@@ -231,6 +249,10 @@ func (p ModelProfile) Validate() error {
 	if p.MaxInputTokens <= 0 || p.PromptReserveTokens < 0 || p.PromptReserveTokens >= p.MaxInputTokens {
 		return fmt.Errorf("model profile %q: MaxInputTokens %d and PromptReserveTokens %d must satisfy 0 <= reserve < max",
 			p.ID, p.MaxInputTokens, p.PromptReserveTokens)
+	}
+	if p.NeedsTitle() && p.TitleMaxTokens() <= 0 {
+		return fmt.Errorf("model profile %q: PromptReserveTokens %d leaves no room for a title (framing takes %d)",
+			p.ID, p.PromptReserveTokens, promptFramingTokens)
 	}
 	if p.PromptVersion != "" && !profileIDPattern.MatchString(p.PromptVersion) {
 		return fmt.Errorf("model profile %q: PromptVersion %q is not a lower-case identifier", p.ID, p.PromptVersion)

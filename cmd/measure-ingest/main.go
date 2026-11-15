@@ -223,6 +223,7 @@ func runOrchestrate(ctx context.Context, cfg *config.Config, tenant string, scan
 		Handshake:      handshake,
 		Chunk:          chunk.ConfigFor(schema.DefaultProfile(), 256, 1024),
 		Tokens:         tokens,
+		TitleMaxTokens: schema.DefaultProfile().TitleMaxTokens(),
 		UpsertAttempts: 3,
 	}, scans...)
 	if err != nil {

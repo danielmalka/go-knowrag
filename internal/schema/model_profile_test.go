@@ -232,3 +232,30 @@ func TestProfiles_TokenWindows(t *testing.T) {
 			eg2.WindowTokens(), eg2.MaxInputTokens, eg2.PromptReserveTokens, eg2.NeedsTitle())
 	}
 }
+
+func TestProfiles_TitleBudgetKeepsAFullChunkInsideTheModelWindow(t *testing.T) {
+	for _, p := range Profiles() {
+		if !p.NeedsTitle() {
+			if p.TitleMaxTokens() != 0 {
+				t.Errorf("%s: TitleMaxTokens = %d, want 0 for a profile with no prompt scheme", p.ID, p.TitleMaxTokens())
+			}
+			continue
+		}
+		if got := p.WindowTokens() + p.TitleMaxTokens() + promptFramingTokens; got > p.MaxInputTokens {
+			t.Errorf("%s: chunk window %d + title %d + framing %d = %d, over the model window %d",
+				p.ID, p.WindowTokens(), p.TitleMaxTokens(), promptFramingTokens, got, p.MaxInputTokens)
+		}
+	}
+	eg2, _ := ProfileByID("embeddinggemma-2")
+	if eg2.TitleMaxTokens() != 96 {
+		t.Errorf("EmbeddingGemma TitleMaxTokens = %d, want 96 (128 reserve - 32 framing)", eg2.TitleMaxTokens())
+	}
+}
+
+func TestModelProfile_Validate_RejectsAReserveWithNoRoomForATitle(t *testing.T) {
+	p, _ := ProfileByID("embeddinggemma-2")
+	p.PromptReserveTokens = promptFramingTokens
+	if err := p.Validate(); err == nil {
+		t.Fatal("Validate accepted a prompt scheme whose reserve leaves no room for a title")
+	}
+}

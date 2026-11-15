@@ -26,6 +26,11 @@ type Deps struct {
 	Chunk  chunk.Config
 	Tokens chunk.TokenCounter
 
+	// TitleMaxTokens bounds the note title sent to a service that builds a document prefix from it
+	// (schema.ModelProfile.TitleMaxTokens). Required when the handshake reports a PromptVersion; the
+	// chunk window already leaves room for exactly this many title tokens plus the prefix framing.
+	TitleMaxTokens int
+
 	// Vaults is the vault scope of the run: which vaults this batch actually looked at on disk.
 	//
 	// It is not used to select notes — the caller already did that — and exists for one thing only:
@@ -95,6 +100,11 @@ func (d Deps) Validate() error {
 	}
 	if d.Tokens == nil {
 		return errors.New("ingest: Tokens (chunk.TokenCounter) is nil")
+	}
+	if d.Handshake.PromptVersion != "" && d.TitleMaxTokens <= 0 {
+		return fmt.Errorf("ingest: TitleMaxTokens = %d, but the backend applies task-prefix scheme %q built "+
+			"from the note title; without a bound a long title could push a chunk past the model window",
+			d.TitleMaxTokens, d.Handshake.PromptVersion)
 	}
 	if err := d.Chunk.Validate(); err != nil {
 		return err
@@ -262,6 +272,10 @@ func embedTexts(ctx context.Context, d Deps, title string, texts []string) ([]em
 	if !ok {
 		return nil, fmt.Errorf("the backend applies task-prefix scheme %q, which builds each document prefix "+
 			"from the note title, but the embedder %T cannot pass titles", d.Handshake.PromptVersion, d.Embedder)
+	}
+	title, err := fitTitle(ctx, d.Tokens, title, d.TitleMaxTokens)
+	if err != nil {
+		return nil, err
 	}
 	docs := make([]embed.Document, len(texts))
 	for i, t := range texts {

@@ -37,6 +37,7 @@ func TestProcessNote_PromptScheme_SendsTheNoteTitleWithEveryChunk(t *testing.T) 
 	store := newFakeStore(&journal{})
 	deps := testDeps(store, spy)
 	deps.Handshake.PromptVersion = "gemma-search-v1"
+	deps.TitleMaxTokens = 96
 	n := testNote(t, "research/curadoria/nota.md", 3)
 
 	res := ProcessNote(t.Context(), deps, n)
@@ -76,6 +77,7 @@ func TestProcessNote_PromptScheme_EmbedderWithoutTitlesIsRefused(t *testing.T) {
 	store := newFakeStore(&journal{})
 	deps := testDeps(store, newSpyEmbedder(&journal{})) // spyEmbedder is not a TitledEmbedder
 	deps.Handshake.PromptVersion = "gemma-search-v1"
+	deps.TitleMaxTokens = 96
 
 	res := ProcessNote(t.Context(), deps, testNote(t, "research/curadoria/nota.md", 2))
 	if res.State == StatePruned || res.Err == nil || !strings.Contains(res.Err.Error(), "cannot pass titles") {
@@ -92,6 +94,7 @@ func TestProcessNote_PromptVersionChange_Reembeds(t *testing.T) {
 	store := newFakeStore(&journal{})
 	deps := testDeps(store, spy)
 	deps.Handshake.PromptVersion = "gemma-search-v1"
+	deps.TitleMaxTokens = 96
 	n := testNote(t, "research/curadoria/nota.md", 2)
 	if res := ProcessNote(t.Context(), deps, n); res.State != StatePruned {
 		t.Fatalf("first run: %s (%v)", res.State, res.Err)
@@ -100,6 +103,7 @@ func TestProcessNote_PromptVersionChange_Reembeds(t *testing.T) {
 		t.Fatalf("second run with the same scheme: %s, want %s", res.State, StateSkipped)
 	}
 	deps.Handshake.PromptVersion = "gemma-search-v2"
+	deps.TitleMaxTokens = 96
 	if res := ProcessNote(t.Context(), deps, n); res.State != StatePruned {
 		t.Fatalf("a new scheme did not re-embed: %s (%v)", res.State, res.Err)
 	}
