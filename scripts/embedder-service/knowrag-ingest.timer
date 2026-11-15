@@ -1,9 +1,14 @@
 [Unit]
-Description=Run go-knowrag ingest every night
+Description=Run go-knowrag incremental ingest at fixed times
 
 [Timer]
+# Fixed times, as decided on 2026-11-15: the embedder process is always up and loads its model on
+# demand, so ingestion needs no window around it. The three times are the ones the previous design
+# used (one nightly run, two inside the old daytime window), kept until the owner picks others.
 OnCalendar=*-*-* 03:00:00
-# If the machine was down at 03:00, run once when it comes back rather than skip the day.
+OnCalendar=*-*-* 12:00:00
+OnCalendar=*-*-* 18:00:00
+# If the machine was down at one of them, run once when it comes back rather than skip it.
 Persistent=true
 RandomizedDelaySec=120
 Unit=knowrag-ingest.service

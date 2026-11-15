@@ -1,8 +1,9 @@
 .PHONY: check-leaks test lint build test-integration test-embedder cover verify-deploy
 
-# Interpreter of the virtualenv that has FlagEmbedding installed — the same variable
-# knowrag-embedder.env already defines for the systemd unit, so an installed machine exports it
-# once and both agree.
+# Interpreter that runs the embedder service's tests. They need only pytest: the service's own
+# modules import torch lazily, so no GPU and no model are involved. An installed machine may point it
+# at the service's venv (the variable knowrag-embedder.env already defines), but any Python with
+# pytest works.
 KNOWRAG_PYTHON ?= python3
 
 # -race is on here and not only in a developer's habit, because this is the target CI runs. Every
@@ -53,17 +54,13 @@ cover:
 test-integration:
 	go test -tags integration -timeout 60m -p 1 ./...
 
-# D-24's test_server.py. Like test-integration above it needs equipment the CI runner does not
-# have — `server.py` imports torch and FlagEmbedding at module scope, so importing it at all needs
-# the embedder virtualenv — and for the same reason it is a separate target that `test` does not
-# call, rather than something that turns CI red on a plain ubuntu runner. No test here loads the
-# model or touches the GPU; the venv is needed only to satisfy those two module-scope imports.
-# Trigger: the private runner, and any change to `to_sparse` or to the response format.
-#
-# `cd` because the test imports `server` as a sibling module, and unittest only puts the directory
-# it is invoked from on sys.path.
+# The embedder service's pytest suite (scripts/embedder-service/test_*.py), run against a fake model.
+# Like test-integration above it is a separate target that `test` does not call, so CI is not made
+# to depend on a Python toolchain it does not install. The real-GPU tests in the same directory skip
+# themselves unless KNOWRAG_GPU_TESTS=1.
+# `cd` because the tests import the service's modules as siblings.
 test-embedder:
-	cd scripts/embedder-service && $(KNOWRAG_PYTHON) -m unittest -v test_server
+	cd scripts/embedder-service && $(KNOWRAG_PYTHON) -m pytest -q
 
 lint:
 	golangci-lint run ./...

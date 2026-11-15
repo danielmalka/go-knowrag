@@ -324,21 +324,21 @@ ficar calado quando não encontra o arquivo.
 
 ### 2. Serviço de embedding
 
+O serviço é o EmbeddingGemma 2 (só texto, denso, 768 dimensões) e roda **só na GPU**, sem fallback em
+CPU. O processo fica de pé, mas o modelo é **carregado na primeira chamada e descarregado depois de um
+tempo ocioso** (padrão 10 min, configurável), então a primeira busca depois de uma pausa leva alguns
+segundos a mais. Precisão: bf16 (padrão) ou fp32; fp16 é recusado.
+
 ```bash
-python3 -m venv ~/.venvs/knowrag && ~/.venvs/knowrag/bin/pip install FlagEmbedding
-~/.venvs/knowrag/bin/python scripts/embedder-service/server.py --port 7999
+python3 -m venv ~/.venvs/knowrag-embedder
+~/.venvs/knowrag-embedder/bin/pip install -r scripts/embedder-service/requirements.txt   # versões exatas
+~/.venvs/knowrag-embedder/bin/python scripts/embedder-service/server.py --port 7999
 ```
 
-Ele recusa subir se o modelo não normalizar os vetores ou não devolver a metade esparsa — as duas
-propriedades de que o resto do pipeline depende, verificadas contra um vetor real no startup em vez
-de assumidas.
-
-Primeira execução baixa ~2,3 GB de pesos. Com cache, sobe em segundos. `--fp32` troca precisão por
-VRAM; o default é fp16, que ocupa ~1,2 GB.
-
-O serviço é residente e nada o traz de volta sozinho depois de um reboot ou de um `kill`. Para deixar
-isso com o init em vez de com você, há um unit de usuário do systemd em
-`scripts/embedder-service/`:
+Sem dispositivo CUDA ele **não sobe** (status 78, mensagem clara). Primeira execução baixa ~0,5 GB de
+pesos. A ingestão roda em horário fixo (`knowrag-ingest.timer`). O unit de usuário, as variáveis de
+ambiente, os números medidos (VRAM por lote, descarga, carga) e a operação estão em
+`scripts/embedder-service/README.md`; o unit e o env de exemplo ficam no mesmo diretório:
 
 ```bash
 mkdir -p ~/.config/knowrag ~/.config/systemd/user
@@ -346,13 +346,10 @@ cp scripts/embedder-service/knowrag-embedder.env.example ~/.config/knowrag/embed
 $EDITOR ~/.config/knowrag/embedder.env          # os caminhos desta máquina moram aqui, não no unit
 cp scripts/embedder-service/knowrag-embedder.service ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now knowrag-embedder
-loginctl enable-linger "$USER"                  # sem isto ele morre junto com a sessão
 ```
 
-`journalctl --user -u knowrag-embedder -f` mostra o startup, inclusive a recusa de subir quando o
-modelo falha na verificação. Depois de instalar, vale confirmar que o restart funciona em vez de
-confiar no arquivo: `kill -9` no PID do serviço e checar que `/health` volta a responder sozinho.
+`journalctl --user -u knowrag-embedder -f` mostra as cargas, as descargas e a recusa de subir. Os testes
+do serviço rodam com `make test-embedder` (modelo falso, sem GPU).
 
 ### 3. Provisionar o schema e ingerir
 

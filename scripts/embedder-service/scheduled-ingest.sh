@@ -1,5 +1,9 @@
 #!/bin/sh
-# Nightly ingest: bring the embedder up, process whatever changed, take it down.
+# Scheduled ingest: make sure the embedder is up with its model loaded, then process whatever changed.
+#
+# Nothing is stopped afterwards. The service process stays up and gives the model's VRAM back by
+# itself after KNOWRAG_EMBEDDER_IDLE_UNLOAD seconds without a call (knowrag-embedder.service), so
+# this job has no cleanup to forget and a failed ingest cannot leave the card held.
 #
 # Required in the environment (or in the files named by KNOWRAG_ENV / KNOWRAG_DOTENV):
 #   QDRANT_ENDPOINT, KNOWRAG_ADMIN_QDRANT_API_KEY (or QDRANT_API_KEY as fallback),
@@ -31,9 +35,4 @@ ENSURE="${KNOWRAG_ENSURE:-$(dirname "$0")/ensure-embedder.sh}"
 BIN="${KNOWRAG_BIN:-knowrag}"
 
 "$ENSURE"
-# Always stop, even if ingest failed: a leftover resident model is the thing this
-# job exists to avoid. The exit status of ingest is what systemd reports.
-status=0
-"$BIN" ingest --vault both || status=$?
-systemctl --user stop knowrag-embedder || true
-exit "$status"
+exec "$BIN" ingest --vault both
