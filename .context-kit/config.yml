@@ -1,0 +1,114 @@
+# .context-kit/config.yml
+# Project layer for Context Kit. Written by `ck link`, then edited by you.
+# The kit itself lives at ~/.context-kit and is never copied into the project.
+
+project: go-knowrag
+stack: go
+                               # must match a folder under ~/.context-kit/stacks/
+
+# Default autonomy for new Contracts. The human can grant a different level per Contract
+# in its signature block; the kit refuses a level whose preconditions are unmet.
+# guided | story | contract  -- see ~/.context-kit/core/60-autonomy.md
+autonomy: story
+
+budgets:
+  files: 5                     # per Task. Raise per Task at planning time, never mid-run.
+  story_files: 25              # per Story, summed across all its Tasks. The ceiling that
+                               # splitting a Task cannot escape by construction.
+  gate_runs: 5                 # per Task, whatever failed each time. A second CONSECUTIVE
+                               # failed run dispatches the debugger; the fifth run is a
+                               # Blocked Report.
+  review_rounds: 2             # per Task. Third attempt becomes a Blocked Report.
+
+# At `story` and `contract` autonomy, stop the run when this many Stories sit in PREVIEW
+# unconfirmed instead of starting the next one. A preview nobody ran is the only
+# measurement of intent against reality the kit has, and six of them stacked up means it
+# never fired.
+max_unconfirmed_previews: 2
+
+# How a human exercises a finished Story. One of `command`+`url` or `demo` is REQUIRED —
+# a Story gate does not pass without a preview artifact.
+preview:
+  command: "make preview"
+  url: "http://localhost:8080"
+  notes: "mailhog on :8025 for outbound mail"
+  # demo: "go run ./cmd/demo/magiclink -email demo@example.com"
+
+# Overrides for stack commands. Anything omitted comes from
+# ~/.context-kit/stacks/<stack>/stack.yml. Only override when this project genuinely
+# differs — a drifted override that nobody remembers is a silent gate weakening.
+commands: {}
+  # test_scoped: "go test -race ./internal/..."
+
+# Executables `ck doctor` should never treat as blocking, even when a gate names the
+# command that needs them. This is a conscious opt-out, not a fix: the gate step stays
+# broken, but the project has said in writing that it accepts that rather than being
+# surprised by it mid-run. Match on the executable name (e.g. "cargo-audit"), not the
+# command name.
+# toolchain:
+#   optional: [cargo-audit]
+
+# Role → CLI fallback. Project `roles:` replace the global list wholesale.
+# documentator defaults to agy — do not put another CLI first unless agy
+# cannot run on the host.
+roles:
+  specifier:    [self:orchestrator]
+  implementer:  [self:subagent]
+  tester:       [self:subagent]
+  reviewer:     [codex:cli, grok:cli, claude:cli, self:subagent]
+  security:     [self:subagent]
+  documentator: [agy:cli, grok:cli, self:subagent]
+  auditor:      [self:motor]
+
+# Independent review. First available wins; `--with <id>` overrides.
+# Preference order matters: external CLI beats a fresh subagent beats self-review.
+# See ~/.context-kit/reviewers/README.md. Verify every `cmd` against your installed
+# version — the shipped values are best guesses.
+reviewers:
+  - id: grok
+    role: adversarial
+    detect: "command -v grok"
+    cmd: "grok -p"               # verified headless: -p/--single <PROMPT> → stdout + exit
+    stdin: arg                   # large prompts: cmd "grok --prompt-file" + stdin: file (0.2.118+)
+    timeout: 300
+  - id: claude
+    role: general
+    detect: "command -v claude"
+    cmd: "claude -p"
+    stdin: arg
+    timeout: 300
+  - id: agy
+    role: docs
+    detect: "command -v agy"
+    cmd: "agy --print"
+    stdin: arg
+    timeout: 600
+  - id: codex
+    role: correctness
+    detect: "command -v codex"
+    cmd: "codex exec -"          # verified: stdin prompt via `-` (codex-cli ≥0.146)
+    stdin: prompt
+    timeout: 300
+
+# Branches the kit must never commit to, push to, or rewrite, at any autonomy level.
+protected_branches: [main, master, production]
+
+# Paths the kit must never touch without an explicit instruction in a Contract.
+# Enforced by the Task gate's scope check (~/.context-kit/core/40-gates.md) and by /build.
+# A hit is a hard stop at every autonomy level, not a finding to weigh.
+never_touch:
+  - ".env*"
+  - "infra/**"
+  - "**/secrets/**"
+  # The kit's own controls. An agent editing its gate commands, its budgets or its
+  # guardrails is a silent gate weakening — the run would keep looking green while the
+  # thing measuring it moved.
+  - ".context-kit/config.yml"
+  - ".context-kit/guardrails.md"
+  #
+  # The kit's stack packs (~/.context-kit/stacks/<stack>/stack.yml) carry the same risk and
+  # are deliberately NOT listed here. This check matches patterns against this repository's
+  # own `git diff`, which never names a path outside it, so an entry for them would read as
+  # a guard while never being able to fire — the exact thing $CK/core/40-gates.md separates
+  # "Checked" from "Disciplined" to avoid. Editing a stack pack is a disciplined rule,
+  # enforced by nothing: see $CK/skills/code-quality.md.
