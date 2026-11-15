@@ -37,10 +37,10 @@ func TestManifest_ThreeCollectionsDefined(t *testing.T) {
 		if c.SparseVectorName != "sparse" {
 			t.Errorf("%s: SparseVectorName = %q, want %q", c.Name, c.SparseVectorName, "sparse")
 		}
-		// The revision is referenced, not duplicated: a bump in identity.go must move the manifest
+		// The revision is referenced, not duplicated: a bump in the profile must move the manifest
 		// with it, or the model-revision drift check (Apply) would compare against a stale literal.
-		if c.ModelRevision != BGEM3Revision {
-			t.Errorf("%s: ModelRevision = %q, want BGEM3Revision (%q)", c.Name, c.ModelRevision, BGEM3Revision)
+		if c.ModelRevision != DefaultProfile().Revision {
+			t.Errorf("%s: ModelRevision = %q, want the default profile's (%q)", c.Name, c.ModelRevision, DefaultProfile().Revision)
 		}
 	}
 }

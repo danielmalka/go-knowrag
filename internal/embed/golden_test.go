@@ -90,15 +90,15 @@ func liveEmbedder(t testing.TB) *ServiceEmbedder {
 // by a revision bump, which would otherwise look like a passing test against stale vectors.
 func TestGoldenFixture_IsPinnedToTheCurrentRevision(t *testing.T) {
 	f := loadGolden(t)
-	if f.ModelRevision != schema.BGEM3Revision {
+	if f.ModelRevision != schema.DefaultProfile().Revision {
 		t.Errorf("fixture was generated at revision %s, but this build pins %s — regenerate it, and "+
 			"note that doing so means reindexing all three collections (PRD-contrato §2.4)",
-			f.ModelRevision, schema.BGEM3Revision)
+			f.ModelRevision, schema.DefaultProfile().Revision)
 	}
-	if len(f.ExpectedDense) != DenseDim {
-		t.Errorf("fixture dense vector has %d elements, want %d", len(f.ExpectedDense), DenseDim)
+	if len(f.ExpectedDense) != DefaultDenseDim() {
+		t.Errorf("fixture dense vector has %d elements, want %d", len(f.ExpectedDense), DefaultDenseDim())
 	}
-	if err := validateEmbedding(Embedding{
+	if err := validateDefault(Embedding{
 		Dense:  f.ExpectedDense,
 		Sparse: Sparse{Indices: f.ExpectedSparseIndices, Values: f.ExpectedSparseValues},
 	}); err != nil {
@@ -150,8 +150,8 @@ func TestServiceEmbedder_Handshake_LiveService(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the live service diverges from this build's pins: %v", err)
 	}
-	if info.ModelRevision != schema.BGEM3Revision {
-		t.Errorf("ModelRevision = %q, want %q", info.ModelRevision, schema.BGEM3Revision)
+	if info.ModelRevision != schema.DefaultProfile().Revision {
+		t.Errorf("ModelRevision = %q, want %q", info.ModelRevision, schema.DefaultProfile().Revision)
 	}
 }
 
@@ -174,7 +174,7 @@ func TestServiceEmbedder_LiveService_SparseContractHolds(t *testing.T) {
 		// validateEmbedding already enforces ascending, non-zero and non-empty; asserting it here
 		// against real output is what makes those checks a statement about the service rather than
 		// about hand-written fixtures.
-		if err := validateEmbedding(emb); err != nil {
+		if err := validateDefault(emb); err != nil {
 			t.Errorf("text %d (%q): live output violates the contract: %v", i, texts[i], err)
 		}
 	}

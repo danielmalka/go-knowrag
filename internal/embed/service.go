@@ -46,6 +46,7 @@ type Transport interface {
 // It also refuses to embed anything through a backend it has not confirmed. See ensureVerified.
 type ServiceEmbedder struct {
 	profile   Profile
+	model     schema.ModelProfile // what the handshake pins and what vector width is accepted
 	transport Transport
 	expected  BackendHandshakeInfo
 	backoff   time.Duration
@@ -81,7 +82,17 @@ var _ Embedder = (*ServiceEmbedder)(nil)
 // NewServiceEmbedder validates the profile up front so a misconfiguration fails at startup rather
 // than in the middle of a run.
 func NewServiceEmbedder(p Profile, t Transport) (*ServiceEmbedder, error) {
+	return NewServiceEmbedderFor(p, t, schema.DefaultProfile())
+}
+
+// NewServiceEmbedderFor is NewServiceEmbedder for an explicit model profile: the handshake pins,
+// ModelID and the accepted vector width all come from m. m is validated here, so a half-built
+// profile fails at construction instead of on the first embedding.
+func NewServiceEmbedderFor(p Profile, t Transport, m schema.ModelProfile) (*ServiceEmbedder, error) {
 	if err := p.Validate(); err != nil {
+		return nil, err
+	}
+	if err := m.Validate(); err != nil {
 		return nil, err
 	}
 	if t == nil {
@@ -89,17 +100,19 @@ func NewServiceEmbedder(p Profile, t Transport) (*ServiceEmbedder, error) {
 	}
 	return &ServiceEmbedder{
 		profile:    p,
+		model:      m,
 		transport:  t,
-		expected:   Expected(),
+		expected:   ExpectedFor(m),
 		backoff:    defaultBackoff,
 		verifyGate: make(chan struct{}, 1),
 	}, nil
 }
 
-// ModelID reports the revision this build is pinned to, and reads nothing from the profile — there
-// is no configuration path by which two deployments could report different revisions (S04 T7).
+// ModelID reports the revision of the model profile this embedder was built for, and reads nothing
+// from the client Profile — there is no per-deployment configuration path by which two deployments
+// could report different revisions (S04 T7); the revision is a reviewed value in internal/schema.
 // It is self-attested: what the backend actually loaded is Handshake's answer, not this one.
-func (e *ServiceEmbedder) ModelID() string { return schema.BGEM3Revision }
+func (e *ServiceEmbedder) ModelID() string { return e.model.Revision }
 
 // EmbedQuery embeds one text through exactly the same path as a batch, so a query vector and a
 // document vector can never diverge by taking different validation branches.
@@ -280,7 +293,7 @@ func (e *ServiceEmbedder) embedSubBatch(ctx context.Context, texts []string, dst
 	// unchanged and is the reason that matters: sorting would silently absorb the day the server
 	// stops holding up its end, and that is the one thing that must not happen quietly.
 	for i, item := range raw {
-		if err := validateEmbedding(item); err != nil {
+		if err := validateEmbedding(item, e.model.DenseWidth()); err != nil {
 			return &ItemError{Index: offset + i, Err: err}
 		}
 		dst[i] = item

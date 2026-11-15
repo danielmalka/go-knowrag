@@ -76,7 +76,7 @@ func TestFakeEmbedder_OutputPassesValidation(t *testing.T) {
 		t.Fatalf("got %d embeddings for %d texts", len(got), len(texts))
 	}
 	for i, e := range got {
-		if err := validateEmbedding(e); err != nil {
+		if err := validateDefault(e); err != nil {
 			t.Errorf("text %d (%q): fake output fails validateEmbedding: %v", i, texts[i], err)
 		}
 	}

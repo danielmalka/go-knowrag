@@ -15,12 +15,12 @@ import (
 // varying one thing, and so an accidental edit to the pins shows up as a failure here too.
 func fullyPinned() BackendHandshakeInfo {
 	return BackendHandshakeInfo{
-		ModelRevision:     schema.BGEM3Revision,
-		TokenizerRevision: schema.BGEM3Revision,
-		Dim:               DenseDim,
+		ModelRevision:     schema.DefaultProfile().Revision,
+		TokenizerRevision: schema.DefaultProfile().Revision,
+		Dim:               DefaultDenseDim(),
 		Normalization:     ExpectedNormalization,
 		Pooling:           ExpectedPooling,
-		Precision:         ExpectedPrecision,
+		Precision:         schema.DefaultProfile().Precision,
 		SparseParams:      map[string]string{"kind": "lexical_weights", "id_space": "tokenizer_vocab"},
 	}
 }
@@ -171,14 +171,14 @@ func TestValidateHandshake_BackendOmitsField_FailsNamingIt(t *testing.T) {
 // them shows up as a failing test rather than as a different point_hash months later.
 func TestExpected_MatchesADR001(t *testing.T) {
 	e := Expected()
-	if e.ModelRevision != schema.BGEM3Revision {
-		t.Errorf("ModelRevision = %q, want schema.BGEM3Revision", e.ModelRevision)
+	if e.ModelRevision != schema.DefaultProfile().Revision {
+		t.Errorf("ModelRevision = %q, want schema.DefaultProfile().Revision", e.ModelRevision)
 	}
-	if e.TokenizerRevision != schema.BGEM3Revision {
-		t.Errorf("TokenizerRevision = %q, want schema.BGEM3Revision", e.TokenizerRevision)
+	if e.TokenizerRevision != schema.DefaultProfile().Revision {
+		t.Errorf("TokenizerRevision = %q, want schema.DefaultProfile().Revision", e.TokenizerRevision)
 	}
-	if e.Dim != DenseDim {
-		t.Errorf("Dim = %d, want %d", e.Dim, DenseDim)
+	if e.Dim != DefaultDenseDim() {
+		t.Errorf("Dim = %d, want %d", e.Dim, DefaultDenseDim())
 	}
 	if e.Normalization != "l2" {
 		t.Errorf("Normalization = %q, want %q (BGE-M3 model card, ADR-001 §4)", e.Normalization, "l2")
@@ -251,5 +251,55 @@ func TestServiceEmbedder_Handshake_ReturnsWhatTheBackendReported(t *testing.T) {
 	got.SparseParams["poisoned"] = "yes"
 	if _, bad := e.expected.SparseParams["poisoned"]; bad {
 		t.Error("Handshake returned the embedder's own pins, not the backend's report")
+	}
+}
+
+// PR 1 of the embedding migration: the pins come from a model profile, not from package constants.
+func TestExpectedFor_DefaultProfileEqualsExpected(t *testing.T) {
+	got := ExpectedFor(schema.DefaultProfile())
+	want := Expected()
+	if got.ModelRevision != want.ModelRevision || got.Dim != want.Dim || got.Precision != want.Precision ||
+		!maps.Equal(got.SparseParams, want.SparseParams) {
+		t.Fatalf("ExpectedFor(default) = %+v, Expected() = %+v", got, want)
+	}
+}
+
+func TestExpectedFor_TakesRevisionDimAndPrecisionFromTheProfile(t *testing.T) {
+	other := schema.ModelProfile{
+		ID: "other", Model: "org/other", Revision: strings.Repeat("b", 40),
+		DenseDim: 768, Precision: "bf16", Collections: []string{"nova"},
+	}
+	e := ExpectedFor(other)
+	if e.ModelRevision != other.Revision || e.TokenizerRevision != other.Revision {
+		t.Errorf("revisions = %q/%q, want the profile's %q", e.ModelRevision, e.TokenizerRevision, other.Revision)
+	}
+	if e.Dim != 768 || e.Precision != "bf16" {
+		t.Errorf("Dim/Precision = %d/%q, want 768/bf16", e.Dim, e.Precision)
+	}
+}
+
+// A backend that serves the default model is refused by an embedder built for another profile, and
+// the error names the field: the handshake validates against the profile, not against a constant.
+func TestHandshake_ValidatesAgainstTheEmbeddersProfile(t *testing.T) {
+	other := schema.DefaultProfile()
+	other.Revision = strings.Repeat("c", 40)
+	e, err := NewServiceEmbedderFor(testProfile(), &stubTransport{info: func(context.Context) (BackendHandshakeInfo, error) { return fullyPinned(), nil }}, other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = e.Handshake(context.Background())
+	if !errors.Is(err, ErrHandshake) || !strings.Contains(err.Error(), "ModelRevision") {
+		t.Fatalf("Handshake = %v, want an ErrHandshake naming ModelRevision", err)
+	}
+	if e.ModelID() != other.Revision {
+		t.Errorf("ModelID() = %q, want the profile's revision", e.ModelID())
+	}
+}
+
+func TestNewServiceEmbedderFor_RejectsAnInvalidProfile(t *testing.T) {
+	bad := schema.DefaultProfile()
+	bad.Revision = "main"
+	if _, err := NewServiceEmbedderFor(testProfile(), &stubTransport{}, bad); err == nil {
+		t.Fatal("an invalid model profile was accepted")
 	}
 }

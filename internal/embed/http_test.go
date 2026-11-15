@@ -55,8 +55,8 @@ func TestHTTPTransport_Info_DecodesTheLiveHandshakeBody(t *testing.T) {
 	}
 
 	want := BackendHandshakeInfo{
-		ModelRevision:     schema.BGEM3Revision,
-		TokenizerRevision: schema.BGEM3Revision,
+		ModelRevision:     schema.DefaultProfile().Revision,
+		TokenizerRevision: schema.DefaultProfile().Revision,
 		Dim:               1024,
 		Normalization:     "l2",
 		Pooling:           "cls",

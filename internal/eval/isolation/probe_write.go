@@ -250,12 +250,12 @@ func writeDeps(tenantID string, store ingest.Store) ingest.Deps {
 // its zero value would put a hash nothing produces into the store.
 func writeHandshake() embed.BackendHandshakeInfo {
 	return embed.BackendHandshakeInfo{
-		ModelRevision:     schema.BGEM3Revision,
-		TokenizerRevision: schema.BGEM3Revision,
-		Dim:               embed.DenseDim,
+		ModelRevision:     schema.DefaultProfile().Revision,
+		TokenizerRevision: schema.DefaultProfile().Revision,
+		Dim:               embed.DefaultDenseDim(),
 		Normalization:     embed.ExpectedNormalization,
 		Pooling:           embed.ExpectedPooling,
-		Precision:         embed.ExpectedPrecision,
+		Precision:         schema.DefaultProfile().Precision,
 		SparseParams:      map[string]string{"indices": "token_id", "values": "lexical_weight"},
 	}
 }

@@ -9,7 +9,8 @@ import (
 // response exactly as it arrived. Every check names the field and the offending position, because
 // "invalid embedding" over a 3000-chunk run is not actionable.
 //
-// The invariants are PRD-contrato §2.3b's, and they are not negotiable here: 1024 dense elements,
+// The invariants are PRD-contrato §2.3b's, and they are not negotiable here: denseDim dense elements
+// (the model profile's width; 1024 for BGE-M3),
 // all finite; sparse indices and values the same length, non-empty, strictly ascending, all
 // weights non-zero and finite. The two degenerate-sparse classes additionally wrap a sentinel
 // (see errors.go) so the caller can attribute them to one note.
@@ -20,9 +21,9 @@ import (
 // sparse order makes an unchanged note look changed to point_hash.
 //
 // It does not mutate its input on either path.
-func validateEmbedding(e Embedding) error {
-	if len(e.Dense) != DenseDim {
-		return fmt.Errorf("dense vector has %d elements, want %d", len(e.Dense), DenseDim)
+func validateEmbedding(e Embedding, denseDim int) error {
+	if len(e.Dense) != denseDim {
+		return fmt.Errorf("dense vector has %d elements, want %d", len(e.Dense), denseDim)
 	}
 	for i, v := range e.Dense {
 		if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {

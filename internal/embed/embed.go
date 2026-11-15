@@ -1,11 +1,17 @@
 package embed
 
-import "context"
+import (
+	"context"
 
-// DenseDim is the BGE-M3 dense vector width (PRD-contrato §2.3b, confirmed in ADR-001 §6.2 against
-// the pinned revision's config.json). It is an invariant, not a setting: a backend returning any
-// other width is a backend serving a different model.
-const DenseDim = 1024
+	"github.com/danielmalka/go-knowrag/internal/schema"
+)
+
+// DefaultDenseDim is the dense vector width of the default model profile (schema.DefaultProfile,
+// BGE-M3: PRD-contrato §2.3b, confirmed in ADR-001 §6.2 against the pinned revision's config.json).
+// The width is a property of the model, not a setting: a backend returning any other width is a
+// backend serving a different model. An embedder built for another profile (NewServiceEmbedderFor)
+// validates against that profile's width; this is only what fixtures that use the default want.
+func DefaultDenseDim() int { return schema.DefaultProfile().DenseWidth() }
 
 // Sparse is the lexical half of a BGE-M3 embedding, in the shape PRD-contrato §2.3b fixes:
 // the model's `token_id` becomes Indices (uint32) and its `lexical_weight` becomes Values

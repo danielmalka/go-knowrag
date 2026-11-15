@@ -12,7 +12,7 @@ import (
 // validDense returns a 1024-element dense vector that satisfies every invariant, so a test can
 // vary exactly one thing and know the failure came from that thing.
 func validDense() []float32 {
-	d := make([]float32, DenseDim)
+	d := make([]float32, DefaultDenseDim())
 	for i := range d {
 		d[i] = 0.03125
 	}
@@ -27,13 +27,13 @@ func validEmbedding() Embedding {
 }
 
 func TestValidateEmbedding_ValidPasses(t *testing.T) {
-	if err := validateEmbedding(validEmbedding()); err != nil {
+	if err := validateDefault(validEmbedding()); err != nil {
 		t.Fatalf("a valid embedding was rejected: %v", err)
 	}
 }
 
 func TestValidateEmbedding(t *testing.T) {
-	shortDense := validDense()[:DenseDim-1]
+	shortDense := validDense()[:DefaultDenseDim()-1]
 
 	nanDense := validDense()
 	nanDense[7] = float32(math.NaN())
@@ -121,7 +121,7 @@ func TestValidateEmbedding(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := validateEmbedding(tc.in)
+			err := validateDefault(tc.in)
 			if err == nil {
 				t.Fatalf("no error for %s", tc.name)
 			}
@@ -144,16 +144,16 @@ func TestValidateEmbedding_DegenerateSparse_MatchesSentinel(t *testing.T) {
 		Sparse: Sparse{Indices: []uint32{1, 1}, Values: []float32{0.1, 0.2}},
 	}
 
-	if err := validateEmbedding(zeroWeight); !errors.Is(err, ErrSparseZeroWeight) {
+	if err := validateDefault(zeroWeight); !errors.Is(err, ErrSparseZeroWeight) {
 		t.Errorf("zero weight: errors.Is(%v, ErrSparseZeroWeight) = false", err)
 	}
-	if err := validateEmbedding(repeated); !errors.Is(err, ErrSparseRepeatedIndex) {
+	if err := validateDefault(repeated); !errors.Is(err, ErrSparseRepeatedIndex) {
 		t.Errorf("repeated index: errors.Is(%v, ErrSparseRepeatedIndex) = false", err)
 	}
-	if err := validateEmbedding(zeroWeight); errors.Is(err, ErrSparseRepeatedIndex) {
+	if err := validateDefault(zeroWeight); errors.Is(err, ErrSparseRepeatedIndex) {
 		t.Error("zero weight also matched ErrSparseRepeatedIndex — the two classes are not separable")
 	}
-	if err := validateEmbedding(repeated); errors.Is(err, ErrSparseZeroWeight) {
+	if err := validateDefault(repeated); errors.Is(err, ErrSparseZeroWeight) {
 		t.Error("repeated index also matched ErrSparseZeroWeight — the two classes are not separable")
 	}
 
@@ -167,7 +167,7 @@ func TestValidateEmbedding_DegenerateSparse_MatchesSentinel(t *testing.T) {
 		{Dense: validDense(), Sparse: Sparse{Indices: []uint32{5, 2}, Values: []float32{0.1, 0.2}}},
 	}
 	for i, e := range others {
-		err := validateEmbedding(e)
+		err := validateDefault(e)
 		if err == nil {
 			t.Fatalf("case %d: expected a validation error", i)
 		}
@@ -184,7 +184,7 @@ func TestValidateEmbedding_DoesNotMutateInput(t *testing.T) {
 		Dense:  slices.Clone(e.Dense),
 		Sparse: Sparse{Indices: slices.Clone(e.Sparse.Indices), Values: slices.Clone(e.Sparse.Values)},
 	}
-	_ = validateEmbedding(e)
+	_ = validateDefault(e)
 	if !reflect.DeepEqual(e, before) {
 		t.Fatal("validateEmbedding mutated its input on the success path")
 	}
@@ -194,7 +194,7 @@ func TestValidateEmbedding_DoesNotMutateInput(t *testing.T) {
 		Dense:  slices.Clone(bad.Dense),
 		Sparse: Sparse{Indices: slices.Clone(bad.Sparse.Indices), Values: slices.Clone(bad.Sparse.Values)},
 	}
-	_ = validateEmbedding(bad)
+	_ = validateDefault(bad)
 	if !reflect.DeepEqual(bad, badBefore) {
 		t.Fatal("validateEmbedding mutated its input on the error path")
 	}
@@ -204,11 +204,28 @@ func TestValidateEmbedding_DoesNotMutateInput(t *testing.T) {
 // all-zero sparse vector is what a backend that silently dropped its sparse head returns, and it is
 // exactly the "vetor zerado silencioso" the story refuses to let through.
 func TestValidateEmbedding_EmptySparseIsRejected(t *testing.T) {
-	err := validateEmbedding(Embedding{Dense: validDense()})
+	err := validateDefault(Embedding{Dense: validDense()})
 	if err == nil {
 		t.Fatal("an embedding with no sparse entries was accepted")
 	}
 	if !strings.Contains(err.Error(), "empty") {
 		t.Errorf("error %q does not name the empty sparse vector", err)
+	}
+}
+
+// validateDefault validates against the default model profile's width, which is what these fixtures
+// build (PR 1 of the embedding migration: the width is a parameter of validateEmbedding now).
+func validateDefault(e Embedding) error { return validateEmbedding(e, DefaultDenseDim()) }
+
+// The accepted width is the model profile's, not a package constant: a 768-wide vector is valid for a
+// 768-wide profile and rejected for the default one.
+func TestValidateEmbedding_WidthComesFromTheProfile(t *testing.T) {
+	e := validEmbedding()
+	e.Dense = e.Dense[:768]
+	if err := validateEmbedding(e, 768); err != nil {
+		t.Errorf("a 768-wide vector was rejected for a 768-wide profile: %v", err)
+	}
+	if err := validateEmbedding(e, DefaultDenseDim()); err == nil {
+		t.Error("a 768-wide vector was accepted for the default 1024-wide profile")
 	}
 }

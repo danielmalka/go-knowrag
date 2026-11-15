@@ -103,7 +103,7 @@ func testPoint(index int) ingest.Point {
 			"oversize":    false,
 		},
 		Vector: embed.Embedding{
-			Dense:  make([]float32, embed.DenseDim),
+			Dense:  make([]float32, embed.DefaultDenseDim()),
 			Sparse: embed.Sparse{Indices: []uint32{3, 9}, Values: []float32{0.5, 0.25}},
 		},
 	}

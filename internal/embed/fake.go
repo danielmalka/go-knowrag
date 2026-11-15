@@ -7,7 +7,7 @@ import (
 	"math/rand/v2"
 )
 
-// FakeModelID is what FakeEmbedder reports. It is deliberately not schema.BGEM3Revision: a fake
+// FakeModelID is what FakeEmbedder reports. It is deliberately not schema.DefaultProfile().Revision: a fake
 // that claims the pinned revision would let a test write a point_hash indistinguishable from one
 // produced by the real model, which is the one thing a fake must never do.
 const FakeModelID = "fake-embedder-v1"
@@ -60,7 +60,7 @@ func fakeEmbedding(text string) Embedding {
 	// or identifier is derived from this stream.
 	rng := rand.New(rand.NewPCG(seed, seed^0x9e3779b97f4a7c15))
 
-	dense := make([]float32, DenseDim)
+	dense := make([]float32, DefaultDenseDim())
 	var norm float64
 	for i := range dense {
 		v := rng.Float64()*2 - 1

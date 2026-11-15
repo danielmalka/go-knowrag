@@ -18,12 +18,6 @@ const NamespaceKnowrag = "34bf96b9-3a72-4c17-8711-9addd5d8e946"
 // const above exists to remove.
 var namespaceKnowrag = uuid.MustParse(NamespaceKnowrag)
 
-// BGEM3Revision is the pinned, immutable HuggingFace commit revision of BAAI/bge-m3.
-// Confirmed 2026-08-08: current HEAD of BAAI/bge-m3 on Hugging Face; the weights repo has had
-// no new commit in about two years. Changing it requires reindexing all three collections
-// (PRD-contrato §2.3b).
-const BGEM3Revision = "5617a9f61b028005a4858fdac845db406aefb181"
-
 // ChunkerVersion identifies the chunking algorithm + config version; feeds point_hash (PRD-contrato §2.4).
 const ChunkerVersion = "v1"
 
