@@ -45,3 +45,5 @@ internal/schema/applied_state.json.tmp-*
 # A lista de termos privados que scripts/check-leaks.sh confere. Nunca versionada: uma lista de
 # "nunca escreva estas palavras" num repositório público publica as palavras.
 .leakterms
+# worktrees locais dos agentes
+.worktrees/
