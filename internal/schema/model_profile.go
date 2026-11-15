@@ -49,6 +49,15 @@ type ModelProfile struct {
 	// confirms the scheme so a service that forgot or changed it fails loudly instead of embedding
 	// queries and documents into subtly different spaces.
 	PromptVersion string
+	// MaxInputTokens is the model's input window in tokens, as its tokenizer counts them (BGE-M3: 8192;
+	// EmbeddingGemma 2: "8K" on the model card). A chunk above it cannot be embedded and is never
+	// truncated (internal/chunk).
+	MaxInputTokens int
+	// PromptReserveTokens is the part of that window the service's task prefix and the note title take
+	// (EmbeddingGemma: "title: <title> | text: " in front of every document). The chunker is given
+	// MaxInputTokens minus this, so a chunk that fills its ceiling still fits once the prefix is added.
+	// It is an upper bound chosen with margin, not a measurement of every title.
+	PromptReserveTokens int
 	// Collections are the Qdrant collection names that hold this profile's vectors, in provisioning
 	// order. They are deliberately identical in shape (design brief §2.1).
 	Collections []string
@@ -87,10 +96,11 @@ var profiles = []ModelProfile{
 		Precisions: []string{PrecisionFP16}, // measured on the loaded weights (ADR-001 §6.2, round 2)
 		// Model card + the pinned revision's own files (ADR-001 §6.2): CLS pooling, an L2 normalize
 		// module, and the lexical_weights sparse head whose indices are tokenizer vocabulary ids.
-		Pooling:       "cls",
-		Normalization: "l2",
-		SparseParams:  map[string]string{"kind": "lexical_weights", "id_space": "tokenizer_vocab"},
-		PromptVersion: "", // BGE-M3 takes no task prefix
+		Pooling:        "cls",
+		Normalization:  "l2",
+		SparseParams:   map[string]string{"kind": "lexical_weights", "id_space": "tokenizer_vocab"},
+		PromptVersion:  "",   // BGE-M3 takes no task prefix
+		MaxInputTokens: 8192, // PRD-contrato §2.3b
 		// interno: the operator's own vaults, the only collection populated in this build. clientes
 		// and base_paga are provisioned empty so nothing ever grows a special case for the one that
 		// has data in it.
@@ -112,6 +122,10 @@ var profiles = []ModelProfile{
 		// Query: "task: search result | query: " + text. Document: "title: " + (title or "none") +
 		// " | text: " + text. Applied by the embedding service (model card, prompts).
 		PromptVersion: "gemma-search-v1",
+		// The card says "8K token context window"; the trial's longest document was 3869 tokens, nothing
+		// near it. 128 covers "title: ... | text: " plus a long note title with margin.
+		MaxInputTokens:      8192,
+		PromptReserveTokens: 128,
 		// A new collection beside the old one (migration plan, "Reindexação e virada"). The names keep the
 		// trust-boundary name and add the model as a suffix, final as of PR 3: the suffix is the only place
 		// an operator, a Qdrant dashboard or a log line shows which vector space a collection holds (the
@@ -163,6 +177,13 @@ func (p ModelProfile) DenseWidth() int {
 	return int(p.DenseDim) // #nosec G115 -- bounded by Validate (DenseDim <= maxDenseDim)
 }
 
+// WindowTokens is the token window a chunk may fill: the input window minus the prompt reserve.
+func (p ModelProfile) WindowTokens() int { return p.MaxInputTokens - p.PromptReserveTokens }
+
+// NeedsTitle reports whether the service builds a document prefix that includes the note title, which
+// is the case for every profile that pins a prompt scheme.
+func (p ModelProfile) NeedsTitle() bool { return p.PromptVersion != "" }
+
 // PrimaryPrecision is the first (preferred) allowed precision, or "" for a profile with none.
 func (p ModelProfile) PrimaryPrecision() string {
 	if len(p.Precisions) == 0 {
@@ -206,6 +227,10 @@ func (p ModelProfile) Validate() error {
 	}
 	if p.Pooling == "" || p.Normalization == "" {
 		return fmt.Errorf("model profile %q: Pooling %q and Normalization %q must both be set", p.ID, p.Pooling, p.Normalization)
+	}
+	if p.MaxInputTokens <= 0 || p.PromptReserveTokens < 0 || p.PromptReserveTokens >= p.MaxInputTokens {
+		return fmt.Errorf("model profile %q: MaxInputTokens %d and PromptReserveTokens %d must satisfy 0 <= reserve < max",
+			p.ID, p.MaxInputTokens, p.PromptReserveTokens)
 	}
 	if p.PromptVersion != "" && !profileIDPattern.MatchString(p.PromptVersion) {
 		return fmt.Errorf("model profile %q: PromptVersion %q is not a lower-case identifier", p.ID, p.PromptVersion)

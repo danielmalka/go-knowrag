@@ -41,6 +41,18 @@ func NewFakeEmbedderFor(m schema.ModelProfile) (FakeEmbedder, error) {
 	return FakeEmbedder{Profile: &m}, nil
 }
 
+var _ TitledEmbedder = FakeEmbedder{}
+
+// EmbedTitledDocuments embeds the texts and ignores the titles: the fake's vectors are a function of
+// the text alone, so a suite that wants to see the titles uses a spy around it.
+func (f FakeEmbedder) EmbedTitledDocuments(ctx context.Context, docs []Document) ([]Embedding, error) {
+	texts := make([]string, len(docs))
+	for i, d := range docs {
+		texts[i] = d.Text
+	}
+	return f.EmbedDocuments(ctx, texts)
+}
+
 func (f FakeEmbedder) model() schema.ModelProfile {
 	if f.Profile == nil {
 		return schema.DefaultProfile()

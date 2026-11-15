@@ -17,6 +17,8 @@ type HardLimitError struct {
 	Path       string
 	Breadcrumb []string
 	Tokens     int
+	// Window is the window the chunk was measured against; zero (a hand-built error) means HardTokenLimit.
+	Window int
 }
 
 func (e *HardLimitError) Error() string {
@@ -27,7 +29,7 @@ func (e *HardLimitError) Error() string {
 	return fmt.Sprintf(
 		"%s: chunk %q is %d tokens, above the model's hard %d-token window; it cannot be embedded and "+
 			"is not truncated — split the code fence or table it contains, or the section itself",
-		e.Path, where, e.Tokens, HardTokenLimit)
+		e.Path, where, e.Tokens, e.window())
 }
 
 // classifyOversize turns a measured token count into the `oversize` payload field (PRD-contrato
@@ -42,8 +44,15 @@ func (e *HardLimitError) Error() string {
 // tokens is always the breadcrumb-prefixed count (measureTokens), never the bare body: the
 // breadcrumb is embedded too and occupies the same window.
 func classifyOversize(path string, breadcrumb []string, tokens int, cfg Config) (bool, error) {
-	if tokens > HardTokenLimit {
-		return false, &HardLimitError{Path: path, Breadcrumb: breadcrumb, Tokens: tokens}
+	if tokens > cfg.window() {
+		return false, &HardLimitError{Path: path, Breadcrumb: breadcrumb, Tokens: tokens, Window: cfg.window()}
 	}
 	return tokens > cfg.CeilingTokens, nil
+}
+
+func (e *HardLimitError) window() int {
+	if e.Window > 0 {
+		return e.Window
+	}
+	return HardTokenLimit
 }

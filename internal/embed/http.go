@@ -65,7 +65,17 @@ func NewHTTPTransport(endpoint string) (*HTTPTransport, error) {
 type embedRequest struct {
 	Inputs []string `json:"inputs"`
 	Kind   Kind     `json:"kind"`
+	// Titles, when present, is one note title per input; it is sent only for a profile whose service
+	// builds a titled document prefix, so the BGE-M3 request is byte for byte what it always was.
+	Titles []string `json:"titles,omitempty"`
 }
+
+// TitledTransport is the optional capability of a Transport that can send one note title per input.
+type TitledTransport interface {
+	EmbedTitled(ctx context.Context, texts, titles []string, kind Kind) ([]Embedding, error)
+}
+
+var _ TitledTransport = (*HTTPTransport)(nil)
 
 type embedResponse struct {
 	Dense  [][]float32 `json:"dense"`
@@ -77,7 +87,15 @@ type embedResponse struct {
 }
 
 func (t *HTTPTransport) Embed(ctx context.Context, texts []string, kind Kind) ([]Embedding, error) {
-	body, err := json.Marshal(embedRequest{Inputs: texts, Kind: kind})
+	return t.EmbedTitled(ctx, texts, nil, kind)
+}
+
+// EmbedTitled is Embed with one note title per text (titles nil = none sent).
+func (t *HTTPTransport) EmbedTitled(ctx context.Context, texts, titles []string, kind Kind) ([]Embedding, error) {
+	if titles != nil && len(titles) != len(texts) {
+		return nil, fmt.Errorf("embed: %d title(s) for %d text(s); one title per text or none", len(titles), len(texts))
+	}
+	body, err := json.Marshal(embedRequest{Inputs: texts, Kind: kind, Titles: titles})
 	if err != nil {
 		return nil, fmt.Errorf("embed: encoding request: %w", err)
 	}

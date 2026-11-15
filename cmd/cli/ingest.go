@@ -17,6 +17,7 @@ import (
 	"github.com/danielmalka/go-knowrag/internal/embed"
 	"github.com/danielmalka/go-knowrag/internal/ingest"
 	"github.com/danielmalka/go-knowrag/internal/ingest/lock"
+	"github.com/danielmalka/go-knowrag/internal/schema"
 	"github.com/danielmalka/go-knowrag/internal/store"
 	"github.com/danielmalka/go-knowrag/internal/vault"
 )
@@ -76,10 +77,7 @@ func newIngestCmd(cfg *config.Config) *cobra.Command {
 		vaultFlag:   bothVaults,
 		tenantID:    defaultTenantID,
 		gracePeriod: defaultGracePeriod,
-		chunkCfg: chunk.Config{
-			FloorTokens:   defaultFloorTokens,
-			CeilingTokens: defaultCeilingTokens,
-		},
+		chunkCfg:    chunk.ConfigFor(schema.DefaultProfile(), defaultFloorTokens, defaultCeilingTokens),
 	}
 
 	cmd := &cobra.Command{

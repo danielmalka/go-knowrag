@@ -32,6 +32,22 @@ type Embedding struct {
 	Sparse Sparse
 }
 
+// Document is one text to embed together with the title of the note it came from. EmbeddingGemma's
+// document prefix is "title: <title> | text: <text>", so for a profile that pins a prompt scheme the
+// service needs the title as well as the text; an empty Title means "none" on the service side.
+type Document struct {
+	Title string
+	Text  string
+}
+
+// TitledEmbedder is the optional capability of an Embedder that can pass the note title to a service
+// that builds a titled document prefix. It is a separate interface rather than a change to Embedder
+// so the profiles without a prefix (BGE-M3) and every fake keep the contract they have: ingest uses it
+// only when the profile asks for a title (schema.ModelProfile.NeedsTitle).
+type TitledEmbedder interface {
+	EmbedTitledDocuments(ctx context.Context, docs []Document) ([]Embedding, error)
+}
+
 // Embedder is the S04 contract (PRD-stories-pipeline §3, story S04), used unchanged by both the
 // batch ingestion path (S06a) and the query path (S07/S08). The signature is fixed by the PRD:
 // three methods, exactly these names and types.

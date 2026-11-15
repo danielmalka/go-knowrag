@@ -31,6 +31,24 @@ const Version = schema.ChunkerVersion
 type Config struct {
 	FloorTokens   int
 	CeilingTokens int
+	// WindowTokens is the hard window a chunk must fit in: the model profile's input window minus the
+	// room its prompt prefix takes (schema.ModelProfile.WindowTokens). Zero means HardTokenLimit, the
+	// BGE-M3 window, which is what every caller that predates the model profiles gets.
+	WindowTokens int
+}
+
+// ConfigFor is a Config with the floor and ceiling given and the window taken from the model profile,
+// so a chunk that reaches the ceiling still fits once that profile's prompt prefix is added.
+func ConfigFor(p schema.ModelProfile, floor, ceiling int) Config {
+	return Config{FloorTokens: floor, CeilingTokens: ceiling, WindowTokens: p.WindowTokens()}
+}
+
+// window is WindowTokens with the zero value resolved to HardTokenLimit.
+func (c Config) window() int {
+	if c.WindowTokens > 0 {
+		return c.WindowTokens
+	}
+	return HardTokenLimit
 }
 
 // Validate rejects a config that cannot describe a legal chunk. Every rule here fails loudly at the
@@ -47,10 +65,13 @@ func (c Config) Validate() error {
 			"chunk config: FloorTokens = %d is above CeilingTokens = %d; the merge pass would have to "+
 				"cross the ceiling to reach the floor", c.FloorTokens, c.CeilingTokens)
 	}
-	if c.CeilingTokens > HardTokenLimit {
+	if c.WindowTokens < 0 {
+		return fmt.Errorf("chunk config: WindowTokens = %d, must not be negative", c.WindowTokens)
+	}
+	if c.CeilingTokens > c.window() {
 		return fmt.Errorf(
 			"chunk config: CeilingTokens = %d is above the model's %d-token window (PRD-contrato §2.3b)",
-			c.CeilingTokens, HardTokenLimit)
+			c.CeilingTokens, c.window())
 	}
 	return nil
 }

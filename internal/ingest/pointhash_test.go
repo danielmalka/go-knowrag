@@ -122,6 +122,7 @@ func TestComputePointHash_ChangesPerComponent(t *testing.T) {
 		{"embedder normalization", func(h *hashInput) { h.emb.Normalization = "none" }},
 		{"embedder pooling", func(h *hashInput) { h.emb.Pooling = "mean" }},
 		{"embedder precision", func(h *hashInput) { h.emb.Precision = "fp32" }},
+		{"embedder prompt version", func(h *hashInput) { h.emb.PromptVersion = "gemma-search-v1" }},
 		{"embedder sparse params", func(h *hashInput) {
 			h.emb.SparseParams = map[string]string{"indices": "token_id", "values": "weight"}
 		}},
@@ -214,5 +215,23 @@ func TestNewPipelineConfig_FollowsChunkerConfig(t *testing.T) {
 	}
 	if got != want {
 		t.Errorf("NewPipelineConfig(%+v) = %+v, want %+v", cfg, got, want)
+	}
+}
+
+// PR 4 of the embedding migration: the baseline (BGE-M3, no task prefix) hashes to the value it had
+// BEFORE the prompt-version field existed, so nothing already indexed is re-embedded because of it. The
+// literal below was computed on the previous commit.
+func TestComputePointHash_NoPromptVersionKeepsTheOldHash(t *testing.T) {
+	const before = "358b296630d91bf3469660a9482319afd471f186d179d81c504eada95863c829"
+	if got := baselineHashInput().hash(); got != before {
+		t.Fatalf("the baseline point_hash moved to %s (was %s): a field was added for a model that has no prompt scheme", got, before)
+	}
+}
+
+func TestComputePointHash_PromptVersionsDiffer(t *testing.T) {
+	a, b := baselineHashInput(), baselineHashInput()
+	a.emb.PromptVersion, b.emb.PromptVersion = "gemma-search-v1", "gemma-search-v2"
+	if a.hash() == b.hash() {
+		t.Fatal("two prompt schemes hash the same: changing the prefix would not re-embed anything")
 	}
 }
