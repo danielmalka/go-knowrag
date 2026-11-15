@@ -188,9 +188,11 @@ When it is time to run, `systemctl --user enable --now knowrag-embedder knowrag-
 
 ## Schedule
 
-`knowrag-ingest.timer` runs `scheduled-ingest.sh` at 03:00, 12:00 and 18:00 (kept from the previous
-design until the owner picks others; edit `OnCalendar`), `Persistent=true` so a missed run happens
-once when the machine is back. The wrapper calls `ensure-embedder.sh` (start the service if needed,
+`knowrag-ingest.timer` runs `scheduled-ingest.sh` at 09:00, 15:00 and 21:00 **Brasilia time** (the
+owner's decision of 2026-11-15). The zone is part of the `OnCalendar` expression
+(`*-*-* 09,15,21:00:00 America/Sao_Paulo`), so the times do not move with the clock of the host; check
+what it resolves to with `systemd-analyze calendar --iterations=4 '<the expression>'`.
+`Persistent=true`, so a missed run happens once when the machine is back. The wrapper calls `ensure-embedder.sh` (start the service if needed,
 check `/health` reports a CUDA device, `POST /load` and wait for it) and then
 `knowrag ingest --vault both`. Nothing is stopped afterwards: the idle unload returns the VRAM.
 

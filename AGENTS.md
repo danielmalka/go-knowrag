@@ -91,7 +91,7 @@ Substitui a de 2026-08-16 ("não é 24 h", janela 07:00–23:00) e a do item 10 
   na primeira chamada que precisa dele e é **descarregado** (referência solta, `gc`, `empty_cache`) depois de
   `KNOWRAG_EMBEDDER_IDLE_UNLOAD` segundos sem chamada (padrão 600; 0 = nunca). A primeira busca depois de uma
   pausa paga a carga, então o timeout do cliente MCP tem de ficar acima dela.
-- **Ingestão em horário fixo** (`knowrag-ingest.timer`), sem janela de ligar/desligar o embedder e sem
+- **Ingestão em horário fixo** (`knowrag-ingest.timer`, 09:00, 15:00 e 21:00 de Brasília; ver "Religar" abaixo), sem janela de ligar/desligar o embedder e sem
   `embedder-up`/`embedder-down`. O serviço roda uma chamada de cada vez (a busca passa à frente dos lotes).
 - **Só loopback, por desenho.** O serviço não tem autenticação; por isso `--host`/`KNOWRAG_EMBEDDER_HOST` só
   aceita `127.0.0.1`, `::1` ou `localhost` (este vira o literal `127.0.0.1` antes do bind, para o sistema nunca
@@ -328,6 +328,21 @@ escolha de embedding ficam em seção própria.
 - **O volume do Qdrant na VPS é mantido** até essa mesma decisão. Não o apague nem o recrie antes dela.
 - **O dossiê de código fica fora do git**, em `docs/dossier/` local, como o resto de `docs/` (D-14, ver
   acima). Não o versione nem copie trecho dele para arquivo rastreado.
+
+## Religar: horário, Qdrant e vault — decisões do dono de 2026-11-15 (2ª rodada)
+
+Valem para quando o projeto for religado; o projeto continua desligado e nada disto foi instalado.
+
+1. **A ingestão agendada roda às 09:00, 15:00 e 21:00, no horário de Brasília.** O fuso está na expressão do
+   timer (`OnCalendar=*-*-* 09,15,21:00:00 America/Sao_Paulo`) e não no relógio da máquina, que numa VPS ou num
+   contêiner costuma ser UTC e dispararia 3 h antes. Substitui os horários 03:00/12:00/18:00 herdados do
+   desenho anterior. Conferir com `systemd-analyze calendar --iterations=4 '<expressão>'`.
+2. **O Qdrant de produção volta a ser o da VPS**, como antes de desligar (o volume foi mantido). A rede
+   continua sendo a privada; a decisão de rede de 2026-08 não muda.
+3. **O vault do projeto passa a ser o arquivo privado do dono no Cosmos.** Nenhum caminho dele entra em arquivo
+   rastreado: aqui ele é "o vault do dono". Trocar o vault de referência da avaliação (a cópia usada na prova e
+   no golden set) por ele **depende de uma curadoria em andamento**; a virada operacional espera essa
+   curadoria (cartão 188), e o golden set é refeito quando o vault mudar.
 
 ## Escolha do modelo de embedding — decisões de 2026-11-15
 
