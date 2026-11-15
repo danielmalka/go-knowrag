@@ -2,6 +2,7 @@ package schema
 
 import (
 	"fmt"
+	"maps"
 	"regexp"
 	"slices"
 )
@@ -30,8 +31,24 @@ type ModelProfile struct {
 	// DenseDim is the dense output width. uint64 because that is the width the Qdrant wire type
 	// wants; converting at each call site would only move the conversion somewhere less visible.
 	DenseDim uint64
-	// Precision is the dtype the loaded weights must report in the handshake ("fp16", "bf16", "fp32").
-	Precision string
+	// Precisions are the dtypes the loaded weights may report in the handshake, in preference order
+	// (the first is PrimaryPrecision). A model with one safe dtype lists one; EmbeddingGemma lists
+	// bf16 (GPU) and fp32 (CPU) and does NOT list fp16, so a backend that loads it in fp16 fails the
+	// handshake: its activations overflow fp16 and it returns NaN or silently degraded vectors.
+	Precisions []string
+	// Pooling and Normalization are the pooling mode and the vector normalization the model card
+	// fixes ("cls"/"mean", "l2"); the handshake confirms the backend reports exactly these.
+	Pooling       string
+	Normalization string
+	// SparseParams are the parameters of the model's sparse (lexical) head. Nil or empty means the
+	// profile is DENSE-ONLY: no sparse vector exists, the backend must report none, and an
+	// embedding that carries one is rejected.
+	SparseParams map[string]string
+	// PromptVersion names the task-prefix scheme the backend applies to a query and to a document
+	// ("" = the model uses no prefix). The service applies the prefix, not this client; the handshake
+	// confirms the scheme so a service that forgot or changed it fails loudly instead of embedding
+	// queries and documents into subtly different spaces.
+	PromptVersion string
 	// Collections are the Qdrant collection names that hold this profile's vectors, in provisioning
 	// order. They are deliberately identical in shape (design brief §2.1).
 	Collections []string
@@ -40,6 +57,16 @@ type ModelProfile struct {
 // DefaultProfileID is the profile every entry point uses until a later PR of the migration selects
 // another one.
 const DefaultProfileID = "bge-m3"
+
+// Precision spellings used across the build (the wire dtype names are translated to these at
+// internal/embed/http.go).
+const (
+	PrecisionFP16 = "fp16"
+	PrecisionBF16 = "bf16"
+	PrecisionFP32 = "fp32"
+)
+
+var knownPrecisions = []string{PrecisionFP16, PrecisionBF16, PrecisionFP32}
 
 var (
 	revisionPattern   = regexp.MustCompile(`^[0-9a-f]{40}$`)
@@ -55,13 +82,39 @@ var profiles = []ModelProfile{
 		Model: "BAAI/bge-m3",
 		// Confirmed 2026-08-08: HEAD of BAAI/bge-m3 on Hugging Face; the weights repo had no new
 		// commit in about two years. Moved here from the former schema.DefaultProfile().Revision constant.
-		Revision:  "5617a9f61b028005a4858fdac845db406aefb181",
-		DenseDim:  1024,
-		Precision: "fp16", // measured on the loaded weights (ADR-001 §6.2, round 2)
+		Revision:   "5617a9f61b028005a4858fdac845db406aefb181",
+		DenseDim:   1024,
+		Precisions: []string{PrecisionFP16}, // measured on the loaded weights (ADR-001 §6.2, round 2)
+		// Model card + the pinned revision's own files (ADR-001 §6.2): CLS pooling, an L2 normalize
+		// module, and the lexical_weights sparse head whose indices are tokenizer vocabulary ids.
+		Pooling:       "cls",
+		Normalization: "l2",
+		SparseParams:  map[string]string{"kind": "lexical_weights", "id_space": "tokenizer_vocab"},
+		PromptVersion: "", // BGE-M3 takes no task prefix
 		// interno: the operator's own vaults, the only collection populated in this build. clientes
 		// and base_paga are provisioned empty so nothing ever grows a special case for the one that
 		// has data in it.
 		Collections: []string{"interno", "clientes", "base_paga"},
+	},
+	{
+		ID:    "embeddinggemma-2",
+		Model: "google/embeddinggemma-2",
+		// Head of google/embeddinggemma-2 on Hugging Face as read on 2026-11-15 (last commit
+		// 2026-10-28, before the trial). The trial itself did not pin a revision; this is the
+		// reviewable pin the migration PRs use, and it is re-confirmed when the service is built.
+		Revision:   "f9972ac22e696a105c482202646979e33e4b5a1e",
+		DenseDim:   768,
+		Precisions: []string{PrecisionBF16, PrecisionFP32}, // NEVER fp16: model card, "Do not use float16"
+		// Model card: mean pooling, an L2 Normalize module, text-only dense 768d, no sparse head.
+		Pooling:       "mean",
+		Normalization: "l2",
+		SparseParams:  nil,
+		// Query: "task: search result | query: " + text. Document: "title: " + (title or "none") +
+		// " | text: " + text. Applied by the embedding service (model card, prompts).
+		PromptVersion: "gemma-search-v1",
+		// A new collection beside the old one (migration plan, "Reindexação e virada"); the names are
+		// still literals here and are revisited by the PR that switches the default.
+		Collections: []string{"interno_eg2", "clientes_eg2", "base_paga_eg2"},
 	},
 }
 
@@ -105,8 +158,26 @@ func (p ModelProfile) DenseWidth() int {
 	return int(p.DenseDim) // #nosec G115 -- bounded by Validate (DenseDim <= maxDenseDim)
 }
 
+// PrimaryPrecision is the first (preferred) allowed precision, or "" for a profile with none.
+func (p ModelProfile) PrimaryPrecision() string {
+	if len(p.Precisions) == 0 {
+		return ""
+	}
+	return p.Precisions[0]
+}
+
+// AllowsPrecision reports whether the backend may report this dtype for the profile.
+func (p ModelProfile) AllowsPrecision(precision string) bool {
+	return slices.Contains(p.Precisions, precision)
+}
+
+// HasSparse reports whether the profile carries a sparse vector. False is a dense-only profile.
+func (p ModelProfile) HasSparse() bool { return len(p.SparseParams) > 0 }
+
 func (p ModelProfile) clone() ModelProfile {
 	p.Collections = slices.Clone(p.Collections)
+	p.Precisions = slices.Clone(p.Precisions)
+	p.SparseParams = maps.Clone(p.SparseParams)
 	return p
 }
 
@@ -125,8 +196,14 @@ func (p ModelProfile) Validate() error {
 	if p.DenseDim == 0 || p.DenseDim > maxDenseDim {
 		return fmt.Errorf("model profile %q: DenseDim %d is outside 1..%d", p.ID, p.DenseDim, maxDenseDim)
 	}
-	if p.Precision == "" {
-		return fmt.Errorf("model profile %q: Precision is empty", p.ID)
+	if err := p.validatePrecisions(); err != nil {
+		return err
+	}
+	if p.Pooling == "" || p.Normalization == "" {
+		return fmt.Errorf("model profile %q: Pooling %q and Normalization %q must both be set", p.ID, p.Pooling, p.Normalization)
+	}
+	if p.PromptVersion != "" && !profileIDPattern.MatchString(p.PromptVersion) {
+		return fmt.Errorf("model profile %q: PromptVersion %q is not a lower-case identifier", p.ID, p.PromptVersion)
 	}
 	if len(p.Collections) == 0 {
 		return fmt.Errorf("model profile %q: no collections", p.ID)
@@ -140,6 +217,23 @@ func (p ModelProfile) Validate() error {
 			return fmt.Errorf("model profile %q: collection %q is listed twice", p.ID, c)
 		}
 		seen[c] = true
+	}
+	return nil
+}
+
+func (p ModelProfile) validatePrecisions() error {
+	if len(p.Precisions) == 0 {
+		return fmt.Errorf("model profile %q: Precisions is empty", p.ID)
+	}
+	seen := map[string]bool{}
+	for _, pr := range p.Precisions {
+		if !slices.Contains(knownPrecisions, pr) {
+			return fmt.Errorf("model profile %q: precision %q is not one of %v", p.ID, pr, knownPrecisions)
+		}
+		if seen[pr] {
+			return fmt.Errorf("model profile %q: precision %q is listed twice", p.ID, pr)
+		}
+		seen[pr] = true
 	}
 	return nil
 }

@@ -293,7 +293,7 @@ func (e *ServiceEmbedder) embedSubBatch(ctx context.Context, texts []string, dst
 	// unchanged and is the reason that matters: sorting would silently absorb the day the server
 	// stops holding up its end, and that is the one thing that must not happen quietly.
 	for i, item := range raw {
-		if err := validateEmbedding(item, e.model.DenseWidth()); err != nil {
+		if err := validateEmbedding(item, e.model); err != nil {
 			return &ItemError{Index: offset + i, Err: err}
 		}
 		dst[i] = item

@@ -86,14 +86,21 @@ func (t *HTTPTransport) Embed(ctx context.Context, texts []string, kind Kind) ([
 	if err := t.do(ctx, http.MethodPost, "/embed", body, &resp); err != nil {
 		return nil, err
 	}
-	if len(resp.Dense) != len(resp.Sparse) {
+	// An absent or empty `sparse` array is a dense-only response (EmbeddingGemma); whether that is
+	// acceptable is the model profile's call (validateEmbedding), not the wire's. A non-empty array
+	// that does not line up with the dense one is a response-shape defect on any profile.
+	if len(resp.Sparse) != 0 && len(resp.Dense) != len(resp.Sparse) {
 		return nil, fmt.Errorf(
-			"embed: response has %d dense vectors but %d sparse ones; BGE-M3 produces both in one "+
+			"embed: response has %d dense vectors but %d sparse ones; a model that produces both does so in one "+
 				"pass, so they cannot legitimately differ", len(resp.Dense), len(resp.Sparse))
 	}
 
 	out := make([]Embedding, len(resp.Dense))
 	for i := range resp.Dense {
+		if len(resp.Sparse) == 0 {
+			out[i] = Embedding{Dense: resp.Dense[i]}
+			continue
+		}
 		s := resp.Sparse[i]
 		// Checked here rather than left to validateEmbedding because a length mismatch is a
 		// response-shape defect: the pair never described a vector, so there is nothing to validate.
@@ -118,6 +125,9 @@ type handshakeResponse struct {
 	Pooling           string            `json:"pooling"`
 	Precision         string            `json:"precision"`
 	Sparse            map[string]string `json:"sparse"`
+	// PromptVersion is the task-prefix scheme the service applies to a query and to a document.
+	// Absent means the model takes no prefix (BGE-M3); the profile decides whether that is right.
+	PromptVersion string `json:"prompt_version"`
 }
 
 // dtypeNames maps torch's dtype spelling to the spelling this codebase hashes, and **this map is
@@ -167,6 +177,7 @@ func (t *HTTPTransport) Info(ctx context.Context) (BackendHandshakeInfo, error) 
 		Pooling:           resp.Pooling,
 		Precision:         precision,
 		SparseParams:      resp.Sparse,
+		PromptVersion:     resp.PromptVersion,
 	}, nil
 }
 

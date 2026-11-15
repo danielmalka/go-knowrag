@@ -256,7 +256,7 @@ func writeHandshake(t *testing.T, w http.ResponseWriter) {
 		"model_revision":     expected.ModelRevision,
 		"tokenizer_revision": expected.TokenizerRevision,
 		"dense_dim":          expected.Dim,
-		"normalized":         expected.Normalization == embed.ExpectedNormalization,
+		"normalized":         expected.Normalization == "l2",
 		"pooling":            expected.Pooling,
 		"precision":          expected.Precision,
 		"sparse":             expected.SparseParams,

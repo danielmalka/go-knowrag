@@ -11,47 +11,30 @@ import (
 	"github.com/danielmalka/go-knowrag/internal/schema"
 )
 
-// The pinned values of the "config efetiva do embedder". Each cites where its pin comes from,
-// because ADR-001 §4's whole point is that these are properties of the MODEL, established from the
-// model card and the pinned repository — not settings someone picked.
-//
-// ExpectedNormalization and ExpectedPooling come from the BGE-M3 model card and were re-confirmed
-// against the pinned revision's own files (ADR-001 §6.2: 1_Pooling/config.json has
-// pooling_mode_cls_token: true; modules.json declares a 2_Normalize module). The precision pin was
-// the last field left open and closed on 2026-08-09 by measurement, not by choice: the loaded
-// weights report torch.float16 (ADR-001 §6.2, round 2); that value now lives in the model profile
-// (schema.ModelProfile.Precision), together with the revision and the width. It is one value, for one runtime — the
-// earlier "may differ between the query host and the batch host" reading died with the single-host
-// topology of ADR-001 §7.1.
-const (
-	ExpectedNormalization = "l2"
-	ExpectedPooling       = "cls"
-)
-
-// ExpectedSparseParams pins the sparse-generation parameters, verified against the running service
-// on 2026-08-09. `kind` says the weights are BGE-M3's lexical_weights head (not SPLADE, not a
-// bag-of-words fallback) and `id_space` says the indices are tokenizer vocabulary ids, which is
-// what makes them comparable to a query embedded later. Both feed point_hash, so a backend that
-// changed either would be writing into a different lexical space with no other symptom than
-// falling recall.
-func ExpectedSparseParams() map[string]string {
-	return map[string]string{"kind": "lexical_weights", "id_space": "tokenizer_vocab"}
-}
+// The pins of the "config efetiva do embedder" are properties of the MODEL, established from the model
+// card and the pinned repository — not settings someone picked (ADR-001 §4) — and they live in the
+// model profile (schema.ModelProfile): revision, dense width, allowed precisions, pooling,
+// normalization, sparse parameters (none for a dense-only model) and the task-prefix scheme. This
+// file only compares a backend's report against them.
 
 // ErrHandshake marks any failure to confirm the backend's effective config. A caller that cannot
 // distinguish "the service is down" from "the service is serving a different model" would treat
 // both as retryable; only one of them is.
 var ErrHandshake = errors.New("embedder handshake failed")
 
-// BackendHandshakeInfo is what the service reports about the config it actually loaded: the seven
-// fields PRD-contrato §2.4 enumerates — ModelRevision, TokenizerRevision, Dim, Normalization,
-// Pooling, Precision, SparseParams — and no others. The list is closed, not "etc.": every one of
-// them feeds S06a's point_hash, so a field nobody confirms is a field of the hash that is declared
-// rather than verified.
+// BackendHandshakeInfo is what the service reports about the config it actually loaded: the fields
+// PRD-contrato §2.4 enumerates — ModelRevision, TokenizerRevision, Dim, Normalization, Pooling,
+// Precision, SparseParams — plus PromptVersion, the task-prefix scheme the service applies (added
+// with the dense-only EmbeddingGemma profile, where forgetting a prefix is the failure that matters).
+// The list is closed, not "etc.": every one of them is confirmed against the model profile, so a field
+// nobody confirms is a field declared rather than verified.
 //
 // A field the backend does not report must arrive at its zero value. Handshake reads a zero value
 // as "not reported" and fails on it; that is the fail-closed policy of ADR-001 §4, and it is why
-// this struct has no "unknown" or "optional" representation to hide behind.
+// this struct has no "unknown" or "optional" representation to hide behind. The two profile-driven
+// exceptions are explicit and symmetric: a dense-only profile expects NO SparseParams and a model
+// with no task prefix expects NO PromptVersion, and in both cases the backend reporting one is the
+// divergence.
 type BackendHandshakeInfo struct {
 	ModelRevision     string
 	TokenizerRevision string
@@ -60,38 +43,39 @@ type BackendHandshakeInfo struct {
 	Pooling           string
 	Precision         string
 	SparseParams      map[string]string
+	PromptVersion     string
 }
 
-// Expected returns this build's pinned expectations for all seven fields. All seven are pinned:
-// ADR-001 §7.2 closed on 2026-08-09 and SparseParams, the last one open, was read off the chosen
-// service rather than guessed.
+// Expected returns the pins of the default model profile.
+func Expected() BackendHandshakeInfo { return ExpectedFor(schema.DefaultProfile()) }
+
+// ExpectedFor returns the pins for one model profile. Precision is the profile's PRIMARY precision,
+// for display and for fixtures: validation accepts any of the profile's allowed precisions
+// (validateAgainstProfile), which is why a CPU host reporting fp32 and a GPU host reporting bf16 both
+// pass for EmbeddingGemma while fp16 never does.
 //
 // It returns a fresh value each call: SparseParams is a map, and a shared one lets any caller
 // rewrite the pins for the whole process.
-func Expected() BackendHandshakeInfo { return ExpectedFor(schema.DefaultProfile()) }
-
-// ExpectedFor returns the pins for one model profile: revision (model and tokenizer), width and
-// precision come from the profile; normalization, pooling and the sparse parameters are still
-// BGE-M3's and are changed by the PRs that introduce another model.
 func ExpectedFor(p schema.ModelProfile) BackendHandshakeInfo {
 	return BackendHandshakeInfo{
-		// The tokenizer ships inside BAAI/bge-m3 at the same commit as the weights, so "the
-		// tokenizer revision matching the model revision" (PRD-contrato §2.3b, ADR-001 §4 row 2) is
-		// that same commit. If a future runtime sources the tokenizer from a separate repository,
-		// this stops being true and the pin needs its own constant in internal/schema.
+		// The tokenizer ships inside the model repository at the same commit as the weights, so
+		// "the tokenizer revision matching the model revision" (PRD-contrato §2.3b, ADR-001 §4 row 2)
+		// is that same commit. If a future runtime sources the tokenizer from a separate repository,
+		// this stops being true and the profile needs its own field.
 		ModelRevision:     p.Revision,
 		TokenizerRevision: p.Revision,
 		Dim:               p.DenseWidth(),
-		Normalization:     ExpectedNormalization,
-		Pooling:           ExpectedPooling,
-		Precision:         p.Precision,
-		SparseParams:      ExpectedSparseParams(),
+		Normalization:     p.Normalization,
+		Pooling:           p.Pooling,
+		Precision:         p.PrimaryPrecision(),
+		SparseParams:      maps.Clone(p.SparseParams),
+		PromptVersion:     p.PromptVersion,
 	}
 }
 
-// Handshake asks the backend what it actually loaded and fails unless all seven fields of the
+// Handshake asks the backend what it actually loaded and fails unless every field of the
 // "config efetiva do embedder" (PRD-contrato §2.4) — ModelRevision, TokenizerRevision, Dim,
-// Normalization, Pooling, Precision, SparseParams — match their pins. It fails, naming the field,
+// Normalization, Pooling, Precision, SparseParams, PromptVersion — match the embedder's model profile. It fails, naming the field,
 // when the backend does not report it, when this build has no pin for it, and when the two differ.
 //
 // It should be called once, before the first EmbedDocuments/EmbedQuery, by whatever process
@@ -139,7 +123,7 @@ func (e *ServiceEmbedder) Handshake(ctx context.Context) (BackendHandshakeInfo, 
 			"%w: could not read the backend's effective config from %s: %w",
 			ErrBackend, e.profile.Endpoint, err)
 	}
-	if err := validateHandshake(info, e.expected); err != nil {
+	if err := validateAgainstProfile(info, e.model); err != nil {
 		return BackendHandshakeInfo{}, err
 	}
 	// The latch, set only here: this is the one place in the package that has actually compared a
@@ -149,9 +133,31 @@ func (e *ServiceEmbedder) Handshake(ctx context.Context) (BackendHandshakeInfo, 
 	return info, nil
 }
 
+// validateAgainstProfile is the policy for one model profile: the single-valued pins are compared
+// as before (validateHandshake); Precision is checked against the profile's ALLOWED set; and a
+// dense-only profile or a prefix-less model is handled by the symmetric rules documented on
+// BackendHandshakeInfo. It is separate from Handshake so the policy is provable without a backend.
+func validateAgainstProfile(got BackendHandshakeInfo, m schema.ModelProfile) error {
+	want := ExpectedFor(m)
+	// An unreported Precision is left to validateHandshake so it is named in field order, like every
+	// other missing field; only a REPORTED dtype is checked against the allowed set here.
+	if got.Precision != "" && !m.AllowsPrecision(got.Precision) {
+		hint := ""
+		if got.Precision == schema.PrecisionFP16 {
+			hint = "; fp16 is refused because this model's activations overflow it, returning NaN or silently degraded vectors"
+		}
+		return fmt.Errorf("%w: Precision: backend reports %q, which profile %q does not allow (allowed: %v)%s",
+			ErrHandshake, got.Precision, m.ID, m.Precisions, hint)
+	}
+	if got.Precision != "" {
+		want.Precision = got.Precision // any allowed dtype is the pin; the check above is the real one
+	}
+	return validateHandshake(got, want)
+}
+
 // validateHandshake compares one report against one set of pins. It is separate from Handshake so
-// the seven-field policy is provable without a backend, and so the pins are a parameter rather than
-// a package-level variable any caller could reassign.
+// the policy is provable without a backend, and so the pins are a parameter rather than a
+// package-level variable any caller could reassign.
 func validateHandshake(got, want BackendHandshakeInfo) error {
 	checks := []struct {
 		field string
@@ -170,7 +176,28 @@ func validateHandshake(got, want BackendHandshakeInfo) error {
 			return err
 		}
 	}
+	if err := comparePromptVersion(got.PromptVersion, want.PromptVersion); err != nil {
+		return err
+	}
 	return compareSparseParams(got.SparseParams, want.SparseParams)
+}
+
+// comparePromptVersion is the one field where "" is a legal pin: a model with no task prefix pins
+// "" and must hear "" back. Any other disagreement — a prefix scheme the service did not report, one
+// it reports when the model takes none, or a different one — means queries and documents are being
+// embedded under a scheme this build did not review.
+func comparePromptVersion(got, want string) error {
+	if got == want {
+		return nil
+	}
+	switch {
+	case got == "":
+		return fmt.Errorf("%w: the backend did not report PromptVersion; this profile pins task-prefix scheme %q and an unreported one is a divergence (ADR-001 §4)", ErrHandshake, want)
+	case want == "":
+		return fmt.Errorf("%w: PromptVersion: the backend applies task-prefix scheme %q, but this profile takes no prefix", ErrHandshake, got)
+	default:
+		return fmt.Errorf("%w: PromptVersion: backend reports %q, pinned value is %q", ErrHandshake, got, want)
+	}
 }
 
 // intField renders an int field as a string so the seven checks share one comparison, and renders
@@ -205,15 +232,18 @@ func compareField(field, got, want string) error {
 // compareSparseParams is the one field that is a map, so it names the specific differing key: a
 // caller told only that "SparseParams differs" has to diff two maps by hand.
 func compareSparseParams(got, want map[string]string) error {
+	if len(want) == 0 && len(got) == 0 {
+		return nil // dense-only profile, dense-only backend
+	}
+	if len(want) == 0 {
+		return fmt.Errorf(
+			"%w: SparseParams is not pinned for this profile (it is dense-only), and the backend reports %s; "+
+				"a backend that carries a sparse head is serving a different model", ErrHandshake, renderParams(got))
+	}
 	if len(got) == 0 {
 		return fmt.Errorf(
 			"%w: the backend did not report SparseParams; without it the sparse half of every "+
 				"vector is generated by parameters nobody confirmed (ADR-001 §4)", ErrHandshake)
-	}
-	if len(want) == 0 {
-		return fmt.Errorf(
-			"%w: SparseParams is not pinned in this build, and the backend reports %s; an absent pin "+
-				"fails closed (ADR-001 §4)", ErrHandshake, renderParams(got))
 	}
 	if maps.Equal(got, want) {
 		return nil

@@ -253,9 +253,9 @@ func writeHandshake() embed.BackendHandshakeInfo {
 		ModelRevision:     schema.DefaultProfile().Revision,
 		TokenizerRevision: schema.DefaultProfile().Revision,
 		Dim:               embed.DefaultDenseDim(),
-		Normalization:     embed.ExpectedNormalization,
-		Pooling:           embed.ExpectedPooling,
-		Precision:         schema.DefaultProfile().Precision,
+		Normalization:     schema.DefaultProfile().Normalization,
+		Pooling:           schema.DefaultProfile().Pooling,
+		Precision:         schema.DefaultProfile().PrimaryPrecision(),
 		SparseParams:      map[string]string{"indices": "token_id", "values": "lexical_weight"},
 	}
 }

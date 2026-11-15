@@ -332,3 +332,54 @@ func embedBody(n int) string {
 	b.WriteString("]}")
 	return b.String()
 }
+
+// A dense-only backend (EmbeddingGemma) answers /handshake with a prompt_version and no sparse block,
+// and /embed with no `sparse` array. Both decode, and the decoded report passes the profile's pins.
+func TestHTTPTransport_DenseOnlyBackend_DecodesAndPassesTheProfile(t *testing.T) {
+	m, ok := schema.ProfileByID("embeddinggemma-2")
+	if !ok {
+		t.Fatal("embeddinggemma-2 not registered")
+	}
+	tr := newTestTransport(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/handshake":
+			_, _ = io.WriteString(w, `{"model_revision":"`+m.Revision+`","tokenizer_revision":"`+m.Revision+
+				`","dense_dim":768,"normalized":true,"pooling":"mean","precision":"bfloat16","prompt_version":"`+m.PromptVersion+`"}`)
+		case "/embed":
+			_, _ = io.WriteString(w, `{"dense":[[1,0],[0,1]],"tokens":[3,4]}`)
+		}
+	})
+
+	info, err := tr.Info(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.PromptVersion != m.PromptVersion || info.Precision != "bf16" || len(info.SparseParams) != 0 {
+		t.Fatalf("Info() = %+v", info)
+	}
+	if err := validateAgainstProfile(info, m); err != nil {
+		t.Errorf("the dense-only backend's own handshake fails the profile: %v", err)
+	}
+	// The same body is NOT a BGE-M3 backend: the default profile must refuse it.
+	if err := validateAgainstProfile(info, schema.DefaultProfile()); err == nil {
+		t.Error("an EmbeddingGemma handshake was accepted by the BGE-M3 profile")
+	}
+
+	got, err := tr.Embed(context.Background(), []string{"a", "b"}, KindPassage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || len(got[0].Sparse.Indices) != 0 || len(got[1].Dense) != 2 {
+		t.Fatalf("Embed() = %+v", got)
+	}
+}
+
+// A sparse array that does not line up with the dense one is still a response-shape defect.
+func TestHTTPTransport_Embed_SparseCountMismatchStillFails(t *testing.T) {
+	tr := newTestTransport(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"dense":[[1],[2]],"sparse":[{"indices":[1],"values":[0.5]}]}`)
+	})
+	if _, err := tr.Embed(context.Background(), []string{"a", "b"}, KindPassage); err == nil {
+		t.Fatal("2 dense vectors against 1 sparse one was accepted")
+	}
+}

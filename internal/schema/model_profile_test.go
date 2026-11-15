@@ -20,8 +20,14 @@ func TestDefaultProfile_IsBGEM3AsBefore(t *testing.T) {
 	if p.DenseDim != 1024 {
 		t.Errorf("DenseDim = %d, want 1024", p.DenseDim)
 	}
-	if p.Precision != "fp16" {
-		t.Errorf("Precision = %q, want fp16", p.Precision)
+	if !slices.Equal(p.Precisions, []string{"fp16"}) || p.PrimaryPrecision() != "fp16" {
+		t.Errorf("Precisions = %v, want [fp16]", p.Precisions)
+	}
+	if p.Pooling != "cls" || p.Normalization != "l2" || p.PromptVersion != "" {
+		t.Errorf("Pooling/Normalization/PromptVersion = %q/%q/%q, want cls/l2/none", p.Pooling, p.Normalization, p.PromptVersion)
+	}
+	if !p.HasSparse() || p.SparseParams["kind"] != "lexical_weights" || p.SparseParams["id_space"] != "tokenizer_vocab" {
+		t.Errorf("SparseParams = %v, want the BGE-M3 lexical_weights head", p.SparseParams)
 	}
 	if want := []string{"interno", "clientes", "base_paga"}; !slices.Equal(p.Collections, want) {
 		t.Errorf("Collections = %v, want %v", p.Collections, want)
@@ -81,7 +87,12 @@ func TestModelProfile_Validate_RejectsHalfBuiltProfiles(t *testing.T) {
 		"non-hex revision":     func(p *ModelProfile) { p.Revision = strings.Repeat("z", 40) },
 		"zero dimension":       func(p *ModelProfile) { p.DenseDim = 0 },
 		"absurd dimension":     func(p *ModelProfile) { p.DenseDim = 1 << 40 },
-		"empty precision":      func(p *ModelProfile) { p.Precision = "" },
+		"no precision":         func(p *ModelProfile) { p.Precisions = nil },
+		"unknown precision":    func(p *ModelProfile) { p.Precisions = []string{"int8"} },
+		"duplicate precision":  func(p *ModelProfile) { p.Precisions = []string{"fp16", "fp16"} },
+		"no pooling":           func(p *ModelProfile) { p.Pooling = "" },
+		"no normalization":     func(p *ModelProfile) { p.Normalization = "" },
+		"bad prompt version":   func(p *ModelProfile) { p.PromptVersion = "Has Space" },
 		"no collections":       func(p *ModelProfile) { p.Collections = nil },
 		"duplicate collection": func(p *ModelProfile) { p.Collections = []string{"a", "a"} },
 		"bad collection name":  func(p *ModelProfile) { p.Collections = []string{"Has Space"} },
@@ -107,7 +118,7 @@ func TestModelProfile_Validate_RejectsHalfBuiltProfiles(t *testing.T) {
 func TestManifestFor_FollowsTheProfile(t *testing.T) {
 	p := ModelProfile{
 		ID: "other", Model: "org/other", Revision: strings.Repeat("a", 40),
-		DenseDim: 768, Precision: "bf16", Collections: []string{"nova"},
+		DenseDim: 768, Precisions: []string{"bf16"}, Pooling: "mean", Normalization: "l2", Collections: []string{"nova"},
 	}
 	m := ManifestFor(p)
 	if len(m) != 1 || m[0].Name != "nova" || m[0].DenseDim != 768 || m[0].ModelRevision != p.Revision {
@@ -117,5 +128,53 @@ func TestManifestFor_FollowsTheProfile(t *testing.T) {
 	def := Manifest()
 	if len(def) != 3 || def[0].DenseDim != 1024 {
 		t.Fatalf("Manifest() changed: %+v", def)
+	}
+}
+
+// EmbeddingGemma 2 is registered but is NOT the default: the switch is a later PR. Its pins are
+// spelled out in literals from the model card, and the one that matters most is what it refuses.
+func TestEmbeddingGemmaProfile_PinsFromTheModelCard(t *testing.T) {
+	p, ok := ProfileByID("embeddinggemma-2")
+	if !ok {
+		t.Fatal("the embeddinggemma-2 profile is not registered")
+	}
+	if p.ID == DefaultProfileID {
+		t.Fatal("EmbeddingGemma must not be the default yet")
+	}
+	if err := p.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if p.Model != "google/embeddinggemma-2" || p.DenseDim != 768 || p.Pooling != "mean" || p.Normalization != "l2" {
+		t.Errorf("model/dim/pooling/normalization = %q/%d/%q/%q", p.Model, p.DenseDim, p.Pooling, p.Normalization)
+	}
+	if p.HasSparse() {
+		t.Errorf("EmbeddingGemma is dense-only, got SparseParams %v", p.SparseParams)
+	}
+	if !p.AllowsPrecision("bf16") || !p.AllowsPrecision("fp32") {
+		t.Errorf("bf16 (GPU) and fp32 (CPU) must be allowed: %v", p.Precisions)
+	}
+	if p.AllowsPrecision("fp16") {
+		t.Fatal("fp16 must be refused: EmbeddingGemma returns NaN or silently degraded vectors in fp16")
+	}
+	if p.PromptVersion == "" {
+		t.Error("EmbeddingGemma needs a task-prefix scheme in the handshake")
+	}
+	m := ManifestFor(p)
+	if len(m) != len(p.Collections) || m[0].DenseDim != 768 || m[0].ModelRevision != p.Revision {
+		t.Fatalf("ManifestFor(EG2) = %+v", m)
+	}
+	for _, c := range m {
+		for _, old := range DefaultProfile().Collections {
+			if c.Name == old {
+				t.Errorf("the new collection %q collides with the BGE-M3 one", c.Name)
+			}
+		}
+	}
+}
+
+func TestProfile_AllowsPrecision(t *testing.T) {
+	bge := DefaultProfile()
+	if !bge.AllowsPrecision("fp16") || bge.AllowsPrecision("bf16") {
+		t.Errorf("BGE-M3 allows only fp16, got %v", bge.Precisions)
 	}
 }
