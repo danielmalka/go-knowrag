@@ -186,7 +186,13 @@ O modelo de embedding é fixado por revisão imutável, e a revisão é **confir
 declarada pelo cliente. Um serviço rodando o modelo errado precisa falhar de imediato, em vez de
 degradar a qualidade da busca em silêncio por semanas.
 
-Isso está implementado e rodando. Os sete campos da config efetiva têm valor pinado
+> **Estado do projeto: desligado desde 2026-08-21, por decisão do dono.** O código está completo e
+> testado, mas nada roda em produção: os timers, o embedder e o servidor MCP estão parados e o
+> Qdrant da VPS está derrubado (o volume foi mantido). Não é avaria. Detalhes e o que fazer para
+> religar estão em `AGENTS.md`.
+
+Isso está **implementado** (o código existe e a suíte o cobre; ver o aviso acima sobre o estado
+desligado). Os sete campos da config efetiva têm valor pinado
 (`internal/embed/handshake.go`) — revisão do modelo, revisão do tokenizer, dimensão, normalização,
 pooling, precisão e os parâmetros esparsos — e a ingestão aborta nomeando o campo que divergir. A
 forma de servir o modelo também foi decidida e medida: sidecar HTTP, um runtime só, no host de
