@@ -12,7 +12,7 @@ Não é "aponte para qualquer pasta e funciona": os enums de frontmatter (`type`
 `visibility`) são fechados no contrato, e pasta de primeiro nível fora da lista de áreas configurada
 é erro explícito, não `area` vazia. Um fork aponta para suas próprias pastas e declara seus próprios
 vaults e áreas em configuração, sem editar Go — mas os **nomes das coleções** ainda não: eles são
-literais compilados em `internal/schema/manifest.go`, e trocá-los é editar Go.
+literais compilados no perfil de modelo (`internal/schema/model_profile.go`), e trocá-los é editar Go.
 
 > **Status: pipeline funcionando ponta a ponta, com os dois gates de performance passando.**
 > Ingestão, busca híbrida, CLI de operador e o servidor MCP estão implementados e rodando contra um
@@ -192,9 +192,12 @@ degradar a qualidade da busca em silêncio por semanas.
 > religar estão em `AGENTS.md`.
 
 Isso está **implementado** (o código existe e a suíte o cobre; ver o aviso acima sobre o estado
-desligado). Os sete campos da config efetiva têm valor pinado
-(`internal/embed/handshake.go`) — revisão do modelo, revisão do tokenizer, dimensão, normalização,
-pooling, precisão e os parâmetros esparsos — e a ingestão aborta nomeando o campo que divergir. A
+desligado). Os campos da config efetiva têm valor pinado no **perfil de modelo**
+(`internal/schema/model_profile.go`) e são conferidos em `internal/embed/handshake.go` — revisão do
+modelo, revisão do tokenizer, dimensão, normalização, pooling, precisão (uma lista de dtypes
+permitidos; o EmbeddingGemma 2 recusa fp16), parâmetros esparsos (nenhum num perfil só denso) e o
+esquema de prefixos de tarefa — e a ingestão aborta nomeando o campo que divergir. O perfil padrão
+continua sendo o do BGE-M3; o do EmbeddingGemma 2 está registrado mas não é o padrão. A
 forma de servir o modelo também foi decidida e medida: sidecar HTTP, um runtime só, no host de
 ingestão.
 

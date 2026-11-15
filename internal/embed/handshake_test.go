@@ -18,9 +18,9 @@ func fullyPinned() BackendHandshakeInfo {
 		ModelRevision:     schema.DefaultProfile().Revision,
 		TokenizerRevision: schema.DefaultProfile().Revision,
 		Dim:               DefaultDenseDim(),
-		Normalization:     ExpectedNormalization,
-		Pooling:           ExpectedPooling,
-		Precision:         schema.DefaultProfile().Precision,
+		Normalization:     schema.DefaultProfile().Normalization,
+		Pooling:           schema.DefaultProfile().Pooling,
+		Precision:         schema.DefaultProfile().PrimaryPrecision(),
 		SparseParams:      map[string]string{"kind": "lexical_weights", "id_space": "tokenizer_vocab"},
 	}
 }
@@ -208,8 +208,8 @@ func TestExpected_IsFullyPinned(t *testing.T) {
 	if err := validateHandshake(Expected(), Expected()); err != nil {
 		t.Fatalf("this build's own pins do not satisfy the handshake: %v", err)
 	}
-	if !maps.Equal(Expected().SparseParams, ExpectedSparseParams()) {
-		t.Error("Expected() and ExpectedSparseParams() disagree")
+	if !maps.Equal(Expected().SparseParams, schema.DefaultProfile().SparseParams) {
+		t.Error("Expected() and schema.DefaultProfile().SparseParams disagree")
 	}
 }
 
@@ -267,7 +267,7 @@ func TestExpectedFor_DefaultProfileEqualsExpected(t *testing.T) {
 func TestExpectedFor_TakesRevisionDimAndPrecisionFromTheProfile(t *testing.T) {
 	other := schema.ModelProfile{
 		ID: "other", Model: "org/other", Revision: strings.Repeat("b", 40),
-		DenseDim: 768, Precision: "bf16", Collections: []string{"nova"},
+		DenseDim: 768, Precisions: []string{"bf16"}, Pooling: "mean", Normalization: "l2", Collections: []string{"nova"},
 	}
 	e := ExpectedFor(other)
 	if e.ModelRevision != other.Revision || e.TokenizerRevision != other.Revision {

@@ -65,7 +65,7 @@ func (s *stubTransport) infoCallCount() int {
 func echoEmbed(_ context.Context, texts []string) ([]Embedding, error) {
 	out := make([]Embedding, len(texts))
 	for i, t := range texts {
-		out[i] = fakeEmbedding(t)
+		out[i] = fakeEmbedding(t, schema.DefaultProfile())
 	}
 	return out, nil
 }
@@ -134,7 +134,7 @@ func TestServiceEmbedder_EmbedDocuments_ReturnsOneEmbeddingPerInputInOrder(t *te
 		t.Fatalf("got %d embeddings for %d inputs", len(got), len(texts))
 	}
 	for i, text := range texts {
-		if !reflect.DeepEqual(got[i], fakeEmbedding(text)) {
+		if !reflect.DeepEqual(got[i], fakeEmbedding(text, schema.DefaultProfile())) {
 			t.Errorf("output %d does not correspond to input %q — the batch was reordered", i, text)
 		}
 	}
@@ -146,7 +146,7 @@ func TestServiceEmbedder_EmbedQuery_HappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EmbedQuery: %v", err)
 	}
-	if !reflect.DeepEqual(got, fakeEmbedding("como configurar o cron do n8n")) {
+	if !reflect.DeepEqual(got, fakeEmbedding("como configurar o cron do n8n", schema.DefaultProfile())) {
 		t.Error("EmbedQuery returned an embedding that does not match its input")
 	}
 }
@@ -175,7 +175,7 @@ func TestServiceEmbedder_EmbedDocuments_EmptyInputDoesNotCallBackend(t *testing.
 func TestServiceEmbedder_EmbedDocuments_CountMismatchIsAnError(t *testing.T) {
 	e := newTestEmbedder(t, &stubTransport{
 		embed: func(_ context.Context, texts []string) ([]Embedding, error) {
-			return []Embedding{fakeEmbedding(texts[0])}, nil
+			return []Embedding{fakeEmbedding(texts[0], schema.DefaultProfile())}, nil
 		},
 	})
 
@@ -240,7 +240,7 @@ func TestServiceEmbedder_EmbedDocuments_OneBadItemFailsWholeBatch(t *testing.T) 
 		embed: func(_ context.Context, texts []string) ([]Embedding, error) {
 			out := make([]Embedding, len(texts))
 			for i, txt := range texts {
-				out[i] = fakeEmbedding(txt)
+				out[i] = fakeEmbedding(txt, schema.DefaultProfile())
 			}
 			out[2].Sparse.Values[0] = 0 // degenerate: zero weight
 			return out, nil
@@ -274,7 +274,7 @@ func TestServiceEmbedder_EmbedDocuments_ItemErrorIndexIsInOriginalBatch(t *testi
 		embed: func(_ context.Context, texts []string) ([]Embedding, error) {
 			out := make([]Embedding, len(texts))
 			for i, txt := range texts {
-				out[i] = fakeEmbedding(txt)
+				out[i] = fakeEmbedding(txt, schema.DefaultProfile())
 				if txt == "bad" {
 					out[i].Dense = out[i].Dense[:3]
 				}
@@ -407,7 +407,7 @@ func TestServiceEmbedder_EmbedDocuments_RetriesOnTransportError(t *testing.T) {
 	if calls.Load() != 3 {
 		t.Errorf("attempts = %d, want 3", calls.Load())
 	}
-	if !reflect.DeepEqual(got[0], fakeEmbedding("a")) {
+	if !reflect.DeepEqual(got[0], fakeEmbedding("a", schema.DefaultProfile())) {
 		t.Error("the successful retry did not return the correct result")
 	}
 }
@@ -475,7 +475,7 @@ func TestServiceEmbedder_EmbedDocuments_SplitsIntoConfiguredBatchSize(t *testing
 		t.Errorf("sub-batches cover %d texts, want %d", total, len(texts))
 	}
 	for i, text := range texts {
-		if !reflect.DeepEqual(got[i], fakeEmbedding(text)) {
+		if !reflect.DeepEqual(got[i], fakeEmbedding(text, schema.DefaultProfile())) {
 			t.Fatalf("output %d does not correspond to input %q — reassembly crossed a sub-batch boundary", i, text)
 		}
 	}

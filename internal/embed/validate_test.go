@@ -7,6 +7,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/danielmalka/go-knowrag/internal/schema"
 )
 
 // validDense returns a 1024-element dense vector that satisfies every invariant, so a test can
@@ -215,17 +217,20 @@ func TestValidateEmbedding_EmptySparseIsRejected(t *testing.T) {
 
 // validateDefault validates against the default model profile's width, which is what these fixtures
 // build (PR 1 of the embedding migration: the width is a parameter of validateEmbedding now).
-func validateDefault(e Embedding) error { return validateEmbedding(e, DefaultDenseDim()) }
+func validateDefault(e Embedding) error { return validateEmbedding(e, schema.DefaultProfile()) }
 
-// The accepted width is the model profile's, not a package constant: a 768-wide vector is valid for a
-// 768-wide profile and rejected for the default one.
+// The accepted width is the model profile's, not a package constant: a 768-wide dense-only vector is
+// valid for the 768-wide profile and rejected for the default one.
 func TestValidateEmbedding_WidthComesFromTheProfile(t *testing.T) {
-	e := validEmbedding()
-	e.Dense = e.Dense[:768]
-	if err := validateEmbedding(e, 768); err != nil {
+	m, ok := schema.ProfileByID("embeddinggemma-2")
+	if !ok {
+		t.Fatal("embeddinggemma-2 not registered")
+	}
+	dense := validEmbedding().Dense[:768]
+	if err := validateEmbedding(Embedding{Dense: dense}, m); err != nil {
 		t.Errorf("a 768-wide vector was rejected for a 768-wide profile: %v", err)
 	}
-	if err := validateEmbedding(e, DefaultDenseDim()); err == nil {
+	if err := validateEmbedding(Embedding{Dense: dense, Sparse: validEmbedding().Sparse}, schema.DefaultProfile()); err == nil {
 		t.Error("a 768-wide vector was accepted for the default 1024-wide profile")
 	}
 }
