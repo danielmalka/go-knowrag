@@ -80,9 +80,7 @@ func liveInfo(c schema.CollectionManifest) *qdrant.CollectionInfo {
 				VectorsConfig: qdrant.NewVectorsConfigMap(map[string]*qdrant.VectorParams{
 					c.DenseVectorName: {Size: c.DenseDim, Distance: qdrantDistance(c.Distance)},
 				}),
-				SparseVectorsConfig: qdrant.NewSparseVectorsConfig(map[string]*qdrant.SparseVectorParams{
-					c.SparseVectorName: {},
-				}),
+				SparseVectorsConfig: sparseVectorsConfig(c),
 			},
 		},
 		PayloadSchema: payload,

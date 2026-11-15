@@ -9,6 +9,7 @@ import (
 	"github.com/danielmalka/go-knowrag/internal/eval/isolation"
 	"github.com/danielmalka/go-knowrag/internal/goldenset"
 	"github.com/danielmalka/go-knowrag/internal/retrieval"
+	"github.com/danielmalka/go-knowrag/internal/schema"
 )
 
 // ErrNotImplemented is what a mode whose harness does not exist answers with.
@@ -155,7 +156,7 @@ func GoldenGate(ctx context.Context, opts Options) (Outcome, error) {
 
 	report := Aggregate(results)
 	report.K = k
-	report.Mode = retrieval.SearchModeHybrid.String()
+	report.Mode = ranModeLabel(opts.Searcher, cfg.Mode)
 	if cerr := goldenset.ValidateCoverage(set.Questions, set.Coverage); cerr != nil {
 		// Warn, do not fail: coverage is an authoring gate, not a run-time one (S10 open question 4,
 		// decided). The warning rides in the report so it reaches the operator who ran the eval.
@@ -173,6 +174,10 @@ func GoldenGate(ctx context.Context, opts Options) (Outcome, error) {
 }
 
 func compareModesGate(ctx context.Context, opts Options, set goldenset.GoldenSet, cfg RunConfig) (Outcome, error) {
+	if p, ok := opts.Searcher.(profiled); ok && !p.Profile().HasSparse() {
+		return Outcome{}, fmt.Errorf("%w (profile %q): there is only one ranking to measure, so run --golden without --compare-modes",
+			ErrNoHybridToCompare, p.Profile().ID)
+	}
 	hybrid, dense, err := CompareHybridVsDense(ctx, opts.Searcher, set.Questions, cfg)
 	if err != nil {
 		return Outcome{}, err
@@ -253,3 +258,30 @@ func IsolationGate(ctx context.Context, _ Options) (Outcome, error) {
 // named were arguments from the call site, so nothing of the wording is lost with it. The sentinel
 // stays — it is the Go end of the contract with scripts/ci/eval-gate.sh, whose pending list is
 // empty for the same reason and whose branch is kept for the next gate added before its harness.
+
+// ErrNoHybridToCompare is --compare-modes asked of a dense-only model profile: with no sparse head
+// there is no hybrid ranking to set against the dense one.
+var ErrNoHybridToCompare = errors.New("eval: the hybrid-vs-dense comparison needs a profile with a sparse head")
+
+// profiled and modeResolver are the optional parts of a Searcher the harness can use. *retrieval.Searcher
+// has both; a fake or the hermetic CorpusSearcher has neither and is treated as the default profile,
+// which is what it has always been.
+type profiled interface{ Profile() schema.ModelProfile }
+
+type modeResolver interface {
+	ResolvedMode(retrieval.SearchMode) (retrieval.SearchMode, error)
+}
+
+// ranModeLabel is the label a golden report carries: the mode that actually ran, so a dense-only
+// profile's report says "dense-only" and the default profile's still says "hybrid".
+func ranModeLabel(s Searcher, requested retrieval.SearchMode) string {
+	if r, ok := s.(modeResolver); ok {
+		if m, err := r.ResolvedMode(requested); err == nil {
+			return m.String()
+		}
+	}
+	if requested == retrieval.SearchModeAuto {
+		return retrieval.SearchModeHybrid.String()
+	}
+	return requested.String()
+}

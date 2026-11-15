@@ -9,20 +9,22 @@ import (
 	"github.com/danielmalka/go-knowrag/internal/schema"
 )
 
-// TestSearchMode_HybridIsTheZeroValue is what keeps every Query written before the toggle existed
-// meaning what it meant. If SearchModeDenseOnly ever became the zero value, every caller that never
+// TestSearchMode_AutoIsTheZeroValue is what keeps every Query written before the toggle existed
+// meaning what it meant: the zero value is Auto, and Auto resolves to the hybrid on a profile with a
+// sparse head (the default, BGE-M3). If DenseOnly ever became the zero value, every caller that never
 // heard of the field would silently switch ranking.
-func TestSearchMode_HybridIsTheZeroValue(t *testing.T) {
+func TestSearchMode_AutoIsTheZeroValue(t *testing.T) {
 	var zero SearchMode
-	if zero != SearchModeHybrid {
-		t.Errorf("the zero SearchMode is %d, want SearchModeHybrid (%d)", zero, SearchModeHybrid)
+	if zero != SearchModeAuto {
+		t.Errorf("the zero SearchMode is %d, want SearchModeAuto (%d)", zero, SearchModeAuto)
 	}
-	if validQuery().Mode != SearchModeHybrid {
-		t.Error("a Query built without naming a Mode is not in hybrid mode")
+	got, err := ResolveMode(validQuery().Mode, schema.DefaultProfile())
+	if err != nil || got != SearchModeHybrid {
+		t.Errorf("a Query built without naming a Mode resolves to %v (%v) on the default profile, want hybrid", got, err)
 	}
-	if SearchModeHybrid.String() != "hybrid" || SearchModeDenseOnly.String() != "dense-only" {
-		t.Errorf("the modes render as %q and %q; the eval reports and the hybrid-vs-dense document "+
-			"carry these strings", SearchModeHybrid, SearchModeDenseOnly)
+	if SearchModeHybrid.String() != "hybrid" || SearchModeDenseOnly.String() != "dense-only" || SearchModeAuto.String() != "auto" {
+		t.Errorf("the modes render as %q, %q and %q; the eval reports and the hybrid-vs-dense document "+
+			"carry these strings", SearchModeHybrid, SearchModeDenseOnly, SearchModeAuto)
 	}
 }
 

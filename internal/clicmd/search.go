@@ -77,8 +77,9 @@ func NewSearchCmd(cfg *config.Config, connect Connect) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "search <text>",
 		Short: "Search the indexed chunks and print what comes back",
-		Long: "search runs one hybrid query against a collection and prints the matching chunks,\n" +
-			"most relevant first. It is the same search the MCP server answers with, through the same\n" +
+		Long: "search runs one query against a collection (hybrid for a model profile with a sparse head,\n" +
+			"a single dense search for a dense-only one) and prints the matching chunks, most relevant\n" +
+			"first. It is the same search the MCP server answers with, through the same\n" +
 			"package, with one difference: this side is privileged and may be pointed at any tenant\n" +
 			"and at content an MCP client can never ask for.",
 		Args: cobra.ExactArgs(1),

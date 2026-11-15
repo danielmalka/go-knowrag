@@ -112,8 +112,13 @@ var profiles = []ModelProfile{
 		// Query: "task: search result | query: " + text. Document: "title: " + (title or "none") +
 		// " | text: " + text. Applied by the embedding service (model card, prompts).
 		PromptVersion: "gemma-search-v1",
-		// A new collection beside the old one (migration plan, "Reindexação e virada"); the names are
-		// still literals here and are revisited by the PR that switches the default.
+		// A new collection beside the old one (migration plan, "Reindexação e virada"). The names keep the
+		// trust-boundary name and add the model as a suffix, final as of PR 3: the suffix is the only place
+		// an operator, a Qdrant dashboard or a log line shows which vector space a collection holds (the
+		// model revision lives in the applied-state record, not in Qdrant), a later model switch repeats
+		// the pattern with its own suffix instead of reusing a name for a different width, and a
+		// generation number such as "_v2" says nothing and collides with the golden-set "v2". Profiles
+		// never share a collection name (TestProfiles_CollectionNamesAreDisjoint).
 		Collections: []string{"interno_eg2", "clientes_eg2", "base_paga_eg2"},
 	},
 }
