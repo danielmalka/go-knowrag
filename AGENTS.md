@@ -328,6 +328,15 @@ Decisões do dono, que valem para qualquer trabalho de troca de modelo:
 8. **A prova de 30 perguntas e a rodada ampliada rodam na mesma cópia de referência do vault**, com as mesmas
    exclusões, para que os números sejam comparáveis. Migrar a medição para o vault atual do projeto depende
    de uma revisão do dono.
+9. **Critério de virada:** Recall@5 de produção ≥ 0,70 no golden v2 e nenhuma área com zero acertos, medido na
+   cópia de referência do vault. A troca para o vault atual vem depois da revisão do dono.
+10. **O embedder fica sempre de pé na GPU, com fallback em CPU.** Isso fecha o D-41 (a janela diária do embedder),
+    depois de medir o pico de memória da ingestão.
+11. **Uma ADR-008, local, substitui a ADR-001**; o resumo público fica no README e neste arquivo.
+12. **Sem CHANGELOG.**
+13. **As violações de contrato do vault são corrigidas antes de reingerir** (cartão 184); a produção recusa um
+    vault com violações.
+14. **Não há rollback para o bge-m3.** Se a migração não atingir o critério do item 9, o serviço continua desligado.
 
 **Resultado da prova** (30 perguntas, Recall@5, mesma conta do `eval --golden`: acerto = a nota esperada está
 no top 5; consulta densa de produção reproduzida; os dois modelos em bf16 na GPU, sobre os mesmos 4.661 chunks):
