@@ -16,7 +16,7 @@ import (
 // fakeEmbedding is a structurally valid embedding with recognisable values, so an assertion that
 // the right half reached the right leg fails on content rather than on a length.
 func fakeEmbedding() embed.Embedding {
-	dense := make([]float32, embed.DenseDim)
+	dense := make([]float32, embed.DefaultDenseDim())
 	dense[0] = 0.5
 	return embed.Embedding{
 		Dense:  dense,

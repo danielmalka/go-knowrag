@@ -1,7 +1,5 @@
 package schema
 
-import "slices"
-
 // The Qdrant schema is code, not a curl script kept in a runbook. This file is the single source of
 // truth for what a collection must look like — dimension, distance, named vectors, payload indexes
 // and the pinned model revision — and store.Apply is the only thing that turns it into calls.
@@ -23,11 +21,6 @@ const (
 	// `using: sparse`) with RRF, and an unnamed vector has nothing for `using` to select.
 	DenseVectorName  = "dense"
 	SparseVectorName = "sparse"
-
-	// DenseDim is BGE-M3's dense output width, confirmed on the model card (PRD-contrato §2.3b).
-	// It is uint64 because that is the width the wire type wants; converting at the call site would
-	// just move the conversion somewhere less visible.
-	DenseDim uint64 = 1024
 )
 
 // Distance is the metric a collection's dense vectors are compared with.
@@ -103,7 +96,7 @@ type PayloadIndex struct {
 	IsTenant bool
 }
 
-// Manifest returns the three collections' desired state.
+// Manifest returns the default model profile's collections' desired state (ManifestFor).
 //
 // It is a function returning a fresh deep copy rather than an exported slice var, for the same
 // reason the enums in enums.go are accessor functions: an exported var is assignable and its
@@ -111,38 +104,35 @@ type PayloadIndex struct {
 // what "correct" means for every later Apply in the process. Drift tests that need a mutated
 // manifest get one by mutating their own copy.
 func Manifest() []CollectionManifest {
-	out := make([]CollectionManifest, len(manifest))
-	for i, c := range manifest {
-		c.Indexes = slices.Clone(c.Indexes)
-		out[i] = c
+	return ManifestFor(DefaultProfile())
+}
+
+// ManifestFor returns the desired state of every collection of one model profile: its dimension and
+// revision come from the profile, its collection names are the profile's. Each call builds a fresh
+// value, so nothing here is shared mutable state. The profile is not validated here (the registry
+// test does that); a caller that builds its own profile calls Validate first.
+func ManifestFor(p ModelProfile) []CollectionManifest {
+	out := make([]CollectionManifest, len(p.Collections))
+	for i, name := range p.Collections {
+		out[i] = newCollectionManifest(p, name)
 	}
 	return out
 }
 
-var manifest = []CollectionManifest{
-	// interno: the operator's own vaults. The only collection populated in this build.
-	newCollectionManifest("interno"),
-	// clientes and base_paga: provisioned empty. They exist now so that nothing — not Apply, not
-	// the CLI, not the integration test — ever grows a special case for the one collection that
-	// happens to have data in it.
-	newCollectionManifest("clientes"),
-	newCollectionManifest("base_paga"),
-}
-
-// newCollectionManifest builds one entry. The three collections are deliberately identical in
+// newCollectionManifest builds one entry. The collections of a profile are deliberately identical in
 // shape: they isolate risk, they do not shard by feature, so a difference between them would be a
 // bug rather than a design.
-func newCollectionManifest(name string) CollectionManifest {
+func newCollectionManifest(p ModelProfile, name string) CollectionManifest {
 	keyword := func(field string) PayloadIndex {
 		return PayloadIndex{Field: field, Kind: FieldTypeKeyword}
 	}
 	return CollectionManifest{
 		Name:             name,
 		DenseVectorName:  DenseVectorName,
-		DenseDim:         DenseDim,
+		DenseDim:         p.DenseDim,
 		Distance:         DistanceCosine,
 		SparseVectorName: SparseVectorName,
-		ModelRevision:    BGEM3Revision,
+		ModelRevision:    p.Revision,
 		// This list is derived from who filters, not from what looks important. Strict mode
 		// (store.Apply) refuses a filter on an unindexed field, so a field this list misses is not a
 		// slow query — it is an InvalidArgument at runtime, in whichever story owns the filter. Two

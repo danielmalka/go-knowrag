@@ -14,7 +14,7 @@ import (
 // more: there is deliberately no model-revision field.
 //
 // PRD-contrato §2.3b pins BGE-M3 "by immutable revision (commit hash)" — a project-level constant
-// (schema.BGEM3Revision), not a per-deployment setting. A ModelRevision field here would be exactly
+// (a model profile in internal/schema: schema.ModelProfile.Revision), not a per-deployment setting. A ModelRevision field here would be exactly
 // the seam that rule forbids: a config file or env var disagreeing with the constant would point
 // the runtime at a different revision with nothing catching it before ingestion, and the symptom
 // would be falling recall weeks later, not an error. Changing the revision means reindexing all

@@ -116,8 +116,8 @@ func TestServiceEmbedder_ModelID_ReturnsPinnedSchemaConstant(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewServiceEmbedder: %v", err)
 		}
-		if e.ModelID() != schema.BGEM3Revision {
-			t.Errorf("ModelID() = %q, want schema.BGEM3Revision (%q)", e.ModelID(), schema.BGEM3Revision)
+		if e.ModelID() != schema.DefaultProfile().Revision {
+			t.Errorf("ModelID() = %q, want schema.DefaultProfile().Revision (%q)", e.ModelID(), schema.DefaultProfile().Revision)
 		}
 	}
 }

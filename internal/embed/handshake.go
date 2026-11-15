@@ -17,15 +17,15 @@ import (
 //
 // ExpectedNormalization and ExpectedPooling come from the BGE-M3 model card and were re-confirmed
 // against the pinned revision's own files (ADR-001 §6.2: 1_Pooling/config.json has
-// pooling_mode_cls_token: true; modules.json declares a 2_Normalize module). ExpectedPrecision was
+// pooling_mode_cls_token: true; modules.json declares a 2_Normalize module). The precision pin was
 // the last field left open and closed on 2026-08-09 by measurement, not by choice: the loaded
-// weights report torch.float16 (ADR-001 §6.2, round 2). It is one value, for one runtime — the
+// weights report torch.float16 (ADR-001 §6.2, round 2); that value now lives in the model profile
+// (schema.ModelProfile.Precision), together with the revision and the width. It is one value, for one runtime — the
 // earlier "may differ between the query host and the batch host" reading died with the single-host
 // topology of ADR-001 §7.1.
 const (
 	ExpectedNormalization = "l2"
 	ExpectedPooling       = "cls"
-	ExpectedPrecision     = "fp16"
 )
 
 // ExpectedSparseParams pins the sparse-generation parameters, verified against the running service
@@ -68,18 +68,23 @@ type BackendHandshakeInfo struct {
 //
 // It returns a fresh value each call: SparseParams is a map, and a shared one lets any caller
 // rewrite the pins for the whole process.
-func Expected() BackendHandshakeInfo {
+func Expected() BackendHandshakeInfo { return ExpectedFor(schema.DefaultProfile()) }
+
+// ExpectedFor returns the pins for one model profile: revision (model and tokenizer), width and
+// precision come from the profile; normalization, pooling and the sparse parameters are still
+// BGE-M3's and are changed by the PRs that introduce another model.
+func ExpectedFor(p schema.ModelProfile) BackendHandshakeInfo {
 	return BackendHandshakeInfo{
 		// The tokenizer ships inside BAAI/bge-m3 at the same commit as the weights, so "the
 		// tokenizer revision matching the model revision" (PRD-contrato §2.3b, ADR-001 §4 row 2) is
 		// that same commit. If a future runtime sources the tokenizer from a separate repository,
 		// this stops being true and the pin needs its own constant in internal/schema.
-		ModelRevision:     schema.BGEM3Revision,
-		TokenizerRevision: schema.BGEM3Revision,
-		Dim:               DenseDim,
+		ModelRevision:     p.Revision,
+		TokenizerRevision: p.Revision,
+		Dim:               p.DenseWidth(),
 		Normalization:     ExpectedNormalization,
 		Pooling:           ExpectedPooling,
-		Precision:         ExpectedPrecision,
+		Precision:         p.Precision,
 		SparseParams:      ExpectedSparseParams(),
 	}
 }
