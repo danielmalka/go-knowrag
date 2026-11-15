@@ -286,3 +286,21 @@ reconstrói, porque ele é derivado do vault.
 
 Não proponha religar, não "conserte" os timers desabilitados, e não leia a ausência do embedder
 como bug de instalação. Reabre por vontade do dono, e só.
+
+## Decisões do dono de 2026-11-15 — segurança do dossiê, CI e embedding
+
+Registradas aqui porque nenhuma delas é visível no código. Esta seção é só destas decisões; as de
+escolha de embedding ficam em seção própria.
+
+- **Riscos de segurança do dossiê aceitos como estão.** O gRPC do app com o Qdrant sem TLS, a porta
+  6334 do compose da raiz publicada em todas as interfaces e o embedder HTTP sem autenticação
+  continuam como estão: o acesso a esses serviços é só pela rede privada (tailnet). É **risco
+  aceito**, não pendência. A 6334 **não será restringida**. O que reabre é uma segunda máquina não
+  confiável na rede — a mesma condição da decisão de rede acima.
+- **A `main` passa a exigir o CI (`test` + `lint`)**, por proteção de branch do GitHub, em vez de
+  depender só de disciplina local. `lint` vermelho na `main` é bloqueio, não ruído.
+- **As dependências Python do embedder serão fixadas** (versões exatas) **junto com a decisão de troca
+  de embedding** (cartão 173), não antes: fixar agora seria fixar o que pode mudar.
+- **O volume do Qdrant na VPS é mantido** até essa mesma decisão. Não o apague nem o recrie antes dela.
+- **O dossiê de código fica fora do git**, em `docs/dossier/` local, como o resto de `docs/` (D-14, ver
+  acima). Não o versione nem copie trecho dele para arquivo rastreado.

@@ -203,7 +203,7 @@ func TestGoldenGate_CompareModes_WritesTheDecision(t *testing.T) {
 	if !strings.Contains(got.Summary, OutcomeDenseWins) {
 		t.Errorf("summary does not state the decision:\n%s", got.Summary)
 	}
-	body, err := os.ReadFile(out)
+	body, err := os.ReadFile(out) // #nosec G304 -- out is the file this test just had GoldenGate write under t.TempDir()
 	if err != nil {
 		t.Fatalf("reading the decision document: %v", err)
 	}
