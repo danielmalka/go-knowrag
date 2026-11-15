@@ -23,15 +23,23 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from app import EmbedderApp, Reply
 from gpu_gate import GpuGate
 from model_host import IdleUnloader, ModelHost
-from settings import EXIT_UNSUPPORTED, MODEL_ID, REVISION, Settings, UnsupportedSetting, load_settings
+from settings import EXIT_UNSUPPORTED, LOOPBACK_LITERALS, MODEL_ID, REVISION, Settings, UnsupportedSetting, load_settings
 
 POST_ROUTES = ("/embed", "/tokenize", "/load")
 
 
 class LoopbackServer(ThreadingHTTPServer):
-    """ThreadingHTTPServer that binds IPv6 loopback when asked for `::1` (the stdlib default is IPv4)."""
+    """ThreadingHTTPServer that binds only a loopback literal, IPv6 included for `::1`.
+
+    The guard is at the bind itself, not only in settings: a name would be resolved by the system at
+    bind time and could land on a non-loopback address, so anything but the two literals is refused
+    here even if a future caller skips `parse_host`. The stdlib default family is IPv4, hence the
+    switch for `::1`.
+    """
 
     def __init__(self, address: tuple[str, int], handler: type[BaseHTTPRequestHandler]) -> None:
+        if address[0] not in LOOPBACK_LITERALS:
+            raise ValueError(f"refusing to bind {address[0]!r}: only {LOOPBACK_LITERALS} are allowed, never a name")
         if ":" in address[0]:
             self.address_family = socket.AF_INET6
         super().__init__(address, handler)

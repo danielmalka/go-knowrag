@@ -117,15 +117,20 @@ def test_zero_idle_unload_means_never_and_is_accepted():
 # --- loopback only ------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("host", ["127.0.0.1", "::1", "localhost"])
-def test_loopback_hosts_are_accepted_from_the_flag_and_the_environment(host):
-    assert load_settings(["--host", host], {}).host == host
-    assert load_settings([], {"KNOWRAG_EMBEDDER_HOST": host}).host == host
+@pytest.mark.parametrize("host,literal", [("127.0.0.1", "127.0.0.1"), ("::1", "::1"), ("localhost", "127.0.0.1")])
+def test_loopback_hosts_are_accepted_and_always_come_out_as_a_literal(host, literal):
+    assert load_settings(["--host", host], {}).host == literal
+    assert load_settings([], {"KNOWRAG_EMBEDDER_HOST": host}).host == literal
+
+
+def test_localhost_is_normalized_so_the_system_never_resolves_a_name_at_bind():
+    assert parse_host("localhost") == "127.0.0.1"
+    assert parse_host("  localhost ") == "127.0.0.1"
 
 
 @pytest.mark.parametrize("host", [
     "0.0.0.0", "::", "", "192.168.1.10", "10.0.0.5", "127.0.0.2", "example.com", "127.0.0.1.evil.com",
-    "localhost.localdomain",
+    "localhost.localdomain", "::ffff:127.0.0.1", "LOCALHOST", "127.1",
 ])
 def test_any_non_loopback_host_is_refused_with_the_value_and_the_exit_status(host):
     with pytest.raises(UnsupportedSetting, match="no authentication") as e:

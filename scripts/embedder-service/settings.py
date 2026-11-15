@@ -101,17 +101,25 @@ def parse_device(value: str) -> str:
 # GPU work to whoever can reach them. That is acceptable only because it listens on loopback, so
 # loopback is enforced here rather than left to a default: there is no opt-in to a network address in
 # this service. Exposing it would mean adding authentication first, as its own decision.
-LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost")
+LOOPBACK_LITERALS = ("127.0.0.1", "::1")
+LOOPBACK_HOSTS = (*LOOPBACK_LITERALS, "localhost")
 
 
 def parse_host(value: str) -> str:
+    """The address to bind: always a loopback LITERAL, never a name.
+
+    `localhost` is accepted as a spelling and normalized to 127.0.0.1 here, because a name is
+    resolved at bind time by the system (/etc/hosts, NSS) and could map to an address that is not
+    loopback, which would put the GPU on the network. Everything downstream (the bind, the log line,
+    `Settings.host`) sees the literal. `::ffff:127.0.0.1` and every other spelling are refused.
+    """
     host = value.strip()
     if host not in LOOPBACK_HOSTS:
         raise UnsupportedSetting(
             f"host {value!r} refused: this service has no authentication, so it listens on loopback "
             f"only ({', '.join(LOOPBACK_HOSTS)}); it must not be reachable from the network"
         )
-    return host
+    return "127.0.0.1" if host == "localhost" else host
 
 
 def _positive_int(name: str, raw: str, ceiling: int | None = None) -> int:

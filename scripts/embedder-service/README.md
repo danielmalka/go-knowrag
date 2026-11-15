@@ -77,7 +77,7 @@ environment from `~/.config/knowrag/embedder.env` (`knowrag-embedder.env.example
 
 | Variable | Flag | Default | Meaning |
 |---|---|---|---|
-| `KNOWRAG_EMBEDDER_HOST` / `_PORT` | `--host` / `--port` | `127.0.0.1` / `7999` | Bind address, **loopback only** (`127.0.0.1`, `::1`, `localhost`); any other value is refused (below). |
+| `KNOWRAG_EMBEDDER_HOST` / `_PORT` | `--host` / `--port` | `127.0.0.1` / `7999` | Bind address, **loopback only** (`127.0.0.1`, `::1`; `localhost` is accepted and bound as `127.0.0.1`); any other value is refused (below). |
 | `KNOWRAG_EMBEDDER_DEVICE` | `--device` | `cuda:0` | A CUDA device. `cpu` is refused. |
 | `KNOWRAG_EMBEDDER_PRECISION` | `--precision` | `bf16` | `bf16` or `fp32`. `fp16` is refused. |
 | `KNOWRAG_EMBEDDER_IDLE_UNLOAD` | `--idle-unload` | `600` | Seconds idle before unloading; `0` never unloads. |
@@ -86,8 +86,9 @@ environment from `~/.config/knowrag/embedder.env` (`knowrag-embedder.env.example
 
 **Loopback only, by design.** The service has no authentication of any kind, and `/load`, `/embed` and
 `/tokenize` run arbitrary work on the GPU for whoever can reach them. It is acceptable only because it
-listens on loopback, so that is enforced and not left to a default: any other `--host` (`0.0.0.0`, a
-LAN address, a name) ends the process with status 78 and a message naming the value. There is no
+listens on loopback, so that is enforced and not left to a default. The bind always receives a literal
+(`localhost` is normalized to `127.0.0.1` first, since a name is resolved by the system at bind time and
+could map elsewhere; `::ffff:127.0.0.1` is refused). Any other `--host` (`0.0.0.0`, a LAN address, a name) ends the process with status 78 and a message naming the value. There is no
 opt-in to a network address; exposing the service would first need authentication, as its own
 decision. A machine that must reach it remotely goes through something that authenticates (an SSH
 tunnel, the private network's own access control), not through the bind address.

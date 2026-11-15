@@ -168,3 +168,29 @@ def test_ipv6_loopback_binds_an_ipv6_socket():
         assert httpd.address_family == socket.AF_INET6
     finally:
         httpd.server_close()
+
+
+@pytest.mark.parametrize("given,bound", [("localhost", "127.0.0.1"), ("127.0.0.1", "127.0.0.1"), ("::1", "::1")])
+def test_the_bind_only_ever_receives_a_literal_never_a_name(monkeypatch, given, bound):
+    seen = []
+
+    class Recorder:
+        def __init__(self, address, handler):
+            seen.append(address)
+
+        def serve_forever(self):
+            raise KeyboardInterrupt
+
+    stub = types.SimpleNamespace(require_cuda=lambda device: None, cuda_available=lambda: True)
+    monkeypatch.setitem(sys.modules, "st_adapter", stub)
+    monkeypatch.setattr(server, "build_app", lambda settings: (Wiring().app, Wiring().host))
+    monkeypatch.setattr(server, "LoopbackServer", Recorder)
+    with pytest.raises(KeyboardInterrupt):
+        server.main(["--host", given, "--port", "17997"])
+    assert seen == [(bound, 17997)]
+
+
+@pytest.mark.parametrize("name", ["localhost", "example.com", "0.0.0.0", "::ffff:127.0.0.1", ""])
+def test_the_server_itself_refuses_a_name_or_a_non_loopback_address(name):
+    with pytest.raises(ValueError, match="never a name"):
+        server.LoopbackServer((name, 0), server.make_handler(Wiring().app))
