@@ -322,6 +322,9 @@ Decisões do dono, que valem para qualquer trabalho de troca de modelo:
 6. **O golden set vai a ~60 perguntas, sem as inalcançáveis.** As 6 perguntas cuja nota esperada hoje é
    `private` ou `archived` e a que aponta para uma nota que já não existe saem; novas perguntas, escritas a
    partir do vault atual por quem não sabe qual modelo acertou o quê, entram no lugar. Só então se decide.
+7. **A rodada com o golden set ampliado roda só o EmbeddingGemma 2** (denso, bf16, com os prefixos do card),
+   **sem rodar o bge-m3.** O dono compara o resultado do EmbeddingGemma 2 e decide a troca; o bge-m3 não é
+   remedido nesta rodada.
 
 **Resultado da prova** (30 perguntas, Recall@5, mesma conta do `eval --golden`: acerto = a nota esperada está
 no top 5; consulta densa de produção reproduzida; os dois modelos em bf16 na GPU, sobre os mesmos 4.661 chunks):
