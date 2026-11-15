@@ -350,3 +350,12 @@ a maior parte é torch). Em CPU responde a query em ~118 ms no p95 com ~2,4 GB d
 um embedder sempre de pé sem GPU (D-41). Diferença de 1 a 3 acertos com 30 perguntas não decide, e é por isso
 que o golden set cresce antes da troca. A ferramenta da prova (exportador de chunks e script de avaliação) fica
 fora da `main`.
+
+**Rodada ampliada** (golden v2 com 60 perguntas, só o EmbeddingGemma 2 denso, bf16 na GPU, mesma cópia de referência
+do vault e mesmos 4.661 chunks da prova): **46/60 de Recall@5 (0,767; IC95 0,646–0,856)**, e o resultado é o mesmo nos
+três protocolos de visibilidade porque o golden v2 só aponta para notas visíveis à busca. Nenhuma das 7 áreas do
+golden ficou com zero acertos (o pior resultado foi 1 de 3). A checagem exata por força bruta também deu 46.
+Ingestão dos 4.661 chunks em 144 s; query com p95 de 73 ms na GPU (outra execução, com a GPU compartilhada, deu
+153 ms) e de 121 ms em CPU fp32 (RSS 2,4 GB). **Pico da ingestão:** 5,2 GB de ativação com batch 16 e chunks de até
+~3.900 tokens, contra 0,5 GB dos pesos; para o embedder ficar de pé junto com outros processos a ingestão precisa de
+batch menor ou de teto menor de tokens, e isso se mede antes de fixar o serviço.
