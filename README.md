@@ -500,6 +500,21 @@ A comparação é de **caminho inteiro**, nunca de prefixo de texto: uma entrada
 pasta `alfa/14-interno`. É insensível a maiúsculas, normaliza Unicode para NFC (um nome acentuado
 vindo de macOS em NFD casaria com nada, silenciosamente), e `\` do Windows vale como `/`.
 
+**Indexar só uma pasta.** Não existe "incluir só": a pasta é a única `AREAS` e toda outra pasta de 1º
+nível é excluída pelo nome. É o caso do vault do dono, onde só `wiki/` é indexada (`raw/` tem uma página
+derivada em `wiki/` para cada nota, e indexar as duas daria duas respostas para a mesma pergunta):
+
+```bash
+KNOWRAG_VAULT_<NOME>_AREAS=wiki
+KNOWRAG_VAULT_<NOME>_EXCLUDE_FOLDERS=raw,<cada outra pasta de 1º nível do vault>
+KNOWRAG_VAULT_<NOME>_EXCLUDE_ROOT_FILES=<os .md soltos na raiz>
+MCP_AREAS=wiki
+```
+
+Pastas que começam com ponto (`.git`, `.obsidian`) são puladas sem precisar de entrada. Uma pasta de 1º
+nível nova, que não é a área nem está na lista, faz a ingestão **falhar nomeando-a** — de propósito: pasta
+nova no topo do vault é decidida por uma pessoa, não indexada por acidente.
+
 ### Flags de `knowrag ingest`
 
 | Flag | Default | Para quê |
@@ -509,7 +524,7 @@ vindo de macOS em NFD casaria com nada, silenciosamente), e `\` do Windows vale 
 | `--full` | desligado | reindexa toda nota, pulando o atalho de integridade que normalmente deixa a inalterada em paz |
 | `--only` | vazio | restringe a rodada às notas cujo `vault/path` casa um glob, ex.: `pessoal/areas/**` |
 | `--prune` | desligado | **apaga** os pontos das notas que sumiram do vault. Destrutivo e opt-in: sem ele os órfãos são listados e deixados quietos |
-| `--yes` | desligado | autoriza `--prune` sem perguntar. Obrigatório quando stdin não é terminal, onde não há ninguém para responder |
+| `--yes` | desligado | autoriza `--prune` sem perguntar. Obrigatório quando stdin não é terminal, onde não há ninguém para responder. **A ingestão agendada roda sempre com `--prune --yes`**; a manual continua pedindo confirmação |
 | `--grace-period` | `30s` | quanto tempo uma nota já sendo escrita tem para terminar depois do primeiro Ctrl-C; o segundo Ctrl-C a derruba na hora |
 | `--json` | desligado | escreve o relatório da rodada como JSON no stdout e mais nada; o resumo do tokenizer vai para o stderr |
 | `--tenant` | `interno` | o `tenant_id` sob o qual todo ponto é escrito |

@@ -329,7 +329,7 @@ escolha de embedding ficam em seção própria.
 - **O dossiê de código fica fora do git**, em `docs/dossier/` local, como o resto de `docs/` (D-14, ver
   acima). Não o versione nem copie trecho dele para arquivo rastreado.
 
-## Religar: horário, Qdrant e vault — decisões do dono de 2026-11-15 (2ª rodada)
+## Religar: horário, Qdrant, vault e poda — decisões do dono de 2026-11-15 (2ª rodada)
 
 Valem para quando o projeto for religado; o projeto continua desligado e nada disto foi instalado.
 
@@ -343,6 +343,18 @@ Valem para quando o projeto for religado; o projeto continua desligado e nada di
    rastreado: aqui ele é "o vault do dono". Trocar o vault de referência da avaliação (a cópia usada na prova e
    no golden set) por ele **depende de uma curadoria em andamento**; a virada operacional espera essa
    curadoria (cartão 188), e o golden set é refeito quando o vault mudar.
+4. **A ingestão programada roda sempre com `--prune`** (com `--yes`, sem prompt): o vault é a única fonte da
+   verdade, então os pontos de uma nota apagada saem do Qdrant na rodada seguinte, e o git do vault guarda o
+   histórico. A rodada manual continua pedindo confirmação. O wrapper (`scheduled-ingest.sh`) escreve no log o
+   código de saída e a linha `orphans:` do relatório (quantas notas e pontos foram podados). Salvaguarda
+   nova: o CLI **recusa podar um vault cuja varredura não achou nenhuma nota** (`refuseEmptyVault`), porque um
+   disco desmontado se parece exatamente com um vault inteiro apagado e o `splitStillOnDisk` não ajuda aí;
+   apagar de verdade todo um vault é manual.
+5. **No vault do dono só `wiki/` é indexada.** `raw/` tem uma página derivada em `wiki/` para cada nota, e
+   indexar as duas daria duas respostas. Não existe "incluir só": `AREAS=wiki` e toda outra pasta de 1º nível
+   em `EXCLUDE_FOLDERS` (mais os `.md` soltos da raiz em `EXCLUDE_ROOT_FILES`); `MCP_AREAS=wiki`. Pasta de 1º
+   nível nova faz a ingestão falhar nomeando-a, que é o desejado. Exemplo em
+   `scripts/embedder-service/ingest.env.example` e no README.
 
 ## Escolha do modelo de embedding — decisões de 2026-11-15
 

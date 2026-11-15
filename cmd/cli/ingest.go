@@ -413,9 +413,14 @@ func ingestScans(
 	}
 	splitStillOnDisk(roots, &report)
 
+	noteCounts := make(map[string]int, len(scans))
+	for _, s := range scans {
+		noteCounts[s.Vault] = len(s.Notes)
+	}
+
 	var pruneErr error
 	if opts.prune {
-		pruneErr = pruneOrphans(ctx, points, opts.tenantID, roots, opts, &report)
+		pruneErr = pruneOrphans(ctx, points, opts.tenantID, roots, noteCounts, opts, &report)
 	}
 
 	// Printed before the failure checks because a run with failures still did whatever it did to the

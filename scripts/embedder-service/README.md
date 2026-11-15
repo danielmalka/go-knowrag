@@ -194,7 +194,17 @@ owner's decision of 2026-11-15). The zone is part of the `OnCalendar` expression
 what it resolves to with `systemd-analyze calendar --iterations=4 '<the expression>'`.
 `Persistent=true`, so a missed run happens once when the machine is back. The wrapper calls `ensure-embedder.sh` (start the service if needed,
 check `/health` reports a CUDA device, `POST /load` and wait for it) and then
-`knowrag ingest --vault both`. Nothing is stopped afterwards: the idle unload returns the VRAM.
+`knowrag ingest --vault both --prune --yes`. Nothing is stopped afterwards: the idle unload returns the VRAM.
+
+The scheduled run **always prunes** (the owner's decision of 2026-11-15): the vault is the only source of
+truth, so the points of a note deleted from it leave Qdrant on the next run, and the vault's git history
+remembers the note. `--yes` is what authorizes that without a prompt; run by hand, `knowrag ingest --prune`
+still asks. The wrapper prints one log line with the exit status and the report's own `orphans:` line
+(how many notes were pruned and how many points that removed): `scheduled-ingest: exit=0; orphans: 2
+note(s) deleted from the vault, 7 point(s), all removed`. The CLI refuses to prune, and exits non-zero, when
+it could not read the index, when the run was interrupted, for a note whose file is still on disk, and
+for a vault whose scan found **no notes at all** (an unmounted drive looks exactly like a vault whose every
+note was deleted).
 
 ## Confirming it is really on the GPU
 
