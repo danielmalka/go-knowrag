@@ -106,6 +106,13 @@ func ComputePointHash(
 	fields["embedder_pooling"] = emb.Pooling
 	fields["embedder_precision"] = emb.Precision
 	fields["embedder_sparse_params"] = schema.SerializeFields(emb.SparseParams)
+	// The task-prefix scheme the service applies is part of the vector's identity: a service that
+	// changed it embeds the same text into a different space. It is added ONLY when there is one, so a
+	// model with no prefix (BGE-M3) keeps the exact point_hash it had before this field existed and
+	// nothing already indexed is re-embedded for it.
+	if emb.PromptVersion != "" {
+		fields["embedder_prompt_version"] = emb.PromptVersion
+	}
 
 	// The chunk text is hashed as its own component instead of being folded into the sorted field
 	// map, because it is the one input that can legitimately contain the canonical separators

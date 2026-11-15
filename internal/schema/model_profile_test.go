@@ -93,6 +93,9 @@ func TestModelProfile_Validate_RejectsHalfBuiltProfiles(t *testing.T) {
 		"no pooling":           func(p *ModelProfile) { p.Pooling = "" },
 		"no normalization":     func(p *ModelProfile) { p.Normalization = "" },
 		"bad prompt version":   func(p *ModelProfile) { p.PromptVersion = "Has Space" },
+		"no input window":      func(p *ModelProfile) { p.MaxInputTokens = 0 },
+		"negative reserve":     func(p *ModelProfile) { p.PromptReserveTokens = -1 },
+		"reserve eats window":  func(p *ModelProfile) { p.PromptReserveTokens = p.MaxInputTokens },
 		"no collections":       func(p *ModelProfile) { p.Collections = nil },
 		"duplicate collection": func(p *ModelProfile) { p.Collections = []string{"a", "a"} },
 		"bad collection name":  func(p *ModelProfile) { p.Collections = []string{"Has Space"} },
@@ -213,5 +216,46 @@ func TestManifestFor_SparseVectorNameFollowsTheProfile(t *testing.T) {
 		if c.SparseVectorName != SparseVectorName {
 			t.Errorf("%s: default entry lost its sparse vector: %q", c.Name, c.SparseVectorName)
 		}
+	}
+}
+
+// The window the chunker may fill is the model's input window minus what the prompt prefix takes.
+func TestProfiles_TokenWindows(t *testing.T) {
+	bge := DefaultProfile()
+	if bge.MaxInputTokens != 8192 || bge.PromptReserveTokens != 0 || bge.WindowTokens() != 8192 || bge.NeedsTitle() {
+		t.Errorf("BGE-M3 window = %d (max %d, reserve %d, needs title %v), want 8192/0 and no title",
+			bge.WindowTokens(), bge.MaxInputTokens, bge.PromptReserveTokens, bge.NeedsTitle())
+	}
+	eg2, _ := ProfileByID("embeddinggemma-2")
+	if eg2.MaxInputTokens != 8192 || eg2.PromptReserveTokens != 128 || eg2.WindowTokens() != 8064 || !eg2.NeedsTitle() {
+		t.Errorf("EmbeddingGemma window = %d (max %d, reserve %d, needs title %v), want 8064 from 8192-128 and a title",
+			eg2.WindowTokens(), eg2.MaxInputTokens, eg2.PromptReserveTokens, eg2.NeedsTitle())
+	}
+}
+
+func TestProfiles_TitleBudgetKeepsAFullChunkInsideTheModelWindow(t *testing.T) {
+	for _, p := range Profiles() {
+		if !p.NeedsTitle() {
+			if p.TitleMaxTokens() != 0 {
+				t.Errorf("%s: TitleMaxTokens = %d, want 0 for a profile with no prompt scheme", p.ID, p.TitleMaxTokens())
+			}
+			continue
+		}
+		if got := p.WindowTokens() + p.TitleMaxTokens() + promptFramingTokens; got > p.MaxInputTokens {
+			t.Errorf("%s: chunk window %d + title %d + framing %d = %d, over the model window %d",
+				p.ID, p.WindowTokens(), p.TitleMaxTokens(), promptFramingTokens, got, p.MaxInputTokens)
+		}
+	}
+	eg2, _ := ProfileByID("embeddinggemma-2")
+	if eg2.TitleMaxTokens() != 96 {
+		t.Errorf("EmbeddingGemma TitleMaxTokens = %d, want 96 (128 reserve - 32 framing)", eg2.TitleMaxTokens())
+	}
+}
+
+func TestModelProfile_Validate_RejectsAReserveWithNoRoomForATitle(t *testing.T) {
+	p, _ := ProfileByID("embeddinggemma-2")
+	p.PromptReserveTokens = promptFramingTokens
+	if err := p.Validate(); err == nil {
+		t.Fatal("Validate accepted a prompt scheme whose reserve leaves no room for a title")
 	}
 }

@@ -26,6 +26,11 @@ type Deps struct {
 	Chunk  chunk.Config
 	Tokens chunk.TokenCounter
 
+	// TitleMaxTokens bounds the note title sent to a service that builds a document prefix from it
+	// (schema.ModelProfile.TitleMaxTokens). Required when the handshake reports a PromptVersion; the
+	// chunk window already leaves room for exactly this many title tokens plus the prefix framing.
+	TitleMaxTokens int
+
 	// Vaults is the vault scope of the run: which vaults this batch actually looked at on disk.
 	//
 	// It is not used to select notes — the caller already did that — and exists for one thing only:
@@ -96,6 +101,11 @@ func (d Deps) Validate() error {
 	if d.Tokens == nil {
 		return errors.New("ingest: Tokens (chunk.TokenCounter) is nil")
 	}
+	if d.Handshake.PromptVersion != "" && d.TitleMaxTokens <= 0 {
+		return fmt.Errorf("ingest: TitleMaxTokens = %d, but the backend applies task-prefix scheme %q built "+
+			"from the note title; without a bound a long title could push a chunk past the model window",
+			d.TitleMaxTokens, d.Handshake.PromptVersion)
+	}
 	if err := d.Chunk.Validate(); err != nil {
 		return err
 	}
@@ -152,7 +162,7 @@ func ProcessNote(ctx context.Context, d Deps, n vault.Note) NoteResult {
 
 	// Everything is embedded before anything is written. An embedder failure therefore leaves the
 	// index exactly as it was, which is what makes T9's crash-between-embed-and-upsert benign.
-	points, err := embedPoints(ctx, d, expected, chunks)
+	points, err := embedPoints(ctx, d, n.Title, expected, chunks)
 	if err != nil {
 		return res.failed(err)
 	}
@@ -182,7 +192,7 @@ func ProcessNote(ctx context.Context, d Deps, n vault.Note) NoteResult {
 // It asserts the count the backend returned rather than zipping optimistically: a response with
 // fewer embeddings than texts would otherwise pair chunk i's payload with chunk j's vector, which
 // is a corruption no hash catches — point_hash covers the text, not the vector (PRD-contrato §2.4).
-func embedPoints(ctx context.Context, d Deps, expected []ExpectedPoint, chunks []chunk.Chunk) ([]Point, error) {
+func embedPoints(ctx context.Context, d Deps, title string, expected []ExpectedPoint, chunks []chunk.Chunk) ([]Point, error) {
 	if len(chunks) == 0 {
 		return nil, nil
 	}
@@ -191,7 +201,7 @@ func embedPoints(ctx context.Context, d Deps, expected []ExpectedPoint, chunks [
 		texts[i] = c.Text
 	}
 
-	vectors, err := d.Embedder.EmbedDocuments(ctx, texts)
+	vectors, err := embedTexts(ctx, d, title, texts)
 	if err != nil {
 		return nil, fmt.Errorf("embedding %d chunk(s): %w", len(texts), err)
 	}
@@ -248,4 +258,28 @@ func (r NoteResult) failed(err error) NoteResult {
 	r.State = StateFailed
 	r.Err = err
 	return r
+}
+
+// embedTexts embeds the chunk texts of one note. When the backend's handshake reports a task-prefix
+// scheme (PromptVersion), the service builds the document prefix from the note title, so the title goes
+// with every chunk; an embedder that cannot pass titles is refused here rather than allowed to embed
+// the whole index under "title: none". Without a scheme (BGE-M3) the call is the plain one it always was.
+func embedTexts(ctx context.Context, d Deps, title string, texts []string) ([]embed.Embedding, error) {
+	if d.Handshake.PromptVersion == "" {
+		return d.Embedder.EmbedDocuments(ctx, texts)
+	}
+	te, ok := d.Embedder.(embed.TitledEmbedder)
+	if !ok {
+		return nil, fmt.Errorf("the backend applies task-prefix scheme %q, which builds each document prefix "+
+			"from the note title, but the embedder %T cannot pass titles", d.Handshake.PromptVersion, d.Embedder)
+	}
+	title, err := fitTitle(ctx, d.Tokens, title, d.TitleMaxTokens)
+	if err != nil {
+		return nil, err
+	}
+	docs := make([]embed.Document, len(texts))
+	for i, t := range texts {
+		docs[i] = embed.Document{Title: title, Text: t}
+	}
+	return te.EmbedTitledDocuments(ctx, docs)
 }

@@ -15,8 +15,12 @@ import (
 
 // TokenCounter counts tokens the way the embedding model sees them.
 //
-// "Token" here means the real BGE-M3 tokenizer (PRD-stories-fundacao §3, S03): counting words or
-// characters/4 makes the clamp diverge from what the model reads and invalidates the calibration.
+// "Token" here means the tokenizer of the model the embedding service serves — BGE-M3 today, whichever
+// model profile is active tomorrow (schema.ModelProfile). The counter asks the SAME service the embedder
+// handshake verified (same endpoint, tokenizer revision confirmed there), so there is no per-profile
+// tokenizer to select on the Go side, only the profile's window (ConfigFor). Counting words or
+// characters/4 makes the clamp diverge from what the model reads and invalidates the calibration
+// (PRD-stories-fundacao §3, S03).
 // This interface is the seam that keeps that promise honest — the chunking logic never approximates,
 // it asks.
 //

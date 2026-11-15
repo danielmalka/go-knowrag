@@ -117,7 +117,7 @@ func (e *ServiceEmbedder) ModelID() string { return e.model.Revision }
 // EmbedQuery embeds one text through exactly the same path as a batch, so a query vector and a
 // document vector can never diverge by taking different validation branches.
 func (e *ServiceEmbedder) EmbedQuery(ctx context.Context, text string) (Embedding, error) {
-	out, err := e.embed(ctx, []string{text}, KindQuery)
+	out, err := e.embed(ctx, []string{text}, nil, KindQuery)
 	if err != nil {
 		return Embedding{}, err
 	}
@@ -133,10 +133,25 @@ func (e *ServiceEmbedder) EmbedQuery(ctx context.Context, text string) (Embeddin
 // successes. A caller never sees len(result) < len(texts), and never sees a zero vector standing in
 // for one that failed.
 func (e *ServiceEmbedder) EmbedDocuments(ctx context.Context, texts []string) ([]Embedding, error) {
-	return e.embed(ctx, texts, KindPassage)
+	return e.embed(ctx, texts, nil, KindPassage)
 }
 
-func (e *ServiceEmbedder) embed(ctx context.Context, texts []string, kind Kind) ([]Embedding, error) {
+var _ TitledEmbedder = (*ServiceEmbedder)(nil)
+
+// EmbedTitledDocuments is EmbedDocuments with the note title of each text sent alongside it, through the
+// same batching, retries and validation. The transport must be able to carry titles (TitledTransport);
+// asking a transport that cannot is an error, never a silent drop of the titles.
+func (e *ServiceEmbedder) EmbedTitledDocuments(ctx context.Context, docs []Document) ([]Embedding, error) {
+	texts := make([]string, len(docs))
+	titles := make([]string, len(docs))
+	for i, d := range docs {
+		texts[i], titles[i] = d.Text, d.Title
+	}
+	return e.embed(ctx, texts, titles, KindPassage)
+}
+
+// embed runs texts through the service. titles is nil (no titles) or exactly as long as texts.
+func (e *ServiceEmbedder) embed(ctx context.Context, texts, titles []string, kind Kind) ([]Embedding, error) {
 	if len(texts) == 0 {
 		return nil, nil
 	}
@@ -190,7 +205,7 @@ func (e *ServiceEmbedder) embed(ctx context.Context, texts []string, kind Kind) 
 				return
 			}
 
-			if err := e.embedSubBatch(runCtx, texts[start:end], out[start:end], start, kind); err != nil {
+			if err := e.embedSubBatch(runCtx, texts[start:end], subTitles(titles, start, end), out[start:end], start, kind); err != nil {
 				mu.Lock()
 				if firstErr == nil {
 					firstErr = err
@@ -270,8 +285,8 @@ func (e *ServiceEmbedder) ensureVerified(ctx context.Context) error {
 // embedSubBatch performs one request-with-retries and writes its validated results into dst.
 // offset is the sub-batch's start in the original input, so an ItemError points at the note the
 // caller actually passed rather than at a position in a slice it never saw.
-func (e *ServiceEmbedder) embedSubBatch(ctx context.Context, texts []string, dst []Embedding, offset int, kind Kind) error {
-	raw, err := e.callWithRetry(ctx, texts, kind)
+func (e *ServiceEmbedder) embedSubBatch(ctx context.Context, texts, titles []string, dst []Embedding, offset int, kind Kind) error {
+	raw, err := e.callWithRetry(ctx, texts, titles, kind)
 	if err != nil {
 		return err
 	}
@@ -313,7 +328,7 @@ func (e *ServiceEmbedder) embedSubBatch(ctx context.Context, texts []string, dst
 // request) for a bug on this side, which no retry fixes; the cost of not classifying is three round
 // trips against localhost before the same error surfaces. Classify if that ever shows up in a
 // latency profile.
-func (e *ServiceEmbedder) callWithRetry(ctx context.Context, texts []string, kind Kind) ([]Embedding, error) {
+func (e *ServiceEmbedder) callWithRetry(ctx context.Context, texts, titles []string, kind Kind) ([]Embedding, error) {
 	delay := e.backoff
 	var lastErr error
 
@@ -323,7 +338,7 @@ func (e *ServiceEmbedder) callWithRetry(ctx context.Context, texts []string, kin
 		}
 
 		attemptCtx, cancel := context.WithTimeout(ctx, e.profile.Timeout)
-		out, err := e.transport.Embed(attemptCtx, texts, kind)
+		out, err := e.send(attemptCtx, texts, titles, kind)
 		cancel()
 
 		if err == nil {
@@ -371,4 +386,25 @@ func outerCtxErr(endpoint string, err error) error {
 		return fmt.Errorf("%w: %s: %w", ErrBackend, endpoint, err)
 	}
 	return err
+}
+
+// subTitles is the slice of titles for one sub-batch, or nil when the call carries none.
+func subTitles(titles []string, start, end int) []string {
+	if titles == nil {
+		return nil
+	}
+	return titles[start:end]
+}
+
+// send makes one transport call. Without titles it is the plain Embed; with titles the transport has
+// to implement TitledTransport, because dropping them would embed documents under the wrong prefix.
+func (e *ServiceEmbedder) send(ctx context.Context, texts, titles []string, kind Kind) ([]Embedding, error) {
+	if titles == nil {
+		return e.transport.Embed(ctx, texts, kind)
+	}
+	tt, ok := e.transport.(TitledTransport)
+	if !ok {
+		return nil, fmt.Errorf("embed: the transport %T cannot carry document titles, which the %q profile needs", e.transport, e.model.ID)
+	}
+	return tt.EmbedTitled(ctx, texts, titles, kind)
 }

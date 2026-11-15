@@ -33,6 +33,7 @@ import (
 	"github.com/danielmalka/go-knowrag/internal/ingest"
 	"github.com/danielmalka/go-knowrag/internal/ingest/lock"
 	"github.com/danielmalka/go-knowrag/internal/measure"
+	"github.com/danielmalka/go-knowrag/internal/schema"
 	"github.com/danielmalka/go-knowrag/internal/store"
 	"github.com/danielmalka/go-knowrag/internal/vault"
 )
@@ -220,8 +221,9 @@ func runOrchestrate(ctx context.Context, cfg *config.Config, tenant string, scan
 		Store:          points,
 		Embedder:       embedder,
 		Handshake:      handshake,
-		Chunk:          chunk.Config{FloorTokens: 256, CeilingTokens: 1024},
+		Chunk:          chunk.ConfigFor(schema.DefaultProfile(), 256, 1024),
 		Tokens:         tokens,
+		TitleMaxTokens: schema.DefaultProfile().TitleMaxTokens(),
 		UpsertAttempts: 3,
 	}, scans...)
 	if err != nil {
