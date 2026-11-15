@@ -337,7 +337,7 @@ python3 -m venv ~/.venvs/knowrag-embedder
 ```
 
 Sem dispositivo CUDA ele **não sobe** (status 78, mensagem clara). Primeira execução baixa ~0,5 GB de
-pesos. A ingestão roda em horário fixo (`knowrag-ingest.timer`). O unit de usuário, as variáveis de
+pesos. A ingestão roda em horário fixo, às 09:00, 15:00 e 21:00 no horário de Brasília (`knowrag-ingest.timer`, com o fuso na própria expressão). O unit de usuário, as variáveis de
 ambiente, os números medidos (VRAM por lote, descarga, carga) e a operação estão em
 `scripts/embedder-service/README.md`; o unit e o env de exemplo ficam no mesmo diretório:
 

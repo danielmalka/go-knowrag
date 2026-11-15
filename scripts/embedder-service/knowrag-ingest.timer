@@ -2,12 +2,14 @@
 Description=Run go-knowrag incremental ingest at fixed times
 
 [Timer]
-# Fixed times, as decided on 2026-11-15: the embedder process is always up and loads its model on
-# demand, so ingestion needs no window around it. The three times are the ones the previous design
-# used (one nightly run, two inside the old daytime window), kept until the owner picks others.
-OnCalendar=*-*-* 03:00:00
-OnCalendar=*-*-* 12:00:00
-OnCalendar=*-*-* 18:00:00
+# Fixed times, as decided by the owner on 2026-11-15: 09:00, 15:00 and 21:00 Brasilia time. The embedder
+# process is always up and loads its model on demand, so ingestion needs no window around it.
+#
+# The zone is written in the expression on purpose. Without it systemd uses the zone of the machine
+# the timer runs on, and a host whose clock is set to UTC (the usual state of a VPS or a container)
+# would fire three hours early. `systemd-analyze calendar` prints the instants it resolves to:
+#   systemd-analyze calendar --iterations=4 '*-*-* 09,15,21:00:00 America/Sao_Paulo'
+OnCalendar=*-*-* 09,15,21:00:00 America/Sao_Paulo
 # If the machine was down at one of them, run once when it comes back rather than skip it.
 Persistent=true
 RandomizedDelaySec=120
