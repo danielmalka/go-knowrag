@@ -242,22 +242,17 @@ func writeDeps(tenantID string, store ingest.Store) ingest.Deps {
 		Handshake: writeHandshake(),
 		Chunk:     chunk.Config{FloorTokens: 1, CeilingTokens: 1000},
 		Tokens:    chunk.FakeTokenCounter{},
+		// The profile's bound on a note title sent to the embedder; ingest refuses to start without it
+		// when the handshake reports a prompt scheme.
+		TitleMaxTokens: schema.DefaultProfile().TitleMaxTokens(),
 	}
 }
 
-// writeHandshake is a complete BackendHandshakeInfo. All seven fields are populated because
-// ComputePointHash hashes all seven (internal/ingest/pointhash.go), and a fixture that left one at
-// its zero value would put a hash nothing produces into the store.
+// writeHandshake is the complete report of a backend that matches the default profile. Every field is
+// populated because ComputePointHash hashes them (internal/ingest/pointhash.go), and a fixture that
+// left one at its zero value would put a hash nothing produces into the store.
 func writeHandshake() embed.BackendHandshakeInfo {
-	return embed.BackendHandshakeInfo{
-		ModelRevision:     schema.DefaultProfile().Revision,
-		TokenizerRevision: schema.DefaultProfile().Revision,
-		Dim:               embed.DefaultDenseDim(),
-		Normalization:     schema.DefaultProfile().Normalization,
-		Pooling:           schema.DefaultProfile().Pooling,
-		Precision:         schema.DefaultProfile().PrimaryPrecision(),
-		SparseParams:      map[string]string{"indices": "token_id", "values": "lexical_weight"},
-	}
+	return embed.ExpectedFor(schema.DefaultProfile())
 }
 
 // newWriteProbe builds the real ingestion over the hostile store above.

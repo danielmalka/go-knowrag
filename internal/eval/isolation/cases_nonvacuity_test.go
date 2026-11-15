@@ -179,55 +179,6 @@ func TestEmptyTenantCase_ReadsTheSentinelProductionRaises(t *testing.T) {
 	}
 }
 
-// withoutLegTenant is the request internal/retrieval would send if buildQueryRequest stopped putting
-// the filter on its prefetch legs (retrieval/build.go), with the outer filter left intact.
-//
-// The store's answer is unchanged by it, because matches() in probe.go reads the outer filter and
-// never the legs — so the results stay clean and only an inspection of what was asked can notice.
-// That is the whole reason requestsCarryTenant walks the legs.
-func withoutLegTenant(req retrieval.SearchRequest) retrieval.SearchRequest {
-	req.Prefetch = append([]retrieval.PrefetchLeg(nil), req.Prefetch...)
-	for i := range req.Prefetch {
-		must := append([]retrieval.Condition(nil), req.Prefetch[i].Filter.Must...)
-		req.Prefetch[i].Filter.Must = slices.DeleteFunc(must, func(c retrieval.Condition) bool {
-			return c.Field == "tenant_id"
-		})
-	}
-	return req
-}
-
-// TestEveryCase_FailsWhenOnlyTheLegsLoseTheirTenant is what makes requestsCarryTenant impossible to
-// delete quietly.
-//
-// Deleting every call to it left this package green, because with the hostile store the outer filter
-// still carries the tenant and the results are therefore still clean. The concrete regression that
-// hides in that gap is a change dropping the condition from the prefetch legs alone: nothing about
-// the answer moves, and without this test nothing about the suite moves either.
-func TestEveryCase_FailsWhenOnlyTheLegsLoseTheirTenant(t *testing.T) {
-	withProbe(t, rewritingProbe(withoutLegTenant))
-
-	for _, c := range searchDrivenCases() {
-		t.Run(c.Name, func(t *testing.T) {
-			detail := c.Run(t.Context())
-			// One structural exception, and it is not a name-shaped dodge: the empty-tenant case
-			// asserts that no request is built at all, so a rewrite of requests that are never sent
-			// cannot reach it either way. Its seam is
-			// TestEmptyTenantCase_FailsWhenTheEmptyTenantIsHonoured.
-			if strings.Contains(c.Name, "empty is refused") {
-				if detail != "" {
-					t.Fatalf("this case failed against a rewrite of requests it never sends: %s", detail)
-				}
-				return
-			}
-			if detail == "" {
-				t.Fatal("this case passed while every prefetch leg went out with no tenant condition; " +
-					"the results are identical either way, so without inspecting the request the " +
-					"suite cannot see a leg that lost its scope")
-			}
-		})
-	}
-}
-
 // probeReplacing swaps every point the predicate names for an ordinary visible note of the same
 // tenant and collection, under a uid the fixture does not know.
 //

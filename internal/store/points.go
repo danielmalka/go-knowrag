@@ -57,6 +57,11 @@ func NewClient(api PointAPI, collection string) (*Client, error) {
 // into a package that internal/archtest forbids it in.
 var _ ingest.Store = (*Client)(nil)
 
+// pointVectors is the named vectors one point carries: the dense one.
+func pointVectors(e embed.Embedding) map[string]*qdrant.Vector {
+	return map[string]*qdrant.Vector{schema.DenseVectorName: qdrant.NewVectorDense(e.Dense)}
+}
+
 // UpsertPoints writes points and reports whether Qdrant confirmed the write.
 //
 // wait=true is not optional here: the whole insert-then-prune order (ADR-006) rests on knowing the
@@ -68,18 +73,6 @@ var _ ingest.Store = (*Client)(nil)
 // reports when the write did not finish in time — is ambiguous, because the write may still land
 // afterwards. Only an explicit RPC error is reported as failed, and even that never authorizes a
 // prune (see ingest.ProcessNote): the distinction exists so the report can say which happened.
-// pointVectors is the named vectors one point carries: the dense one always, and the sparse one only
-// when the embedding has it. A dense-only profile's embedding has no sparse half (embed validates that
-// per profile), and sending an empty sparse vector to a collection that has no sparse config is a
-// request Qdrant rejects; a hybrid profile's embedding always has one, so its points are unchanged.
-func pointVectors(e embed.Embedding) map[string]*qdrant.Vector {
-	out := map[string]*qdrant.Vector{schema.DenseVectorName: qdrant.NewVectorDense(e.Dense)}
-	if len(e.Sparse.Indices) > 0 {
-		out[schema.SparseVectorName] = qdrant.NewVectorSparse(e.Sparse.Indices, e.Sparse.Values)
-	}
-	return out
-}
-
 func (c *Client) UpsertPoints(
 	ctx context.Context,
 	tenantID string,

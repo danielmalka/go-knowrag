@@ -120,8 +120,8 @@ type probeStore struct {
 	// recordAs rewrites the request this store logs, leaving the request it answers untouched.
 	//
 	// It is the seam for the two assertions no result can reach. A tenant condition missing from the
-	// prefetch legs alone changes nothing about the answer, because matches() below reads the outer
-	// filter and never the legs; a MustNot that was never sent changes nothing either, if the store
+	// request alone changes nothing about the answer if the store applies the scope on its own account,
+	// which matches() below does not; a MustNot that was never sent changes nothing either, if the store
 	// excludes those points on its own account — which is the helpful mock this package exists not
 	// to be. Nothing in the suite sets it; cases_nonvacuity_test.go does, to prove the request
 	// inspections in cases.go are load-bearing rather than decorative.
@@ -246,8 +246,7 @@ func foreignResults(tenantID string, results []retrieval.Result) []string {
 	return leaks
 }
 
-// requestsCarryTenant checks every request that reached the store, and every prefetch leg inside
-// it, for the tenant condition.
+// requestsCarryTenant checks every request that reached the store for the tenant condition.
 //
 // This is the assertion that does not depend on what came back. A case that only checked results
 // would pass against a store that happened to hold nothing for the other tenants — the "empty for
@@ -261,12 +260,6 @@ func requestsCarryTenant(reqs []retrieval.SearchRequest, tenantID string) string
 		if !slices.Contains(req.Filter.Must, want) {
 			return fmt.Sprintf("request %d went out with no tenant condition on its own filter: %+v",
 				i+1, req.Filter)
-		}
-		for j, leg := range req.Prefetch {
-			if !slices.Contains(leg.Filter.Must, want) {
-				return fmt.Sprintf("request %d prefetch leg %d (%s) went out with no tenant condition: %+v",
-					i+1, j+1, leg.Vector, leg.Filter)
-			}
 		}
 		// And no second tenant condition naming somebody else — one `must` per field is what makes
 		// the scope a scope, and two would be a contradiction Qdrant resolves by matching nothing,

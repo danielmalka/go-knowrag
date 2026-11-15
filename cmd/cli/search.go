@@ -78,7 +78,5 @@ func dialSearcher(_ context.Context, cfg *config.Config) (clicmd.Searcher, func(
 		return nil, nil, err
 	}
 
-	searchCfg := retrieval.DefaultConfig()
-	searchCfg.Profile = profile
-	return retrieval.NewSearcher(embedder, querier, searchCfg), release, nil
+	return retrieval.NewSearcher(embedder, querier, retrieval.DefaultConfig()), release, nil
 }

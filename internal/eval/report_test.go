@@ -83,7 +83,7 @@ func TestAggregate_ErroredQuestionsAreNotMisses(t *testing.T) {
 
 func TestRenderReport_ListsFailedQuestionsWithExpectedAndActual(t *testing.T) {
 	r := Aggregate(hitPattern("alfa", 1, 1))
-	r.K, r.Mode = 5, "hybrid"
+	r.K, r.Mode = 5, "dense"
 
 	out := RenderReport(r)
 

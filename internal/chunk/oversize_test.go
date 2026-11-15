@@ -20,8 +20,8 @@ func TestClassifyOversize(t *testing.T) {
 		{"exactly at the ceiling", 1024, false, false},
 		{"one token over the ceiling", 1025, true, false},
 		{"between ceiling and hard limit", 4000, true, false},
-		{"exactly at the hard limit", HardTokenLimit, true, false},
-		{"one token over the hard limit", HardTokenLimit + 1, false, true},
+		{"exactly at the hard limit", hardLimit, true, false},
+		{"one token over the hard limit", hardLimit + 1, false, true},
 	}
 
 	for _, tc := range tests {
@@ -49,7 +49,7 @@ func TestClassifyOversize(t *testing.T) {
 func TestHardLimitError_NamesTheFile(t *testing.T) {
 	const path = "research/golang/enorme.md"
 
-	_, err := classifyOversize(path, []string{"Title", "Dump"}, HardTokenLimit+1,
+	_, err := classifyOversize(path, []string{"Title", "Dump"}, hardLimit+1,
 		Config{FloorTokens: 256, CeilingTokens: 1024})
 
 	var hard *HardLimitError
@@ -71,7 +71,7 @@ func TestHardLimitError_NamesTheFile(t *testing.T) {
 // where there is no path to point at. An empty quoted string would read as a bug in the tool
 // rather than as a fact about the note.
 func TestHardLimitError_NoBreadcrumb(t *testing.T) {
-	err := &HardLimitError{Path: "research/n.md", Tokens: HardTokenLimit + 1}
+	err := &HardLimitError{Path: "research/n.md", Tokens: hardLimit + 1}
 
 	if !strings.Contains(err.Error(), "(no heading)") {
 		t.Errorf("message %q does not say the chunk has no heading", err.Error())
@@ -144,7 +144,7 @@ func TestOversizeTable_SameRuleAsFence(t *testing.T) {
 
 func TestFenceOver8192Tokens_ReturnsExplicitErrorNamingFile(t *testing.T) {
 	const path = "research/golang/dump.md"
-	body := "# T\n\n## Code\n\n```go\n" + strings.Repeat("token ", HardTokenLimit+100) + "\n```\n"
+	body := "# T\n\n## Code\n\n```go\n" + strings.Repeat("token ", hardLimit+100) + "\n```\n"
 
 	chunks, err := ChunkNote(context.Background(), testNote(path, body), oversizeCfg, FakeTokenCounter{})
 

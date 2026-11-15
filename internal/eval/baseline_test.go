@@ -21,7 +21,7 @@ func baselinePath(t *testing.T) string {
 
 func TestSaveAndLoadBaseline_RoundTripsWithoutLoss(t *testing.T) {
 	original := Aggregate(append(hitPattern("alfa", 3, 1), hitPattern("beta", 2, 2)...))
-	original.K, original.Mode = 5, "hybrid"
+	original.K, original.Mode = 5, "dense"
 	original.GoldenSetCommit = "abc1234"
 	original.Stale = []StaleEntry{{Identity: "deadbeef", Question: "a late one", Commit: "999", Reason: "after the baseline"}}
 	original.CoverageWarning = "beta is below its minimum"

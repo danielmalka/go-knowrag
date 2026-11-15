@@ -126,12 +126,12 @@ func TestProcessNote_TitleCutOnlyAffectsWhatTheEmbedderGets_NotTheHash(t *testin
 }
 
 func TestProcessNote_NoPromptScheme_NeverCountsOrCutsTheTitle(t *testing.T) {
-	// BGE-M3 stays byte-identical: its title is not sent, so it is neither counted nor cut.
+	// Without a prompt scheme the title is not sent, so it is neither counted nor cut.
 	titleSeen := false
 	counter := titleWatcher{title: "titulo unico", seen: &titleSeen}
 	deps := testDeps(newFakeStore(&journal{}), &titledSpy{})
 	deps.Tokens = counter
-	n := testNote(t, "research/curadoria/bge.md", 1)
+	n := testNote(t, "research/curadoria/prefixless.md", 1)
 	n.Title = "titulo unico"
 	if res := ProcessNote(t.Context(), deps, n); res.State != StatePruned {
 		t.Fatalf("State = %s (%v)", res.State, res.Err)

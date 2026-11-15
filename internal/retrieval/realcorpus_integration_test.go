@@ -21,7 +21,7 @@ import (
 //
 // integration_test.go proves the *rules* against fixtures it controls, in a container it created
 // and destroys. This one proves the *shape of the query works against the real thing*: the deployed
-// Qdrant holding the real vault corpus, and the real BGE-M3 service. It seeds nothing, writes
+// Qdrant holding the real vault corpus, and the real embedding service. It seeds nothing, writes
 // nothing and deletes nothing — a test that mutated the owner's index to make an assertion pass
 // would be a worse outcome than no test.
 //
@@ -55,7 +55,7 @@ func realCorpus(t *testing.T) realCorpusEnv {
 		tenant:     os.Getenv("KNOWRAG_TENANT_ID"),
 	}
 	if env.collection == "" {
-		env.collection = "interno"
+		env.collection = "interno_eg2"
 	}
 	if env.tenant == "" {
 		env.tenant = env.collection
@@ -114,9 +114,9 @@ func realCorpusSearcher(t *testing.T, env realCorpusEnv, client *qdrant.Client) 
 	return retrieval.NewSearcher(embedder, querier, retrieval.DefaultConfig())
 }
 
-// TestSearch_RealCorpus_ReturnsCoherentResults is the end-to-end proof that the §2.3b query shape —
-// two ACORN-enabled prefetch legs fused with RRF, under a mandatory tenant filter — is accepted by
-// the deployed server and answers sensibly over the real corpus.
+// TestSearch_RealCorpus_ReturnsCoherentResults is the end-to-end proof that the query shape — one
+// ACORN-enabled dense search under a mandatory tenant filter — is accepted by the deployed server and
+// answers sensibly over the real corpus.
 func TestSearch_RealCorpus_ReturnsCoherentResults(t *testing.T) {
 	env := realCorpus(t)
 	client := realCorpusClient(t, env)

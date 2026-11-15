@@ -20,7 +20,7 @@ func TestManifest_ThreeCollectionsDefined(t *testing.T) {
 	for i, c := range m {
 		names[i] = c.Name
 	}
-	if want := []string{"interno", "clientes", "base_paga"}; !slices.Equal(names, want) {
+	if want := []string{"interno_eg2", "clientes_eg2", "base_paga_eg2"}; !slices.Equal(names, want) {
 		t.Errorf("collection names = %v, want %v", names, want)
 	}
 
@@ -28,14 +28,11 @@ func TestManifest_ThreeCollectionsDefined(t *testing.T) {
 		if c.DenseVectorName != "dense" {
 			t.Errorf("%s: DenseVectorName = %q, want %q", c.Name, c.DenseVectorName, "dense")
 		}
-		if c.DenseDim != 1024 {
-			t.Errorf("%s: DenseDim = %d, want 1024 (PRD-contrato §2.3b)", c.Name, c.DenseDim)
+		if c.DenseDim != 768 {
+			t.Errorf("%s: DenseDim = %d, want 768 (EmbeddingGemma 2)", c.Name, c.DenseDim)
 		}
 		if c.Distance != DistanceCosine {
 			t.Errorf("%s: Distance = %v, want %v", c.Name, c.Distance, DistanceCosine)
-		}
-		if c.SparseVectorName != "sparse" {
-			t.Errorf("%s: SparseVectorName = %q, want %q", c.Name, c.SparseVectorName, "sparse")
 		}
 		// The revision is referenced, not duplicated: a bump in the profile must move the manifest
 		// with it, or the model-revision drift check (Apply) would compare against a stale literal.
@@ -93,12 +90,12 @@ func TestManifest_PayloadIndexes_TenantIsTenantTrue(t *testing.T) {
 // process.
 func TestManifest_ReturnsIndependentCopy(t *testing.T) {
 	m := Manifest()
-	m[0].DenseDim = 768
+	m[0].DenseDim = 1024
 	m[0].Indexes[0].IsTenant = false
 	m[0].Indexes = append(m[0].Indexes, PayloadIndex{Field: "smuggled"})
 
 	fresh := Manifest()
-	if fresh[0].DenseDim != 1024 {
+	if fresh[0].DenseDim != 768 {
 		t.Errorf("mutating a returned manifest changed DenseDim of the next one: got %d", fresh[0].DenseDim)
 	}
 	if !fresh[0].Indexes[0].IsTenant {

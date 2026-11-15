@@ -25,10 +25,6 @@ const (
 	// read from the environment at startup and never appears in source or in a log line.
 	envQdrantAPIKey     = "MCP_QDRANT_API_KEY"
 	envEmbedderEndpoint = "MCP_EMBEDDER_ENDPOINT"
-	// envModelProfile selects the embedding model profile this instance queries with; optional, and
-	// empty means schema.DeployedProfileID (EmbeddingGemma 2). It is checked against MCP_COLLECTION:
-	// the collection has to be one this profile owns.
-	envModelProfile = "MCP_MODEL_PROFILE"
 	// envAreas is this instance's own area list (D-26): the areas it advertises to a client and
 	// accepts as an `area` filter are installation configuration, not a compile-time enum, same as
 	// the ingestor's per-vault roster. It does not have to agree with any one vault's roster — an
@@ -50,8 +46,6 @@ type Config struct {
 	QdrantEndpoint   string
 	QdrantAPIKey     string
 	EmbedderEndpoint string
-	// ModelProfile is the profile ID from MCP_MODEL_PROFILE, "" for the deployed one. Use Profile().
-	ModelProfile string
 	// Areas is what this instance answers `area` filters and its own tool description against.
 	// Sorted and deduplicated once here, at load, rather than by every caller of canonicalAreas.
 	Areas []string
@@ -68,7 +62,6 @@ func LoadConfig() (Config, error) {
 		QdrantEndpoint:   os.Getenv(envQdrantEndpoint),
 		QdrantAPIKey:     os.Getenv(envQdrantAPIKey),
 		EmbedderEndpoint: os.Getenv(envEmbedderEndpoint),
-		ModelProfile:     os.Getenv(envModelProfile),
 		Areas:            splitAreas(os.Getenv(envAreas)),
 	}
 
@@ -110,19 +103,17 @@ func LoadConfig() (Config, error) {
 	return cfg, errors.Join(errs...)
 }
 
-// Profile is the model profile this instance queries with, checked against its collection: a
-// collection holds the vectors of one model, so naming a profile's query shape against another
-// profile's collection searches the wrong vector space (or fails at the first query on its width).
-// An unset MCP_COLLECTION is left to LoadConfig's missing-variable error rather than reported twice.
+// Profile is the model profile this instance queries with (schema.DefaultProfile), checked against
+// its collection: a collection holds one model's vectors, so a query embedded for this profile
+// against another model's collection (the retired BGE-M3 `interno`) would search the wrong vector
+// space, or fail at the first query on its width. An unset MCP_COLLECTION is left to LoadConfig's
+// missing-variable error rather than reported twice.
 func (c Config) Profile() (schema.ModelProfile, error) {
-	p, err := schema.ResolveProfile(c.ModelProfile)
-	if err != nil {
-		return schema.ModelProfile{}, fmt.Errorf("mcp-server: %s: %w", envModelProfile, err)
-	}
+	p := schema.DefaultProfile()
 	if strings.TrimSpace(c.Collection) != "" && !p.HasCollection(c.Collection) {
 		return schema.ModelProfile{}, fmt.Errorf(
-			"mcp-server: %s=%q is not a collection of model profile %q (%s); name one of those, or set %s "+
-				"to the profile that owns it", envCollection, c.Collection, p.ID, strings.Join(p.Collections, ", "), envModelProfile)
+			"mcp-server: %s=%q is not a collection of model profile %q (%s); name one of those",
+			envCollection, c.Collection, p.ID, strings.Join(p.Collections, ", "))
 	}
 	return p, nil
 }
@@ -161,7 +152,6 @@ func (c Config) LogValue() slog.Value {
 		slog.String("qdrant_endpoint", c.QdrantEndpoint),
 		slog.String("qdrant_api_key", c.redactedKey()),
 		slog.String("embedder_endpoint", c.EmbedderEndpoint),
-		slog.String("model_profile", c.ModelProfile),
 		slog.String("areas", strings.Join(c.Areas, ",")),
 	)
 }
@@ -170,8 +160,8 @@ func (c Config) LogValue() slog.Value {
 func (c Config) String() string {
 	return fmt.Sprintf(
 		"main.Config{Collection:%q TenantID:%q QdrantEndpoint:%q QdrantAPIKey:%q "+
-			"EmbedderEndpoint:%q ModelProfile:%q Areas:%q}",
-		c.Collection, c.TenantID, c.QdrantEndpoint, c.redactedKey(), c.EmbedderEndpoint, c.ModelProfile, c.Areas)
+			"EmbedderEndpoint:%q Areas:%q}",
+		c.Collection, c.TenantID, c.QdrantEndpoint, c.redactedKey(), c.EmbedderEndpoint, c.Areas)
 }
 
 // redactedKey reports the key's presence without its value, so "not set" stays distinguishable from

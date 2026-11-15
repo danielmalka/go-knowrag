@@ -18,13 +18,12 @@ import (
 // make ties reproducible. That was wrong in a way that flattered the system, and the correction is
 // the reason this comment is long:
 //
-// TopK is not a client-side display limit. It reaches internal/retrieval/query.go's prefetchLimit,
-// which computes (TopK+Offset) × multiplier — so asking for 10 instead of 5 took the hybrid's
-// prefetch legs from 20 candidates each to 40, and the outer RRF Limit from 5 to 10. RRF over a
-// doubled pool is a different ranking, not the same ranking with more of its tail visible. A note
-// landing 8th in that larger fusion — one production would never return — was then truncated into
-// the eval's top-5 and counted as a hit. The reported recall came out better than the deployed
-// system's, under a heading that said "Recall@5".
+// TopK is not a client-side display limit. It sets how many candidates the search asks Qdrant for
+// (internal/retrieval's fetchWindow multiplies it by the per-note cap), so asking for 10 instead of 5
+// changes which points the per-note cap and the cut operate on. A note landing 8th in a wider window
+// — one production would never return — was then truncated into the eval's top-5 and counted as a
+// hit. The reported recall came out better than the deployed system's, under a heading that said
+// "Recall@5".
 //
 // Re-sorting compounded it. Production returns Qdrant's order and never reorders (Search and
 // formatResults in internal/retrieval), so re-ranking a *wider* window does not just reorder the
@@ -50,8 +49,7 @@ type RunConfig struct {
 	Collection string
 	TenantID   string
 	// K is the cut-off the recall is named after: K=5 makes this Recall@5.
-	K    int
-	Mode retrieval.SearchMode
+	K int
 }
 
 // QuestionResult is one question's outcome.
@@ -128,7 +126,6 @@ func runOne(ctx context.Context, s Searcher, q goldenset.GoldenQuestion, cfg Run
 		TenantID:   cfg.TenantID,
 		Text:       q.Question,
 		TopK:       cfg.K,
-		Mode:       cfg.Mode,
 	})
 	if err != nil {
 		res.Error = err.Error()

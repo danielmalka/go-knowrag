@@ -3,6 +3,7 @@ package embed
 import (
 	"context"
 	"errors"
+	"math"
 	"reflect"
 	"strings"
 	"sync"
@@ -188,36 +189,6 @@ func TestServiceEmbedder_EmbedDocuments_CountMismatchIsAnError(t *testing.T) {
 	}
 }
 
-// TestServiceEmbedder_EmbedDocuments_OutOfOrderSparseIsReportedNotFixed is the client half of the
-// ordering contract. The service sorts by token id before answering; if it ever stops, that is a
-// bug on its side and it has to surface here. Re-sorting would hide it, and the sparse vector feeds
-// point_hash — an order that drifts silently makes an unchanged note look changed on every run.
-func TestServiceEmbedder_EmbedDocuments_OutOfOrderSparseIsReportedNotFixed(t *testing.T) {
-	e := newTestEmbedder(t, &stubTransport{
-		embed: func(_ context.Context, texts []string) ([]Embedding, error) {
-			out := make([]Embedding, len(texts))
-			for i := range texts {
-				out[i] = Embedding{
-					Dense:  validDense(),
-					Sparse: Sparse{Indices: []uint32{900, 3, 17}, Values: []float32{0.14, 0.28, 0.22}},
-				}
-			}
-			return out, nil
-		},
-	})
-
-	got, err := e.EmbedDocuments(context.Background(), []string{"a"})
-	if err == nil {
-		t.Fatal("an out-of-order sparse vector was accepted; the server's ordering guarantee is now unverifiable")
-	}
-	if got != nil {
-		t.Error("a result was returned alongside the error")
-	}
-	if !strings.Contains(err.Error(), "ascending") {
-		t.Errorf("error %q does not name the broken ordering invariant", err)
-	}
-}
-
 func TestServiceEmbedder_EmbedQuery_AndDocuments_UseDifferentKinds(t *testing.T) {
 	tr := &stubTransport{}
 	e := newTestEmbedder(t, tr)
@@ -242,7 +213,7 @@ func TestServiceEmbedder_EmbedDocuments_OneBadItemFailsWholeBatch(t *testing.T) 
 			for i, txt := range texts {
 				out[i] = fakeEmbedding(txt, schema.DefaultProfile())
 			}
-			out[2].Sparse.Values[0] = 0 // degenerate: zero weight
+			out[2].Dense[0] = float32(math.NaN()) // an invalid vector, third in the batch
 			return out, nil
 		},
 	})
@@ -254,8 +225,8 @@ func TestServiceEmbedder_EmbedDocuments_OneBadItemFailsWholeBatch(t *testing.T) 
 	if got != nil {
 		t.Errorf("a partial result of %d embeddings escaped alongside the error", len(got))
 	}
-	if !errors.Is(err, ErrSparseZeroWeight) {
-		t.Errorf("error %v does not match ErrSparseZeroWeight; S06a cannot attribute it to a note", err)
+	if !strings.Contains(err.Error(), "Dense[0]") {
+		t.Errorf("error %v does not name the offending element", err)
 	}
 
 	var item *ItemError

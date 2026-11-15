@@ -54,8 +54,7 @@ type Report struct {
 	Complete bool `json:"complete"`
 
 	// Mode and K describe the run these numbers came from. Two reports are only comparable when
-	// both agree, which is what makes the hybrid-vs-dense comparison (hybrid_compare.go) and the
-	// baseline delta (baseline.go) mean anything.
+	// both agree, which is what makes the baseline delta (baseline.go) mean anything.
 	Mode string `json:"mode"`
 	K    int    `json:"k"`
 

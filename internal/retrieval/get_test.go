@@ -104,9 +104,8 @@ func TestGetByUID_FilterIsTenantPlusUIDUnderTheSearchGuards(t *testing.T) {
 			}
 		}
 	}
-	if len(req.Prefetch) != 0 || req.FusionRRF || len(req.Dense) != 0 {
-		t.Errorf("the lookup is a ranked search: prefetch=%d fusion=%v dense=%d",
-			len(req.Prefetch), req.FusionRRF, len(req.Dense))
+	if len(req.Dense) != 0 {
+		t.Errorf("the lookup is a ranked search: it carries a %d-element query vector", len(req.Dense))
 	}
 	if req.Limit != noteLookupLimit {
 		t.Errorf("limit = %d, want %d", req.Limit, noteLookupLimit)

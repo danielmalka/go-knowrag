@@ -151,9 +151,9 @@ func TestRunGolden_SearcherErrorIsCapturedAndTheRunContinues(t *testing.T) {
 }
 
 // TestRunGolden_AsksTheProductionQuery is the assertion the whole instrument rests on, and the one
-// whose absence let a defect through: TopK reaches internal/retrieval/query.go's prefetchLimit, so a
-// value larger than K changes the prefetch pool and the fusion width, and the eval measures a
-// ranking production never computes.
+// whose absence let a defect through: TopK sets how many candidates the search asks Qdrant for, so a
+// value larger than K changes the window the per-note cap and the cut operate on, and the eval
+// measures a ranking production never computes.
 func TestRunGolden_AsksTheProductionQuery(t *testing.T) {
 	s := &fakeSearcher{answers: [][]retrieval.Result{{result(uidA, 0, 0.9)}}}
 
@@ -167,13 +167,11 @@ func TestRunGolden_AsksTheProductionQuery(t *testing.T) {
 	if s.queries[0].TopK != 5 {
 		t.Errorf("the search asked for TopK %d, want exactly K = 5", s.queries[0].TopK)
 	}
-	// Offset is pinned for the same reason TopK is, and pinning only TopK was this test's own gap:
-	// prefetchLimit is (TopK+Offset)×multiplier, so a non-zero offset widens the prefetch pool by
-	// exactly the route the margin used to, and an assertion that watched only TopK would stay green
-	// through it.
+	// Offset is pinned for the same reason TopK is: a non-zero offset moves the window the verdict
+	// is taken over, and an assertion that watched only TopK would stay green through it.
 	if s.queries[0].Offset != 0 {
-		t.Errorf("the search asked for offset %d; anything but 0 widens the prefetch pool the same "+
-			"way the removed margin did (internal/retrieval/query.go, prefetchLimit)", s.queries[0].Offset)
+		t.Errorf("the search asked for offset %d; anything but 0 moves the window the verdict is taken over",
+			s.queries[0].Offset)
 	}
 	// The facets are pinned because a filter the operator's search does not carry makes the eval
 	// measure a narrower corpus and call the result Recall@5 — the same class as the TopK defect,
@@ -191,25 +189,6 @@ func TestRunGolden_AsksTheProductionQuery(t *testing.T) {
 	if s.queries[0].TenantID != "tenant-a" || s.queries[0].Collection != "interno" {
 		t.Errorf("the search ran under %q/%q, not the RunConfig's scope",
 			s.queries[0].Collection, s.queries[0].TenantID)
-	}
-}
-
-// TestRunGolden_ModeReachesEveryQuery is what makes the hybrid-vs-dense comparison a comparison. If
-// RunConfig.Mode never got onto the Query, both halves would measure the same hybrid search and the
-// decision doc would report a difference of zero as evidence.
-func TestRunGolden_ModeReachesEveryQuery(t *testing.T) {
-	cfg := runConfig(5)
-	cfg.Mode = retrieval.SearchModeDenseOnly
-	s := &fakeSearcher{answers: [][]retrieval.Result{{result(uidA, 0, 0.9)}}}
-
-	two := []goldenset.GoldenQuestion{question("a", uidA, nil), question("b", uidB, nil)}
-	if _, err := RunGolden(t.Context(), s, two, cfg); err != nil {
-		t.Fatalf("RunGolden: %v", err)
-	}
-	for i, q := range s.queries {
-		if q.Mode != retrieval.SearchModeDenseOnly {
-			t.Errorf("query %d went out in %s mode, want dense-only", i+1, q.Mode)
-		}
 	}
 }
 

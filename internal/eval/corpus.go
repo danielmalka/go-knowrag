@@ -22,8 +22,8 @@ import (
 // It exists so `cli eval --golden` can run with no Qdrant, no embedding service and no GPU, which is
 // what the hermetic CI gate requires (S10 T12/T13). What it measures is the harness — load, run,
 // aggregate, threshold, exit code — end to end on a number that *emerges* from a search
-// rather than one written down next to the questions. It measures nothing about BGE-M3 or about
-// Qdrant, and no number produced this way belongs in a baseline: the real gate runs against the real
+// rather than one written down next to the questions. It measures nothing about the embedding model or
+// about Qdrant, and no number produced this way belongs in a baseline: the real gate runs against the real
 // index (S10 T15), outside public CI.
 
 // CorpusChunk is one indexed chunk. The fields are the ones retrieval.Result carries, because a
@@ -107,7 +107,7 @@ func (s *CorpusSearcher) Search(_ context.Context, q retrieval.Query) ([]retriev
 	if s == nil {
 		return nil, errors.New("eval: CorpusSearcher is nil")
 	}
-	if err := q.Validate(retrieval.DefaultPrefetchMultiplier); err != nil {
+	if err := q.Validate(); err != nil {
 		return nil, err
 	}
 

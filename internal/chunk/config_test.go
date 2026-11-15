@@ -24,8 +24,8 @@ func TestConfig_Validate(t *testing.T) {
 		// The hard 8192-token window is the model's, not a preference: a ceiling above it would
 		// authorize chunks the embedder cannot accept, so the config is rejected rather than
 		// silently clamped at emit time.
-		{"ceiling above the model window", Config{FloorTokens: 256, CeilingTokens: HardTokenLimit + 1}, true},
-		{"ceiling exactly at the model window", Config{FloorTokens: 256, CeilingTokens: HardTokenLimit}, false},
+		{"ceiling above the model window", Config{FloorTokens: 256, CeilingTokens: hardLimit + 1}, true},
+		{"ceiling exactly at the model window", Config{FloorTokens: 256, CeilingTokens: hardLimit}, false},
 	}
 
 	for _, tc := range tests {
@@ -41,11 +41,15 @@ func TestConfig_Validate(t *testing.T) {
 	}
 }
 
-// TestHardTokenLimit_IsTheModelWindow pins the constant against PRD-contrato §2.3b rather than
-// against itself: 8192 is the BGE-M3 window, and a chunk above it cannot be embedded at all.
-func TestHardTokenLimit_IsTheModelWindow(t *testing.T) {
-	if HardTokenLimit != 8192 {
-		t.Errorf("HardTokenLimit = %d, want 8192 (PRD-contrato §2.3b, BGE-M3 window)", HardTokenLimit)
+// hardLimit is the window a Config with no WindowTokens resolves to: the default profile's, which is
+// what a caller that never named a profile gets. It is a variable only because it is computed.
+var hardLimit = schema.DefaultProfile().WindowTokens()
+
+// TestHardLimit_IsTheProfileWindow pins the default against the model card's 8,192-token window minus
+// the prompt reserve, rather than against itself: a chunk above it cannot be embedded at all.
+func TestHardLimit_IsTheProfileWindow(t *testing.T) {
+	if hardLimit != 8064 {
+		t.Errorf("the default window = %d, want 8064 (8192 minus the 128-token prompt reserve)", hardLimit)
 	}
 }
 
@@ -58,29 +62,28 @@ func TestVersion_IsTheSchemaChunkerVersion(t *testing.T) {
 	}
 }
 
-// PR 4: the window a chunk must fit in comes from the model profile. Zero keeps the BGE-M3 window, so
-// every Config written before the profiles existed validates exactly as before.
+// The window a chunk must fit in comes from the model profile. Zero resolves to the default profile's,
+// so a Config built without ConfigFor is as strict as one built with it.
 func TestConfig_WindowTokens(t *testing.T) {
-	eg2, _ := schema.ProfileByID("embeddinggemma-2")
-	cfg := ConfigFor(eg2, 256, 1024)
-	if cfg.WindowTokens != eg2.WindowTokens() || cfg.WindowTokens != 8064 {
+	p := schema.DefaultProfile()
+	cfg := ConfigFor(p, 256, 1024)
+	if cfg.WindowTokens != p.WindowTokens() || cfg.WindowTokens != 8064 {
 		t.Fatalf("ConfigFor window = %d, want 8064 (8192 minus the 128-token prompt reserve)", cfg.WindowTokens)
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("a normal config for the profile was refused: %v", err)
 	}
-	if err := ConfigFor(eg2, 256, 8064).Validate(); err != nil {
+	if err := ConfigFor(p, 256, 8064).Validate(); err != nil {
 		t.Errorf("a ceiling exactly at the profile window was refused: %v", err)
 	}
-	if err := ConfigFor(eg2, 256, 8065).Validate(); err == nil {
+	if err := ConfigFor(p, 256, 8065).Validate(); err == nil {
 		t.Error("a ceiling above the profile window was accepted: the prompt prefix would push it past the model window")
 	}
-	// the same ceiling is fine for the default profile (window 8192) — the stricter window is the profile's
-	if err := ConfigFor(schema.DefaultProfile(), 256, 8192).Validate(); err != nil {
-		t.Errorf("the default profile's full window was refused: %v", err)
+	if err := (Config{FloorTokens: 1, CeilingTokens: 8064}).Validate(); err != nil {
+		t.Errorf("a zero WindowTokens must resolve to the profile window: %v", err)
 	}
-	if err := (Config{FloorTokens: 1, CeilingTokens: 8192}).Validate(); err != nil {
-		t.Errorf("a zero WindowTokens must keep the BGE-M3 window: %v", err)
+	if err := (Config{FloorTokens: 1, CeilingTokens: 8065}).Validate(); err == nil {
+		t.Error("a zero WindowTokens resolved to the full 8192-token model window instead of the profile's")
 	}
 	if err := (Config{FloorTokens: 1, CeilingTokens: 10, WindowTokens: -1}).Validate(); err == nil {
 		t.Error("a negative window was accepted")
@@ -97,8 +100,8 @@ func TestClassifyOversize_UsesTheConfigWindow(t *testing.T) {
 	if !errors.As(err, &hard) || hard.Window != 500 || !strings.Contains(err.Error(), "500-token window") {
 		t.Fatalf("a chunk over the config window = %v, want a HardLimitError naming the 500-token window", err)
 	}
-	// and a zero window still means the BGE-M3 one
-	if _, err := classifyOversize("n.md", nil, HardTokenLimit+1, Config{FloorTokens: 1, CeilingTokens: 10}); err == nil {
+	// and a zero window still means the profile's one
+	if _, err := classifyOversize("n.md", nil, hardLimit+1, Config{FloorTokens: 1, CeilingTokens: 10}); err == nil {
 		t.Error("the default window no longer applies")
 	}
 }

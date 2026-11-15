@@ -14,10 +14,12 @@ import (
 	"github.com/danielmalka/go-knowrag/internal/schema"
 )
 
-// liveHandshakeJSON is the exact body scripts/embedder-service/server.py returned on 2026-08-09.
-// Pasted verbatim rather than built from a struct: a fixture assembled from the same types the
-// decoder uses proves the decoder agrees with itself, not with the server.
-const liveHandshakeJSON = `{"model_id": "BAAI/bge-m3", "model_revision": "5617a9f61b028005a4858fdac845db406aefb181", "tokenizer_revision": "5617a9f61b028005a4858fdac845db406aefb181", "dense_dim": 1024, "normalized": true, "pooling": "cls", "precision": "float16", "sparse": {"kind": "lexical_weights", "id_space": "tokenizer_vocab"}, "max_position_embeddings": 8194}`
+// liveHandshakeJSON is the body scripts/embedder-service/server.py answers for the default profile at
+// bf16, as the running process returned it on 2026-11-15 (the end-to-end check of the service). Pasted
+// verbatim rather than built from a struct: a fixture assembled from the same types the decoder uses
+// proves the decoder agrees with itself, not with the server. `model_id` and `max_input_tokens` are
+// keys this client does not read.
+const liveHandshakeJSON = `{"model_id": "google/embeddinggemma-2", "model_revision": "f9972ac22e696a105c482202646979e33e4b5a1e", "tokenizer_revision": "f9972ac22e696a105c482202646979e33e4b5a1e", "dense_dim": 768, "normalized": true, "pooling": "mean", "precision": "bfloat16", "prompt_version": "gemma-search-v1", "max_input_tokens": 8192}`
 
 func newTestTransport(t *testing.T, h http.HandlerFunc) *HTTPTransport {
 	t.Helper()
@@ -57,11 +59,11 @@ func TestHTTPTransport_Info_DecodesTheLiveHandshakeBody(t *testing.T) {
 	want := BackendHandshakeInfo{
 		ModelRevision:     schema.DefaultProfile().Revision,
 		TokenizerRevision: schema.DefaultProfile().Revision,
-		Dim:               1024,
+		Dim:               768,
 		Normalization:     "l2",
-		Pooling:           "cls",
-		Precision:         "fp16",
-		SparseParams:      map[string]string{"kind": "lexical_weights", "id_space": "tokenizer_vocab"},
+		Pooling:           "mean",
+		Precision:         "bf16",
+		PromptVersion:     "gemma-search-v1",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Info() = %+v\nwant %+v", got, want)
@@ -191,43 +193,36 @@ func TestHTTPTransport_Embed_SendsTheDocumentedRequest(t *testing.T) {
 	}
 }
 
-func TestHTTPTransport_Embed_DecodesDenseAndSparseInOrder(t *testing.T) {
+func TestHTTPTransport_Embed_DecodesDenseInOrder(t *testing.T) {
 	tr := newTestTransport(t, func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = io.WriteString(w, `{"dense":[[1,2],[3,4]],
-			"sparse":[{"indices":[7,9],"values":[0.5,0.25]},{"indices":[1],"values":[0.75]}],
-			"tokens":[3,4]}`)
+		_, _ = io.WriteString(w, `{"dense":[[1,2],[3,4]],"tokens":[3,4]}`)
 	})
 
 	got, err := tr.Embed(context.Background(), []string{"a", "b"}, KindPassage)
 	if err != nil {
 		t.Fatalf("Embed: %v", err)
 	}
-	want := []Embedding{
-		{Dense: []float32{1, 2}, Sparse: Sparse{Indices: []uint32{7, 9}, Values: []float32{0.5, 0.25}}},
-		{Dense: []float32{3, 4}, Sparse: Sparse{Indices: []uint32{1}, Values: []float32{0.75}}},
-	}
+	want := []Embedding{{Dense: []float32{1, 2}}, {Dense: []float32{3, 4}}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Embed() = %+v\nwant %+v", got, want)
 	}
 }
 
-// TestHTTPTransport_Embed_ReturnsRawOutput is the transport's half of the T2/T3 boundary: it must
-// hand ServiceEmbedder exactly what the server said. A transport that tidied up first would make
-// the ordering guarantee untestable from Go — and that guarantee is a contract between the two
-// sides, not a detail (an unstable sparse order makes an unchanged note look changed to point_hash).
+// TestHTTPTransport_Embed_ReturnsRawOutput is the transport's half of the boundary with
+// ServiceEmbedder: it must hand over exactly what the server said, vector values included, and ignore
+// keys it does not read (a backend that still sent a `sparse` block, say). A transport that tidied up
+// first would make ServiceEmbedder's validation unreachable against real output.
 func TestHTTPTransport_Embed_ReturnsRawOutput(t *testing.T) {
 	tr := newTestTransport(t, func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = io.WriteString(w, `{"dense":[[1,2]],
-			"sparse":[{"indices":[9,7,7],"values":[0.5,0,0.25]}],"tokens":[3]}`)
+		_, _ = io.WriteString(w, `{"dense":[[9,-7,0]],"sparse":[{"indices":[1],"values":[0.5]}],"tokens":[3]}`)
 	})
 
 	got, err := tr.Embed(context.Background(), []string{"a"}, KindPassage)
 	if err != nil {
 		t.Fatalf("Embed: %v", err)
 	}
-	want := Sparse{Indices: []uint32{9, 7, 7}, Values: []float32{0.5, 0, 0.25}}
-	if !reflect.DeepEqual(got[0].Sparse, want) {
-		t.Errorf("the transport altered the server's sparse vector: got %+v, want %+v", got[0].Sparse, want)
+	if want := []float32{9, -7, 0}; !reflect.DeepEqual(got[0].Dense, want) {
+		t.Errorf("the transport altered the server's vector: got %v, want %v", got[0].Dense, want)
 	}
 }
 
@@ -237,20 +232,6 @@ func TestHTTPTransport_Embed_FailsOnBadResponse(t *testing.T) {
 		handler http.HandlerFunc
 		wantSub string
 	}{
-		{
-			name: "dense and sparse disagree on length",
-			handler: func(w http.ResponseWriter, _ *http.Request) {
-				_, _ = io.WriteString(w, `{"dense":[[1],[2]],"sparse":[{"indices":[1],"values":[1]}],"tokens":[1,1]}`)
-			},
-			wantSub: "sparse",
-		},
-		{
-			name: "sparse indices and values disagree on length",
-			handler: func(w http.ResponseWriter, _ *http.Request) {
-				_, _ = io.WriteString(w, `{"dense":[[1]],"sparse":[{"indices":[1,2],"values":[1]}],"tokens":[1]}`)
-			},
-			wantSub: "length",
-		},
 		{
 			name: "malformed JSON is an error, not a panic",
 			handler: func(w http.ResponseWriter, _ *http.Request) {
@@ -315,13 +296,6 @@ func embedBody(n int) string {
 		}
 		b.WriteString("[1,2]")
 	}
-	b.WriteString(`],"sparse":[`)
-	for i := range n {
-		if i > 0 {
-			b.WriteString(",")
-		}
-		b.WriteString(`{"indices":[1],"values":[0.5]}`)
-	}
 	b.WriteString(`],"tokens":[`)
 	for i := range n {
 		if i > 0 {
@@ -333,13 +307,10 @@ func embedBody(n int) string {
 	return b.String()
 }
 
-// A dense-only backend (EmbeddingGemma) answers /handshake with a prompt_version and no sparse block,
-// and /embed with no `sparse` array. Both decode, and the decoded report passes the profile's pins.
-func TestHTTPTransport_DenseOnlyBackend_DecodesAndPassesTheProfile(t *testing.T) {
-	m, ok := schema.ProfileByID("embeddinggemma-2")
-	if !ok {
-		t.Fatal("embeddinggemma-2 not registered")
-	}
+// The backend answers /handshake with a prompt_version and no sparse block, and /embed with a dense
+// array only. Both decode, and the decoded report passes the profile's pins.
+func TestHTTPTransport_Backend_DecodesAndPassesTheProfile(t *testing.T) {
+	m := schema.DefaultProfile()
 	tr := newTestTransport(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/handshake":
@@ -354,32 +325,18 @@ func TestHTTPTransport_DenseOnlyBackend_DecodesAndPassesTheProfile(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.PromptVersion != m.PromptVersion || info.Precision != "bf16" || len(info.SparseParams) != 0 {
+	if info.PromptVersion != m.PromptVersion || info.Precision != "bf16" {
 		t.Fatalf("Info() = %+v", info)
 	}
 	if err := validateAgainstProfile(info, m); err != nil {
-		t.Errorf("the dense-only backend's own handshake fails the profile: %v", err)
-	}
-	// The same body is NOT a BGE-M3 backend: the default profile must refuse it.
-	if err := validateAgainstProfile(info, schema.DefaultProfile()); err == nil {
-		t.Error("an EmbeddingGemma handshake was accepted by the BGE-M3 profile")
+		t.Errorf("the backend's own handshake fails the profile: %v", err)
 	}
 
 	got, err := tr.Embed(context.Background(), []string{"a", "b"}, KindPassage)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 2 || len(got[0].Sparse.Indices) != 0 || len(got[1].Dense) != 2 {
+	if len(got) != 2 || len(got[1].Dense) != 2 {
 		t.Fatalf("Embed() = %+v", got)
-	}
-}
-
-// A sparse array that does not line up with the dense one is still a response-shape defect.
-func TestHTTPTransport_Embed_SparseCountMismatchStillFails(t *testing.T) {
-	tr := newTestTransport(t, func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = io.WriteString(w, `{"dense":[[1],[2]],"sparse":[{"indices":[1],"values":[0.5]}]}`)
-	})
-	if _, err := tr.Embed(context.Background(), []string{"a", "b"}, KindPassage); err == nil {
-		t.Fatal("2 dense vectors against 1 sparse one was accepted")
 	}
 }

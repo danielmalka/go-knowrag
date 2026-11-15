@@ -169,7 +169,6 @@ func integrationDeps(store ingest.Store, tenantID string) ingest.Deps {
 			Normalization:     schema.DefaultProfile().Normalization,
 			Pooling:           schema.DefaultProfile().Pooling,
 			Precision:         schema.DefaultProfile().PrimaryPrecision(),
-			SparseParams:      map[string]string{"indices": "token_id", "values": "lexical_weight"},
 		},
 		Chunk:  chunk.Config{FloorTokens: 1, CeilingTokens: 1000},
 		Tokens: chunk.FakeTokenCounter{},

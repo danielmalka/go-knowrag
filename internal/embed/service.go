@@ -35,10 +35,10 @@ type Transport interface {
 
 // ServiceEmbedder is the Embedder that talks to the resident embedding service.
 //
-// Resident is not an implementation preference: loading BGE-M3 takes ~11 s warm (ADR-001 §6.2; the
-// earlier 314,5 s figure included downloading the weights). Eleven seconds in front of a measured
-// 71 ms p99 is still the whole latency budget spent on startup, so a design that loads per call is
-// out. This type assumes the model is already in memory on the other side and never starts anything.
+// The service owns the model and its GPU memory: it loads the model on the first call that needs it
+// and releases it after an idle period (scripts/embedder-service), so this type never loads or starts
+// anything. The first call after an idle period can take several seconds longer, which is why the
+// search profile's per-attempt timeout is sized above the measured load (cmd/mcp-server).
 //
 // It is safe for concurrent use, as both its callers need: S06a embeds batches while S07 serves
 // queries, and neither owns the other's client.
@@ -295,18 +295,8 @@ func (e *ServiceEmbedder) embedSubBatch(ctx context.Context, texts, titles []str
 			"backend returned %d embeddings for %d texts; one output per input, in order, is the "+
 				"only response shape this client accepts", len(raw), len(texts))
 	}
-	// Validated exactly as it arrived. The service already emits sparse pairs sorted by index with
-	// no zero weights and no repeated ids, and that is a contract between the two sides rather than
-	// a convenience.
-	//
-	// This comment used to justify that by saying the sparse vector feeds point_hash, and it does
-	// not: ComputePointHash takes note metadata, chunk text, the pipeline config and the seven
-	// handshake fields, and `embedder_sparse_params` among them is the static {kind, id_space} the
-	// handshake declares — no per-chunk index or weight enters the hash. What an unstable order
-	// actually corrupts is the vector written to Qdrant, so the damage lands on hybrid retrieval,
-	// which returns worse results and says nothing. The reason to validate rather than sort here is
-	// unchanged and is the reason that matters: sorting would silently absorb the day the server
-	// stops holding up its end, and that is the one thing that must not happen quietly.
+	// Validated exactly as it arrived, never repaired: a vector that breaks an invariant means the
+	// backend broke its end of the contract, and quietly fixing it would hide that day.
 	for i, item := range raw {
 		if err := validateEmbedding(item, e.model); err != nil {
 			return &ItemError{Index: offset + i, Err: err}

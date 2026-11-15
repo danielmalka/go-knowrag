@@ -80,7 +80,6 @@ func liveInfo(c schema.CollectionManifest) *qdrant.CollectionInfo {
 				VectorsConfig: qdrant.NewVectorsConfigMap(map[string]*qdrant.VectorParams{
 					c.DenseVectorName: {Size: c.DenseDim, Distance: qdrantDistance(c.Distance)},
 				}),
-				SparseVectorsConfig: sparseVectorsConfig(c),
 			},
 		},
 		PayloadSchema: payload,
@@ -131,8 +130,10 @@ func TestApply_CreatesCollectionsFromManifest_WhenNoneExist(t *testing.T) {
 		if wantDistance := qdrantDistance(want.Distance); dense.GetDistance() != wantDistance {
 			t.Errorf("%s: dense distance = %v, want %v", want.Name, dense.GetDistance(), wantDistance)
 		}
-		if _, ok := req.GetSparseVectorsConfig().GetMap()[want.SparseVectorName]; !ok {
-			t.Errorf("%s: CreateCollection carries no named sparse vector %q", want.Name, want.SparseVectorName)
+		// One named dense vector and nothing else: no sparse vector exists in this schema.
+		if req.GetSparseVectorsConfig() != nil {
+			t.Errorf("%s: the collection was created with a sparse vectors config: %v",
+				want.Name, req.GetSparseVectorsConfig())
 		}
 	}
 }
@@ -282,11 +283,11 @@ func TestApply_DimensionMismatch_ReturnsExplicitError(t *testing.T) {
 	m := schema.Manifest()
 	api, state := upToDate(m)
 	drifted := m[0]
-	drifted.DenseDim = 768
+	drifted.DenseDim = 1024 // what the retired BGE-M3 collections hold
 	api.info[m[0].Name] = liveInfo(drifted)
 
 	_, err := Apply(t.Context(), api, m, state)
-	assertDrift(t, err, m[0].Name, "768", "1024")
+	assertDrift(t, err, m[0].Name, "1024", "768")
 
 	// Drift is fatal, never auto-healed: rewriting a collection whose vectors were produced by a
 	// different geometry would silently destroy every point already in it.
@@ -318,11 +319,11 @@ func TestApply_MissingNamedVector_ReturnsExplicitError(t *testing.T) {
 	m := schema.Manifest()
 	api, state := upToDate(m)
 	drifted := m[0]
-	drifted.SparseVectorName = "something-else"
+	drifted.DenseVectorName = "something-else"
 	api.info[m[0].Name] = liveInfo(drifted)
 
 	_, err := Apply(t.Context(), api, m, state)
-	assertDrift(t, err, m[0].Name, "", m[0].SparseVectorName)
+	assertDrift(t, err, m[0].Name, "something-else", m[0].DenseVectorName)
 }
 
 // TestApply_ModelRevisionMismatch_ReturnsExplicitError covers the half of drift Qdrant cannot see:
@@ -331,10 +332,10 @@ func TestApply_MissingNamedVector_ReturnsExplicitError(t *testing.T) {
 func TestApply_ModelRevisionMismatch_ReturnsExplicitError(t *testing.T) {
 	m := schema.Manifest()
 	api, state := upToDate(m)
-	state.state = state.state.With(m[0].Name, "bge-m3@a-previous-revision")
+	state.state = state.state.With(m[0].Name, "embeddinggemma-2@a-previous-revision")
 
 	_, err := Apply(t.Context(), api, m, state)
-	assertDrift(t, err, m[0].Name, "bge-m3@a-previous-revision", m[0].ModelRevision)
+	assertDrift(t, err, m[0].Name, "embeddinggemma-2@a-previous-revision", m[0].ModelRevision)
 
 	if len(api.created) != 0 || len(api.fieldIndexes) != 0 {
 		t.Errorf("model-revision drift still wrote to Qdrant: %d create(s), %d index(es)",

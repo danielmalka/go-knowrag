@@ -20,14 +20,13 @@ const FakeModelID = "fake-embedder-v1"
 //
 // It exists so S06a's and S07's suites run with no GPU, no network and no sidecar. Its output is
 // meaningless as semantics — nearby texts are not nearby vectors — but it is structurally
-// indistinguishable from a real response: 1024 finite dense elements, L2-normalized as the model
-// card pins (ADR-001 §4), and a strictly-ascending, non-zero sparse half. That is not decoration:
+// indistinguishable from a real response: the profile's width of finite dense elements, L2-normalized
+// as the model card pins (ADR-001 §4). That is not decoration:
 // a fake whose output validateEmbedding would reject is a fixture that hides bugs in every suite
 // depending on it, which is what TestFakeEmbedder_OutputPassesValidation pins.
 //
-// The zero value is ready to use and fakes the default model profile. Profile fakes another one: a
-// dense-only profile gets a vector of its own width and no sparse half, so suites for the
-// EmbeddingGemma path run offline too (NewFakeEmbedderFor).
+// The zero value is ready to use and fakes the default model profile. Profile fakes another one, with
+// a vector of its own width (NewFakeEmbedderFor).
 type FakeEmbedder struct {
 	Profile *schema.ModelProfile
 }
@@ -71,7 +70,7 @@ func (f FakeEmbedder) EmbedQuery(ctx context.Context, text string) (Embedding, e
 	return fakeEmbedding(text, f.model()), nil
 }
 
-// EmbedDocuments embeds each text the same way EmbedQuery does. BGE-M3 has no separate query
+// EmbedDocuments embeds each text the same way EmbedQuery does. The model has no separate query
 // encoder, so a fake that treated the two paths differently would make S07's retrieval tests pass
 // or fail for reasons unrelated to retrieval.
 func (f FakeEmbedder) EmbedDocuments(ctx context.Context, texts []string) ([]Embedding, error) {
@@ -109,20 +108,5 @@ func fakeEmbedding(text string, m schema.ModelProfile) Embedding {
 		}
 	}
 
-	if !m.HasSparse() {
-		return Embedding{Dense: dense}
-	}
-
-	// 8–15 strictly ascending token indices with non-zero weights: enough to exercise fusion, few
-	// enough to read in a failure message.
-	n := 8 + rng.IntN(8)
-	sp := Sparse{Indices: make([]uint32, n), Values: make([]float32, n)}
-	var idx uint32
-	for i := range n {
-		idx += 1 + rng.Uint32N(500)
-		sp.Indices[i] = idx
-		// Bounded away from zero so the fake can never trip ErrSparseZeroWeight by chance.
-		sp.Values[i] = float32(0.01 + rng.Float64()*0.99)
-	}
-	return Embedding{Dense: dense, Sparse: sp}
+	return Embedding{Dense: dense}
 }

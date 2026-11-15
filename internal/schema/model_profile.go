@@ -2,26 +2,25 @@ package schema
 
 import (
 	"fmt"
-	"maps"
 	"regexp"
 	"slices"
-	"strings"
 )
 
 // ModelProfile is everything about one embedding model that the rest of the build used to spell as a
 // literal: which model, at which immutable revision, how wide its dense vectors are, what precision
 // the loaded weights must report, and which collections hold its vectors.
 //
-// It exists so that moving to another embedding model is "register a profile and select it", not a
-// hunt through the module for 1024s and revision hashes (PR 1 of the embedding migration; the
-// default profile is still BGE-M3 and nothing about runtime behavior changed).
+// It exists so that moving to another embedding model is "register a profile and make it the default",
+// not a hunt through the module for vector widths and revision hashes. One profile is registered today,
+// EmbeddingGemma 2; BGE-M3, the model before it, was removed after the cutover (no way back, owner's
+// decision of 2026-11-15) together with everything that existed only for its sparse head.
 //
-// "Configurable" here means selected by ID from the registry below, NOT free-form per-deployment
-// fields. The revision stays a reviewed code value: a config file or env var that disagreed with the
-// pinned revision would point the runtime at a different model with nothing catching it before
-// ingestion, and the symptom would be falling recall weeks later (internal/embed/config.go).
+// The profile is a reviewed code value, NOT free-form per-deployment fields. The revision stays in code:
+// a config file or env var that disagreed with the pinned revision would point the runtime at a
+// different model with nothing catching it before ingestion, and the symptom would be falling recall
+// weeks later (internal/embed/config.go).
 type ModelProfile struct {
-	// ID is the short stable name used to select the profile and in logs ("bge-m3").
+	// ID is the short stable name used to look the profile up and in logs ("embeddinggemma-2").
 	ID string
 	// Model is the HuggingFace repository id, informational and used in error messages.
 	Model string
@@ -33,25 +32,22 @@ type ModelProfile struct {
 	// wants; converting at each call site would only move the conversion somewhere less visible.
 	DenseDim uint64
 	// Precisions are the dtypes the loaded weights may report in the handshake, in preference order
-	// (the first is PrimaryPrecision). A model with one safe dtype lists one; EmbeddingGemma lists
-	// bf16 (GPU) and fp32 (CPU) and does NOT list fp16, so a backend that loads it in fp16 fails the
-	// handshake: its activations overflow fp16 and it returns NaN or silently degraded vectors.
+	// (the first is PrimaryPrecision). EmbeddingGemma lists bf16 and fp32, both of which run on the
+	// GPU, and does NOT list fp16, so a backend that loads it in fp16 fails the handshake: its
+	// activations overflow fp16 and it returns NaN or silently degraded vectors.
 	Precisions []string
 	// Pooling and Normalization are the pooling mode and the vector normalization the model card
-	// fixes ("cls"/"mean", "l2"); the handshake confirms the backend reports exactly these.
+	// fixes ("mean", "l2"); the handshake confirms the backend reports exactly these.
 	Pooling       string
 	Normalization string
-	// SparseParams are the parameters of the model's sparse (lexical) head. Nil or empty means the
-	// profile is DENSE-ONLY: no sparse vector exists, the backend must report none, and an
-	// embedding that carries one is rejected.
-	SparseParams map[string]string
 	// PromptVersion names the task-prefix scheme the backend applies to a query and to a document
-	// ("" = the model uses no prefix). The service applies the prefix, not this client; the handshake
+	// ("" = the model uses no prefix, which no registered profile does today). The service applies the
+	// prefix, not this client; the handshake
 	// confirms the scheme so a service that forgot or changed it fails loudly instead of embedding
 	// queries and documents into subtly different spaces.
 	PromptVersion string
-	// MaxInputTokens is the model's input window in tokens, as its tokenizer counts them (BGE-M3: 8192;
-	// EmbeddingGemma 2: "8K" on the model card). A chunk above it cannot be embedded and is never
+	// MaxInputTokens is the model's input window in tokens, as its tokenizer counts them
+	// (EmbeddingGemma 2: "8K" on the model card). A chunk above it cannot be embedded and is never
 	// truncated (internal/chunk).
 	MaxInputTokens int
 	// PromptReserveTokens is the part of that window the service's task prefix and the note title take
@@ -66,34 +62,8 @@ type ModelProfile struct {
 	Collections []string
 }
 
-// DefaultProfileID is the profile the library falls back to where a caller names none (the zero value
-// of retrieval.Config.Profile, embed.Expected, the fakes). It stays BGE-M3 only until the cleanup PR
-// deletes that profile: the tests that pin hybrid and sparse behavior still build on it. Nothing that
-// RUNS a deployment uses it; every command resolves its profile with ResolveProfile instead, and
-// TestNoEntryPointReadsTheLibraryDefault keeps it that way.
-const DefaultProfileID = "bge-m3"
-
-// DeployedProfileID is the profile a deployment serves when it configures none: EmbeddingGemma 2,
-// since the cutover (no way back to BGE-M3, owner's decision of 2026-11-15).
-const DeployedProfileID = "embeddinggemma-2"
-
-// ResolveProfile is how a command picks its model profile: the configured ID, or DeployedProfileID
-// when nothing is configured. An unknown ID is an error naming the registered ones, never a fallback,
-// because a typo that quietly fell back would serve the wrong vector space.
-func ResolveProfile(id string) (ModelProfile, error) {
-	if id = strings.TrimSpace(id); id == "" {
-		id = DeployedProfileID
-	}
-	p, ok := ProfileByID(id)
-	if !ok {
-		ids := make([]string, 0, len(profiles))
-		for _, q := range profiles {
-			ids = append(ids, q.ID)
-		}
-		return ModelProfile{}, fmt.Errorf("unknown model profile %q; registered: %s", id, strings.Join(ids, ", "))
-	}
-	return p, nil
-}
+// DefaultProfileID is the profile every entry point serves: EmbeddingGemma 2, the only one registered.
+const DefaultProfileID = "embeddinggemma-2"
 
 // HasCollection reports whether name is one of this profile's collections.
 func (p ModelProfile) HasCollection(name string) bool { return slices.Contains(p.Collections, name) }
@@ -118,26 +88,6 @@ var (
 // package in the module, and one stray write would redefine "correct" for every later handshake.
 var profiles = []ModelProfile{
 	{
-		ID:    "bge-m3",
-		Model: "BAAI/bge-m3",
-		// Confirmed 2026-08-08: HEAD of BAAI/bge-m3 on Hugging Face; the weights repo had no new
-		// commit in about two years. Moved here from the former schema.DefaultProfile().Revision constant.
-		Revision:   "5617a9f61b028005a4858fdac845db406aefb181",
-		DenseDim:   1024,
-		Precisions: []string{PrecisionFP16}, // measured on the loaded weights (ADR-001 §6.2, round 2)
-		// Model card + the pinned revision's own files (ADR-001 §6.2): CLS pooling, an L2 normalize
-		// module, and the lexical_weights sparse head whose indices are tokenizer vocabulary ids.
-		Pooling:        "cls",
-		Normalization:  "l2",
-		SparseParams:   map[string]string{"kind": "lexical_weights", "id_space": "tokenizer_vocab"},
-		PromptVersion:  "",   // BGE-M3 takes no task prefix
-		MaxInputTokens: 8192, // PRD-contrato §2.3b
-		// interno: the operator's own vaults, the only collection populated in this build. clientes
-		// and base_paga are provisioned empty so nothing ever grows a special case for the one that
-		// has data in it.
-		Collections: []string{"interno", "clientes", "base_paga"},
-	},
-	{
 		ID:    "embeddinggemma-2",
 		Model: "google/embeddinggemma-2",
 		// Head of google/embeddinggemma-2 on Hugging Face as read on 2026-11-15 (last commit
@@ -146,10 +96,9 @@ var profiles = []ModelProfile{
 		Revision:   "f9972ac22e696a105c482202646979e33e4b5a1e",
 		DenseDim:   768,
 		Precisions: []string{PrecisionBF16, PrecisionFP32}, // NEVER fp16: model card, "Do not use float16"
-		// Model card: mean pooling, an L2 Normalize module, text-only dense 768d, no sparse head.
+		// Model card: mean pooling, an L2 Normalize module, text-only dense 768d.
 		Pooling:       "mean",
 		Normalization: "l2",
-		SparseParams:  nil,
 		// Query: "task: search result | query: " + text. Document: "title: " + (title or "none") +
 		// " | text: " + text. Applied by the embedding service (model card, prompts).
 		PromptVersion: "gemma-search-v1",
@@ -157,13 +106,13 @@ var profiles = []ModelProfile{
 		// near it. 128 covers "title: ... | text: " plus a long note title with margin.
 		MaxInputTokens:      8192,
 		PromptReserveTokens: 128,
-		// A new collection beside the old one (migration plan, "Reindexação e virada"). The names keep the
-		// trust-boundary name and add the model as a suffix, final as of PR 3: the suffix is the only place
-		// an operator, a Qdrant dashboard or a log line shows which vector space a collection holds (the
-		// model revision lives in the applied-state record, not in Qdrant), a later model switch repeats
-		// the pattern with its own suffix instead of reusing a name for a different width, and a
+		// The names keep the trust-boundary name and add the model as a suffix: the suffix is the only
+		// place an operator, a Qdrant dashboard or a log line shows which vector space a collection holds
+		// (the model revision lives in the applied-state record, not in Qdrant), a later model switch
+		// repeats the pattern with its own suffix instead of reusing a name for a different width, and a
 		// generation number such as "_v2" says nothing and collides with the golden-set "v2". Profiles
-		// never share a collection name (TestProfiles_CollectionNamesAreDisjoint).
+		// never share a collection name (TestProfiles_CollectionNamesAreDisjoint). The collections of the
+		// retired BGE-M3 profile (`interno`, `clientes`, `base_paga`) are not managed by this build.
 		Collections: []string{"interno_eg2", "clientes_eg2", "base_paga_eg2"},
 	},
 }
@@ -244,13 +193,9 @@ func (p ModelProfile) AllowsPrecision(precision string) bool {
 	return slices.Contains(p.Precisions, precision)
 }
 
-// HasSparse reports whether the profile carries a sparse vector. False is a dense-only profile.
-func (p ModelProfile) HasSparse() bool { return len(p.SparseParams) > 0 }
-
 func (p ModelProfile) clone() ModelProfile {
 	p.Collections = slices.Clone(p.Collections)
 	p.Precisions = slices.Clone(p.Precisions)
-	p.SparseParams = maps.Clone(p.SparseParams)
 	return p
 }
 

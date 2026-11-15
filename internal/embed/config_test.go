@@ -15,7 +15,7 @@ func TestProfile_HasNoModelRevisionField(t *testing.T) {
 	for i := range typ.NumField() {
 		name := strings.ToLower(typ.Field(i).Name)
 		if strings.Contains(name, "revision") || strings.Contains(name, "model") {
-			t.Errorf("Profile has field %q — the BGE-M3 revision is pinned in code "+
+			t.Errorf("Profile has field %q — the model revision is pinned in code "+
 				"(schema.ModelProfile.Revision, PRD-contrato §2.3b) and must not be configurable",
 				typ.Field(i).Name)
 		}

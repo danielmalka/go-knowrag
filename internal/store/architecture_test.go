@@ -17,7 +17,7 @@ import (
 //   - S09's invariant: internal/store is the sole holder of the Qdrant connection and the sole
 //     importer of the Qdrant client. Nothing outside may dial or speak to it.
 //   - S07's invariant: every actual search decision — which filter conditions exist, that the
-//     tenant condition is mandatory, that the fusion is RRF, how far each prefetch leg reaches,
+//     tenant condition is mandatory, how many candidates the search asks for,
 //     that ACORN is on — is made in internal/retrieval and nowhere else.
 //
 // They hold at once because ExecuteQuery has no search semantics of its own. It receives a
@@ -28,7 +28,7 @@ import (
 // that fail here instead of in review.
 //
 // The allowlist is the mechanism on purpose. A denylist of search-sounding names (Search, Find,
-// HybridSearch) is a list of the words somebody already thought of; a new exported function has to
+// Retrieve) is a list of the words somebody already thought of; a new exported function has to
 // be added here deliberately, which is the moment to ask whether it belongs in this package at all.
 var allowedStoreExports = []string{
 	// Construction.
@@ -57,7 +57,7 @@ var allowedStoreExports = []string{
 // searchShapedNames are names that could only belong to a function that decides something about a
 // search. They are listed separately from the allowlist so the failure message can say *why*
 // rather than just "not allowed", and so a fixture can prove this test is not vacuous.
-var searchShapedNames = []string{"Search", "Find", "Query", "HybridSearch", "SearchPoints", "Retrieve"}
+var searchShapedNames = []string{"Search", "Find", "Query", "SearchPoints", "Retrieve"}
 
 func TestStoreExportsNoSearchFunction(t *testing.T) {
 	for _, decl := range storeFuncDecls(t) {

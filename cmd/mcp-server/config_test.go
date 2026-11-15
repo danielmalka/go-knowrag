@@ -13,13 +13,12 @@ import (
 // setInstanceEnv sets this build's instance variables and lets t.Setenv unset them afterwards.
 func setInstanceEnv(t *testing.T) {
 	t.Helper()
-	t.Setenv(envCollection, "interno")
+	t.Setenv(envCollection, "interno_eg2")
 	t.Setenv(envTenantID, "tenant-a")
 	t.Setenv(envQdrantEndpoint, "qdrant.internal:6334")
 	t.Setenv(envQdrantAPIKey, "runtime-read-key")
 	t.Setenv(envEmbedderEndpoint, "http://embedder.internal:8080")
 	t.Setenv(envAreas, "infra,research")
-	t.Setenv(envModelProfile, "bge-m3") // the fixtures name BGE-M3's collection; see testConfig
 }
 
 // TestLoadConfig_FixedCollectionAndTenant is S08 T1: the scope this instance serves comes from the
@@ -31,8 +30,8 @@ func TestLoadConfig_FixedCollectionAndTenant(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadConfig() = %v, want nil", err)
 	}
-	if cfg.Collection != "interno" {
-		t.Errorf("Collection = %q, want %q", cfg.Collection, "interno")
+	if cfg.Collection != "interno_eg2" {
+		t.Errorf("Collection = %q, want %q", cfg.Collection, "interno_eg2")
 	}
 	if cfg.TenantID != "tenant-a" {
 		t.Errorf("TenantID = %q, want %q", cfg.TenantID, "tenant-a")
@@ -169,13 +168,13 @@ func TestConfig_LogValue_MasksAPIKey(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))
 
-	cfg := Config{Collection: "interno", TenantID: "tenant-a", QdrantAPIKey: "super-secret-key"}
+	cfg := Config{Collection: "interno_eg2", TenantID: "tenant-a", QdrantAPIKey: "super-secret-key"}
 	logger.Info("starting", "config", cfg)
 
 	if strings.Contains(buf.String(), "super-secret-key") {
 		t.Errorf("the API key reached the log output:\n%s", buf.String())
 	}
-	if !strings.Contains(buf.String(), "interno") {
+	if !strings.Contains(buf.String(), "interno_eg2") {
 		t.Errorf("masking swallowed the whole config, leaving nothing diagnosable:\n%s", buf.String())
 	}
 }
@@ -190,7 +189,7 @@ func TestConfig_LogValue_MasksAPIKey(t *testing.T) {
 func TestConfig_RedactsTheKeyOnBothRoutes(t *testing.T) {
 	const secret = "super-secret-key"
 	cfg := Config{
-		Collection: "interno", TenantID: "tenant-a", QdrantEndpoint: "host:6334",
+		Collection: "interno_eg2", TenantID: "tenant-a", QdrantEndpoint: "host:6334",
 		QdrantAPIKey: secret, EmbedderEndpoint: "http://127.0.0.1:7999", Areas: []string{"a"},
 	}
 
@@ -213,7 +212,7 @@ func TestConfig_RedactsTheKeyOnBothRoutes(t *testing.T) {
 	}
 
 	// An unset key must stay distinguishable from a hidden one.
-	empty := Config{Collection: "interno"}
+	empty := Config{Collection: "interno_eg2"}
 	if strings.Contains(fmt.Sprintf("%+v", empty), "[REDACTED]") {
 		t.Error("an unset key was rendered as redacted, which hides that it is missing")
 	}

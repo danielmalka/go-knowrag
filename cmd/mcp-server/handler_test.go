@@ -204,7 +204,7 @@ func assertScopeUnreachable(t *testing.T, args string) {
 	// caller named. This holds both when the call is refused (nothing runs) and if a future SDK
 	// version drops unknown keys instead (the handler assigns from Config).
 	for i, q := range fake.queries {
-		if q.TenantID != "tenant-a" || q.Collection != "interno" {
+		if q.TenantID != "tenant-a" || q.Collection != "interno_eg2" {
 			t.Errorf("search %d reached the retrieval layer with scope {tenant %q, collection %q}, "+
 				"want {tenant-a, interno}", i, q.TenantID, q.Collection)
 		}
@@ -231,7 +231,7 @@ func assertScopeUnreachable(t *testing.T, args string) {
 	if fake.calls() != 1 {
 		t.Errorf("searcher calls = %d after one legitimate call, want 1", fake.calls())
 	}
-	if q := fake.lastQuery(); q.TenantID != "tenant-a" || q.Collection != "interno" {
+	if q := fake.lastQuery(); q.TenantID != "tenant-a" || q.Collection != "interno_eg2" {
 		t.Errorf("control query scope = {tenant %q, collection %q}, want {tenant-a, interno}", q.TenantID, q.Collection)
 	}
 }
@@ -254,7 +254,7 @@ func TestSearchKnowledge_PromptInjectionInQueryText_FilterUnchanged(t *testing.T
 		t.Fatalf("searcher called %d times, want 1", fake.calls())
 	}
 	q := fake.lastQuery()
-	if q.TenantID != "tenant-a" || q.Collection != "interno" {
+	if q.TenantID != "tenant-a" || q.Collection != "interno_eg2" {
 		t.Errorf("query scope = {tenant %q, collection %q}, want {tenant-a, interno}", q.TenantID, q.Collection)
 	}
 	if q.Text != injection {
@@ -919,7 +919,7 @@ func TestGetNote_UsesConfigScopeAndTheRequestedUID(t *testing.T) {
 		t.Errorf("a lookup ran Search %d time(s)", fake.calls())
 	}
 	q := fake.lastLookup()
-	if q.TenantID != "tenant-a" || q.Collection != "interno" {
+	if q.TenantID != "tenant-a" || q.Collection != "interno_eg2" {
 		t.Errorf("lookup scope = {tenant %q, collection %q}, want {tenant-a, interno}", q.TenantID, q.Collection)
 	}
 	if q.UID != sampleNoteUID {

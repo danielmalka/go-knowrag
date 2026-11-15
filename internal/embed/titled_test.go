@@ -15,7 +15,7 @@ import (
 )
 
 // PR 4 of the embedding migration: a profile with a document prefix ("title: <title> | text: <text>")
-// needs the note title to reach the service, per text, in order. The BGE-M3 request must stay what
+// needs the note title to reach the service, per text, in order. The request without titles must stay what
 // it always was.
 
 func TestHTTPTransport_EmbedTitled_SendsOneTitlePerInput(t *testing.T) {
@@ -35,7 +35,7 @@ func TestHTTPTransport_EmbedTitled_SendsOneTitlePerInput(t *testing.T) {
 	}
 }
 
-// Without titles the body has no `titles` key at all: the BGE-M3 service sees the request it always saw.
+// Without titles the body has no `titles` key at all: a service that takes no titles sees the request it always saw.
 func TestHTTPTransport_Embed_PlainRequestHasNoTitlesKey(t *testing.T) {
 	var raw []byte
 	tr := newTestTransport(t, func(w http.ResponseWriter, r *http.Request) {

@@ -9,7 +9,6 @@ import (
 
 	"github.com/qdrant/go-client/qdrant"
 
-	"github.com/danielmalka/go-knowrag/internal/embed"
 	"github.com/danielmalka/go-knowrag/internal/retrieval"
 )
 
@@ -26,21 +25,18 @@ func (f *fakeQueryAPI) Query(_ context.Context, request *qdrant.QueryPoints) ([]
 	return f.points, f.err
 }
 
-// sampleRequest is the shape internal/retrieval builds: two filtered prefetch legs with ACORN on,
-// RRF over them, one filter on the outer stage.
+// sampleRequest is the shape internal/retrieval builds: one top-level dense query over a filter, with
+// ACORN on.
 func sampleRequest() retrieval.SearchRequest {
 	f := retrieval.Filter{
 		Must:    []retrieval.Condition{{Field: "tenant_id", Value: "tenant-a"}},
 		MustNot: []retrieval.Condition{{Field: "status", Value: "archived"}},
 	}
 	return retrieval.SearchRequest{
-		Collection: "interno",
-		Prefetch: []retrieval.PrefetchLeg{
-			{Vector: "dense", Dense: []float32{0.1, 0.2}, Limit: 40, Filter: f, Acorn: true},
-			{Vector: "sparse", Sparse: embed.Sparse{Indices: []uint32{2, 5}, Values: []float32{0.3, 0.4}},
-				Limit: 40, Filter: f, Acorn: true},
-		},
-		FusionRRF:     true,
+		Collection:    "interno_eg2",
+		Dense:         []float32{0.1, 0.2},
+		DenseVector:   "dense",
+		Acorn:         true,
 		Filter:        f,
 		Limit:         5,
 		Offset:        3,
@@ -60,7 +56,8 @@ func executeSample(t *testing.T, req retrieval.SearchRequest) (*fakeQueryAPI, []
 }
 
 func TestExecuteQuery_TranscribesTheRequest(t *testing.T) {
-	api, _, err := executeSample(t, sampleRequest())
+	req := sampleRequest()
+	api, _, err := executeSample(t, req)
 	if err != nil {
 		t.Fatalf("ExecuteQuery: %v", err)
 	}
@@ -69,14 +66,11 @@ func TestExecuteQuery_TranscribesTheRequest(t *testing.T) {
 	}
 	got := api.requests[0]
 
-	if got.GetCollectionName() != "interno" {
+	if got.GetCollectionName() != "interno_eg2" {
 		t.Errorf("CollectionName = %q", got.GetCollectionName())
 	}
 	if got.GetLimit() != 5 || got.GetOffset() != 3 {
 		t.Errorf("Limit/Offset = %d/%d, want 5/3", got.GetLimit(), got.GetOffset())
-	}
-	if got.GetQuery().GetFusion() != qdrant.Fusion_RRF {
-		t.Errorf("Query fusion = %v, want RRF (PRD-contrato §2.3b)", got.GetQuery())
 	}
 	if got.GetWithVectors().GetEnable() {
 		t.Error("the request asks for vectors back; nothing reads them")
@@ -84,27 +78,19 @@ func TestExecuteQuery_TranscribesTheRequest(t *testing.T) {
 	if want := []string{"uid", "text"}; !slices.Equal(got.GetWithPayload().GetInclude().GetFields(), want) {
 		t.Errorf("payload projection = %v, want %v", got.GetWithPayload().GetInclude().GetFields(), want)
 	}
-
-	if len(got.GetPrefetch()) != 2 {
-		t.Fatalf("%d prefetch leg(s), want 2", len(got.GetPrefetch()))
+	if len(got.GetPrefetch()) != 0 {
+		t.Errorf("%d prefetch(es) went out, want none: this is one dense search", len(got.GetPrefetch()))
 	}
-	dense, sparse := got.GetPrefetch()[0], got.GetPrefetch()[1]
-	if dense.GetUsing() != "dense" || sparse.GetUsing() != "sparse" {
-		t.Errorf("legs use %q and %q, want dense and sparse", dense.GetUsing(), sparse.GetUsing())
+	if got.GetQuery().GetNearest() == nil || got.GetQuery().GetFusion() != qdrant.Fusion(0) {
+		t.Errorf("the query that went out is not a nearest-neighbour dense query: %+v", got.GetQuery())
 	}
-	if len(dense.GetQuery().GetNearest().GetDense().GetData()) != 2 {
-		t.Error("the dense leg did not carry the dense vector")
+	if !slices.Equal(got.GetQuery().GetNearest().GetDense().GetData(), req.Dense) {
+		t.Error("the dense vector on the wire is not the one the request carried")
 	}
-	if len(sparse.GetQuery().GetNearest().GetSparse().GetIndices()) != 2 {
-		t.Error("the sparse leg did not carry the sparse vector")
+	if got.GetUsing() != req.DenseVector {
+		t.Errorf("Using = %q, want the named vector %q", got.GetUsing(), req.DenseVector)
 	}
-	for _, leg := range got.GetPrefetch() {
-		if leg.GetLimit() != 40 {
-			t.Errorf("leg %q limit = %d, want 40", leg.GetUsing(), leg.GetLimit())
-		}
-		assertFilter(t, leg.GetUsing(), leg.GetFilter())
-	}
-	assertFilter(t, "outer", got.GetFilter())
+	assertFilter(t, "request", got.GetFilter())
 }
 
 func assertFilter(t *testing.T, where string, f *qdrant.Filter) {
@@ -121,51 +107,38 @@ func assertFilter(t *testing.T, where string, f *qdrant.Filter) {
 	}
 }
 
-// TestExecuteQuery_AcornEnabledOnBothLegsWithoutMaxSelectivity is PRD-contrato §2.3c on the wire.
-// Enable must be true on both legs, and MaxSelectivity must be absent: Qdrant decides per request
-// from a cardinality estimate this process does not have, so pinning it here would be guessing with
-// strictly less information. A future "tuning" commit has to delete this assertion first.
-func TestExecuteQuery_AcornEnabledOnBothLegsWithoutMaxSelectivity(t *testing.T) {
+// TestExecuteQuery_AcornEnabledWithoutMaxSelectivity is PRD-contrato §2.3c on the wire. Enable must be
+// true, and MaxSelectivity must be absent: Qdrant decides per request from a cardinality estimate this
+// process does not have, so pinning it here would be guessing with strictly less information. A future
+// "tuning" commit has to delete this assertion first.
+func TestExecuteQuery_AcornEnabledWithoutMaxSelectivity(t *testing.T) {
 	api, _, err := executeSample(t, sampleRequest())
 	if err != nil {
 		t.Fatalf("ExecuteQuery: %v", err)
 	}
-
-	legs := api.requests[0].GetPrefetch()
-	if len(legs) != 2 {
-		t.Fatalf("%d prefetch leg(s), want 2", len(legs))
+	acorn := api.requests[0].GetParams().GetAcorn()
+	if acorn == nil {
+		t.Fatal("no Acorn params: ACORN is opt-in per request and defaults to off (PRD-contrato §2.3c)")
 	}
-	for _, leg := range legs {
-		acorn := leg.GetParams().GetAcorn()
-		if acorn == nil {
-			t.Errorf("leg %q has no Acorn params: ACORN is opt-in per request and defaults to off "+
-				"(PRD-contrato §2.3c)", leg.GetUsing())
-			continue
-		}
-		if acorn.Enable == nil || !*acorn.Enable {
-			t.Errorf("leg %q has Acorn.Enable = %v, want true", leg.GetUsing(), acorn.Enable)
-		}
-		if acorn.MaxSelectivity != nil {
-			t.Errorf("leg %q pins Acorn.MaxSelectivity = %v; it must stay at the server default "+
-				"(PRD-contrato §2.3c)", leg.GetUsing(), *acorn.MaxSelectivity)
-		}
+	if acorn.Enable == nil || !*acorn.Enable {
+		t.Errorf("Acorn.Enable = %v, want true", acorn.Enable)
+	}
+	if acorn.MaxSelectivity != nil {
+		t.Errorf("Acorn.MaxSelectivity = %v is pinned; it must stay at the server default (PRD-contrato §2.3c)",
+			*acorn.MaxSelectivity)
 	}
 }
 
 func TestExecuteQuery_AcornOffIsNotSent(t *testing.T) {
 	req := sampleRequest()
-	for i := range req.Prefetch {
-		req.Prefetch[i].Acorn = false
-	}
+	req.Acorn = false
 
 	api, _, err := executeSample(t, req)
 	if err != nil {
 		t.Fatalf("ExecuteQuery: %v", err)
 	}
-	for _, leg := range api.requests[0].GetPrefetch() {
-		if leg.GetParams().GetAcorn() != nil {
-			t.Errorf("leg %q sent Acorn params for a request that did not ask for them", leg.GetUsing())
-		}
+	if api.requests[0].GetParams().GetAcorn() != nil {
+		t.Error("Acorn params were sent for a request that did not ask for them")
 	}
 }
 
@@ -232,42 +205,23 @@ func TestExecuteQuery_APIErrorIsWrapped(t *testing.T) {
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("ExecuteQuery = %v, want it to wrap %v", err, sentinel)
 	}
-	if !strings.Contains(err.Error(), "interno") {
+	if !strings.Contains(err.Error(), "interno_eg2") {
 		t.Errorf("error %q does not name the collection", err)
 	}
 }
 
-func TestExecuteQuery_LegWithBothOrNeitherVector(t *testing.T) {
-	for name, leg := range map[string]retrieval.PrefetchLeg{
-		"neither": {Vector: "dense", Limit: 10},
-		"both": {Vector: "dense", Limit: 10, Dense: []float32{0.1},
-			Sparse: embed.Sparse{Indices: []uint32{1}, Values: []float32{0.5}}},
-	} {
-		t.Run(name, func(t *testing.T) {
-			req := sampleRequest()
-			req.Prefetch = []retrieval.PrefetchLeg{leg}
-
-			api, _, err := executeSample(t, req)
-			if err == nil {
-				t.Fatal("ExecuteQuery accepted a prefetch leg that is not exactly one vector")
-			}
-			if len(api.requests) != 0 {
-				t.Error("a malformed request still reached the wire")
-			}
-		})
-	}
-}
-
-func TestExecuteQuery_NoFusionMeansNoQuery(t *testing.T) {
+// A request with no vector is the filter alone (retrieval.Searcher.FilterMatchesAnything): the query
+// is left unset and Qdrant reads the filter.
+func TestExecuteQuery_NoVectorMeansNoQuery(t *testing.T) {
 	req := sampleRequest()
-	req.FusionRRF = false
+	req.Dense, req.DenseVector, req.Acorn = nil, "", false
 
 	api, _, err := executeSample(t, req)
 	if err != nil {
 		t.Fatalf("ExecuteQuery: %v", err)
 	}
-	if api.requests[0].GetQuery() != nil {
-		t.Error("a request that did not ask for fusion still carries a Query")
+	if api.requests[0].GetQuery() != nil || api.requests[0].Using != nil {
+		t.Error("a request with no vector still carries a Query or a vector name")
 	}
 }
 
@@ -324,95 +278,3 @@ func TestNewQuerier_NilAPI(t *testing.T) {
 var _ interface {
 	ExecuteQuery(ctx context.Context, req retrieval.SearchRequest) ([]retrieval.ScoredPoint, error)
 } = (*Querier)(nil)
-
-// denseOnlyRequest is what internal/retrieval builds for SearchModeDenseOnly (S10 T7): one
-// top-level dense query over the filter, no prefetch leg, no fusion.
-func denseOnlyRequest() retrieval.SearchRequest {
-	f := retrieval.Filter{
-		Must:    []retrieval.Condition{{Field: "tenant_id", Value: "tenant-a"}},
-		MustNot: []retrieval.Condition{{Field: "status", Value: "archived"}},
-	}
-	return retrieval.SearchRequest{
-		Collection:    "interno",
-		Dense:         []float32{0.1, 0.2},
-		DenseVector:   "dense",
-		Acorn:         true,
-		Filter:        f,
-		Limit:         5,
-		Offset:        3,
-		PayloadFields: []string{"uid", "text"},
-	}
-}
-
-// TestExecuteQuery_TranscribesADenseOnlyRequest is the wire half of the dense-only mode: the
-// vocabulary check lives in internal/retrieval (TestBuildQueryRequest_ModeDenseOnly...), and this is
-// the only place that can assert what the Qdrant client is actually handed.
-func TestExecuteQuery_TranscribesADenseOnlyRequest(t *testing.T) {
-	req := denseOnlyRequest()
-	api, _, err := executeSample(t, req)
-	if err != nil {
-		t.Fatalf("ExecuteQuery: %v", err)
-	}
-	if len(api.requests) != 1 {
-		t.Fatalf("%d request(s) went out, want 1", len(api.requests))
-	}
-	got := api.requests[0]
-
-	if len(got.GetPrefetch()) != 0 {
-		t.Errorf("%d prefetch(es) went out for a dense-only request, want none", len(got.GetPrefetch()))
-	}
-	if got.GetQuery().GetFusion() != qdrant.Fusion(0) || got.GetQuery().GetNearest() == nil {
-		t.Errorf("the query that went out is not a nearest-neighbour dense query: %+v", got.GetQuery())
-	}
-	if !slices.Equal(got.GetQuery().GetNearest().GetDense().GetData(), req.Dense) {
-		t.Error("the dense vector on the wire is not the one the request carried")
-	}
-	if got.GetUsing() != req.DenseVector {
-		t.Errorf("Using = %q, want the named vector %q", got.GetUsing(), req.DenseVector)
-	}
-	if !got.GetParams().GetAcorn().GetEnable() {
-		t.Error("ACORN is not enabled on the top-level search, so the dense-only mode loses the " +
-			"filtered traversal the hybrid legs get")
-	}
-	if got.GetParams().GetAcorn().MaxSelectivity != nil {
-		t.Error("MaxSelectivity was pinned; PRD-contrato §2.3c leaves it to the server")
-	}
-	if got.GetFilter() == nil || len(got.GetFilter().GetMust()) == 0 {
-		t.Error("the filter did not reach the wire, so the dense-only search is unscoped")
-	}
-}
-
-// TestExecuteQuery_RefusesBothAQueryAndPrefetches is the guard on a request that describes two
-// different searches. Honouring either one silently would send a query nobody built — the one thing
-// this file promises never to do.
-func TestExecuteQuery_RefusesBothAQueryAndPrefetches(t *testing.T) {
-	req := denseOnlyRequest()
-	req.Prefetch = sampleRequest().Prefetch
-	req.FusionRRF = true
-
-	api, _, err := executeSample(t, req)
-	if err == nil {
-		t.Fatal("a request carrying both a top-level dense query and prefetch legs was accepted")
-	}
-	if len(api.requests) != 0 {
-		t.Error("the ambiguous request reached the wire before being refused")
-	}
-	for _, want := range []string{"dense", "prefetch"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("the refusal %q does not mention %q, so it does not say what is ambiguous", err, want)
-		}
-	}
-}
-
-// TestExecuteQuery_NoAcornOnAFusedRequest keeps the new top-level Params from leaking into the
-// hybrid shape: in hybrid mode the filter runs on the legs, and ACORN belongs there and only there
-// (PRD-contrato §2.3c, and TestBuildQueryRequest_EnablesAcornOnBothPrefetches in internal/retrieval).
-func TestExecuteQuery_NoAcornOnAFusedRequest(t *testing.T) {
-	api, _, err := executeSample(t, sampleRequest())
-	if err != nil {
-		t.Fatalf("ExecuteQuery: %v", err)
-	}
-	if api.requests[0].GetParams() != nil {
-		t.Errorf("a fused request went out with top-level search params: %+v", api.requests[0].GetParams())
-	}
-}

@@ -11,18 +11,9 @@ import (
 // response exactly as it arrived. Every check names the field and the offending position, because
 // "invalid embedding" over a 3000-chunk run is not actionable.
 //
-// The invariants are PRD-contrato §2.3b's, and they are not negotiable here: the model profile's
-// dense width (1024 for BGE-M3, 768 for EmbeddingGemma),
-// all finite; sparse indices and values the same length, non-empty, strictly ascending, all
-// weights non-zero and finite. The two degenerate-sparse classes additionally wrap a sentinel
-// (see errors.go) so the caller can attribute them to one note.
-//
-// Ordering is checked, never imposed. scripts/embedder-service/server.py sorts by token id and
-// drops non-positive weights before it answers, so all three sparse rules are a contract between
-// the two sides; re-sorting here would swallow the day the server stops keeping it, and an unstable
-// sparse order makes an unchanged note look changed to point_hash.
-//
-// It does not mutate its input on either path.
+// The invariants are PRD-contrato §2.3b's, and they are not negotiable here: the dense vector has the
+// model profile's width (768 for EmbeddingGemma 2) and every element is finite. It does not mutate its
+// input.
 func validateEmbedding(e Embedding, m schema.ModelProfile) error {
 	if len(e.Dense) != m.DenseWidth() {
 		return fmt.Errorf("dense vector has %d elements, want %d (profile %q)", len(e.Dense), m.DenseWidth(), m.ID)
@@ -30,51 +21,6 @@ func validateEmbedding(e Embedding, m schema.ModelProfile) error {
 	for i, v := range e.Dense {
 		if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
 			return fmt.Errorf("element Dense[%d] is not a finite number (%v)", i, v)
-		}
-	}
-
-	s := e.Sparse
-	if !m.HasSparse() {
-		// A dense-only profile has no sparse head. A vector that carries one came from a backend
-		// serving a different model, and storing it would put a sparse half into a collection that
-		// has no sparse vector configured.
-		if len(s.Indices) != 0 || len(s.Values) != 0 {
-			return fmt.Errorf("profile %q is dense-only but the embedding carries a sparse vector (%d indices, %d values)",
-				m.ID, len(s.Indices), len(s.Values))
-		}
-		return nil
-	}
-	if len(s.Indices) != len(s.Values) {
-		return fmt.Errorf(
-			"sparse vector length mismatch: %d indices, %d values", len(s.Indices), len(s.Values))
-	}
-	// An empty sparse vector is what a backend that silently dropped its sparse head returns. It
-	// breaks no per-element rule, which is exactly why it needs its own check: hybrid search with
-	// RRF fusion (PRD-contrato §2.3b) would degrade to dense-only and nothing would say so.
-	if len(s.Indices) == 0 {
-		return fmt.Errorf("sparse vector is empty; BGE-M3 produces dense and sparse in one pass, " +
-			"so an empty sparse half means the backend is not serving the sparse head")
-	}
-
-	for i := 1; i < len(s.Indices); i++ {
-		if s.Indices[i] == s.Indices[i-1] {
-			return fmt.Errorf("Sparse.Indices[%d]: token index %d is repeated: %w",
-				i, s.Indices[i], ErrSparseRepeatedIndex)
-		}
-		if s.Indices[i] < s.Indices[i-1] {
-			return fmt.Errorf(
-				"Sparse.Indices[%d] = %d is below Sparse.Indices[%d] = %d; indices must be strictly "+
-					"ascending after sorting, which they cannot be unless the response was malformed",
-				i, s.Indices[i], i-1, s.Indices[i-1])
-		}
-	}
-	for i, v := range s.Values {
-		if v == 0 {
-			return fmt.Errorf("Sparse.Values[%d] (token index %d) is zero: %w",
-				i, s.Indices[i], ErrSparseZeroWeight)
-		}
-		if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
-			return fmt.Errorf("Sparse.Values[%d] is not a finite number (%v)", i, v)
 		}
 	}
 	return nil

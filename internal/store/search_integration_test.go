@@ -14,16 +14,11 @@ import (
 	"github.com/danielmalka/go-knowrag/internal/schema"
 )
 
-// PR 3 of the embedding migration against a real Qdrant: the dense-only profile's collections are
-// created WITHOUT a sparse vector, a dense-only point is accepted, and the single dense query (no
-// prefetch, no RRF) finds it through the tenant filter. The default profile's lifecycle test next door
-// keeps proving the hybrid path.
-func TestDenseOnlyProfile_Integration_CreateWriteQuery(t *testing.T) {
+// Against a real Qdrant: the profile's collections are created with one dense vector and no sparse
+// one, a point is accepted, and the single dense query finds it through the tenant filter.
+func TestProfile_Integration_CreateWriteQuery(t *testing.T) {
 	api := startQdrant(t)
-	profile, ok := schema.ProfileByID("embeddinggemma-2")
-	if !ok {
-		t.Fatal("embeddinggemma-2 not registered")
-	}
+	profile := schema.DefaultProfile()
 	manifest := schema.ManifestFor(profile)
 	state := &schema.FileAppliedStateStore{Path: filepath.Join(t.TempDir(), "applied_state.json")}
 
@@ -70,14 +65,12 @@ func TestDenseOnlyProfile_Integration_CreateWriteQuery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := retrieval.DefaultConfig()
-	cfg.Profile = profile
-	searcher := retrieval.NewSearcher(fake, querier, cfg)
+	searcher := retrieval.NewSearcher(fake, querier, retrieval.DefaultConfig())
 
 	q := retrieval.Query{Collection: collection, TenantID: "tenant-a", Text: text, TopK: 3}
 	hits, err := searcher.Search(t.Context(), q)
 	if err != nil {
-		t.Fatalf("dense-only Search: %v", err)
+		t.Fatalf("Search: %v", err)
 	}
 	if len(hits) != 1 || hits[0].UID != uid.String() {
 		t.Fatalf("hits = %+v, want the one point written", hits)

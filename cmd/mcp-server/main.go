@@ -81,13 +81,7 @@ func run() error {
 		return err
 	}
 
-	profile, err := cfg.Profile()
-	if err != nil {
-		return err
-	}
-	searchCfg := retrieval.DefaultConfig()
-	searchCfg.Profile = profile
-	searcher := retrieval.NewSearcher(embedder, querier, searchCfg)
+	searcher := retrieval.NewSearcher(embedder, querier, retrieval.DefaultConfig())
 
 	logger.Info("mcp-server starting", "config", cfg, "version", serverVersion)
 	return newServer(cfg, searcher).Run(ctx, &mcp.StdioTransport{})
@@ -157,7 +151,7 @@ var bootHandshakeTimeout = 30 * time.Second
 // bootHandshakeTimeout for why the search path's per-attempt budget cannot bound boot.
 //
 // MaxRetries is 1 because the failures it could cover are answered elsewhere. A service that is not
-// listening — which includes one still loading, since it binds only after the load — refuses
+// listening — which includes one still starting, since it binds only after its start-up checks — refuses
 // instantly, spends none of the budget, and is a case where starting anyway is already the right
 // outcome (D-21); retrying would delay boot for a verdict the search path reports per call anyway.
 // What is left is the backend that accepts and does not answer, and one long attempt covers that
@@ -303,10 +297,10 @@ func verifyEmbedder(ctx context.Context, cfg Config, transport embed.Transport) 
 //
 // What 1,5 s costs is smaller than the first draft of this comment claimed, and the correction is
 // worth keeping because the claim was the same false one bootHandshakeTimeout used to make. It said
-// a service still loading its model could not answer inside 1,5 s and so a recovery would report an
-// outage instead of waiting. A loading service does not answer slowly — it is not listening yet
-// (scripts/embedder-service/server.py binds after the load), so that call fails instantly at any
-// budget. What 1,5 s actually gives up is the wedged backend: a service holding the connection open
+// a service still starting could not answer inside 1,5 s and so a recovery would report an outage
+// instead of waiting. A starting service does not answer slowly — it is not listening yet
+// (scripts/embedder-service/server.py binds only after its start-up checks, and it loads no model
+// for a handshake), so that call fails instantly at any budget. What 1,5 s actually gives up is the wedged backend: a service holding the connection open
 // without answering is written off here in 1,5 s, where boot would wait 30 s for it. For a call
 // someone is waiting on, written off and retried on the next search is the right answer.
 //

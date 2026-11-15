@@ -80,7 +80,7 @@ func TestSearch_Integration_TenantIsolation(t *testing.T) {
 	applySchema(t, client)
 	searcher := newSearcher(t, client)
 
-	const collection = "interno"
+	const collection = "interno_eg2"
 	var seeds []seed
 	for i := range 12 {
 		seeds = append(seeds, newSeed("tenant-a", fmt.Sprintf("cron scheduling notes number %d", i)))
@@ -157,7 +157,7 @@ func TestSearch_Integration_ArchivedExcludedByDefault(t *testing.T) {
 	applySchema(t, client)
 	searcher := newSearcher(t, client)
 
-	const collection = "interno"
+	const collection = "interno_eg2"
 	live := newSeed("tenant-a", "cron scheduling that is current")
 	archived := newSeed("tenant-a", "cron scheduling that was retired")
 	archived.status = schema.StatusArchived()
@@ -245,7 +245,7 @@ func TestSearch_Integration_PrivateReturnedOnlyWithPrivilegedFlag(t *testing.T) 
 }
 
 // TestFilterMatchesAnything_Integration_IsARequestQdrantAccepts covers the one thing no fake can:
-// the probe sends a request with no query vector and no prefetch leg, and only a real server can
+// the probe sends a request with no query vector, and only a real server can
 // say what comes back. The shape is supported, not a quirk being leaned on — in the pinned client
 // (github.com/qdrant/go-client v1.19.0, internal/proto/points.proto:1114) QueryPoints.Query is
 // documented as "if missing, returns points ordered by their IDs", and Filter as returning only the
@@ -261,7 +261,7 @@ func TestFilterMatchesAnything_Integration_IsARequestQdrantAccepts(t *testing.T)
 	applySchema(t, client)
 	searcher := newSearcher(t, client)
 
-	const collection = "interno"
+	const collection = "interno_eg2"
 	live := newSeed("tenant-a", "cron scheduling that is current")
 	archived := newSeed("tenant-a", "cron scheduling that was retired")
 	archived.area, archived.status = "somente-arquivado", schema.StatusArchived()
@@ -310,7 +310,7 @@ func TestFilterMatchesAnything_Integration_LiveAreaEmptiedByAnotherFacet(t *test
 	applySchema(t, client)
 	searcher := newSearcher(t, client)
 
-	const collection = "interno"
+	const collection = "interno_eg2"
 	live := newSeed("tenant-a", "cron scheduling that is current")
 	seedPoints(t, client, collection, []seed{live})
 
@@ -422,8 +422,7 @@ func seedPoints(t *testing.T, client *qdrant.Client, collection string, seeds []
 		points[i] = &qdrant.PointStruct{
 			Id: qdrant.NewIDUUID(schema.PointID(s.tenant, s.uid, s.chunkIndex).String()),
 			Vectors: qdrant.NewVectorsMap(map[string]*qdrant.Vector{
-				schema.DenseVectorName:  qdrant.NewVectorDense(emb.Dense),
-				schema.SparseVectorName: qdrant.NewVectorSparse(emb.Sparse.Indices, emb.Sparse.Values),
+				schema.DenseVectorName: qdrant.NewVectorDense(emb.Dense),
 			}),
 			Payload: payload,
 		}

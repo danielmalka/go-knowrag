@@ -15,13 +15,9 @@ package schema
 // Only `interno` carries data in this build, and the manifest is still parameterized over all three
 // from day one — no code path anywhere may name `interno` on its own.
 
-const (
-	// DenseVectorName and SparseVectorName are the named vectors every collection carries. Named,
-	// not default: S07's QueryPoints fuses two PrefetchQuery branches (`using: dense`,
-	// `using: sparse`) with RRF, and an unnamed vector has nothing for `using` to select.
-	DenseVectorName  = "dense"
-	SparseVectorName = "sparse"
-)
+// DenseVectorName is the named vector every collection carries. Named, not default, so a query
+// selects it with `using: dense` and a second named vector could be added without renaming this one.
+const DenseVectorName = "dense"
 
 // Distance is the metric a collection's dense vectors are compared with.
 //
@@ -77,9 +73,6 @@ type CollectionManifest struct {
 	DenseVectorName string
 	DenseDim        uint64
 	Distance        Distance
-	// SparseVectorName is the named sparse vector the collection carries, or "" for the collection of a
-	// dense-only profile (no sparse vector is created, written or queried there).
-	SparseVectorName string
 
 	// ModelRevision is the embedding model revision these vectors were produced by. Changing it
 	// means every vector already stored was produced by a different model, so it is drift, and
@@ -129,12 +122,11 @@ func newCollectionManifest(p ModelProfile, name string) CollectionManifest {
 		return PayloadIndex{Field: field, Kind: FieldTypeKeyword}
 	}
 	return CollectionManifest{
-		Name:             name,
-		DenseVectorName:  DenseVectorName,
-		DenseDim:         p.DenseDim,
-		Distance:         DistanceCosine,
-		SparseVectorName: sparseVectorNameFor(p),
-		ModelRevision:    p.Revision,
+		Name:            name,
+		DenseVectorName: DenseVectorName,
+		DenseDim:        p.DenseDim,
+		Distance:        DistanceCosine,
+		ModelRevision:   p.Revision,
 		// This list is derived from who filters, not from what looks important. Strict mode
 		// (store.Apply) refuses a filter on an unindexed field, so a field this list misses is not a
 		// slow query — it is an InvalidArgument at runtime, in whichever story owns the filter. Two
@@ -161,12 +153,4 @@ func newCollectionManifest(p ModelProfile, name string) CollectionManifest {
 			keyword("tags"),
 		},
 	}
-}
-
-// sparseVectorNameFor is SparseVectorName for a profile with a sparse head and "" for a dense-only one.
-func sparseVectorNameFor(p ModelProfile) string {
-	if p.HasSparse() {
-		return SparseVectorName
-	}
-	return ""
 }

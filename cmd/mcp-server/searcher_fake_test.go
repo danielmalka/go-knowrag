@@ -188,15 +188,11 @@ func (f *fakeSearcher) lastLookup() retrieval.Query {
 // testConfig is the instance scope every handler test runs against — this build's real one.
 func testConfig() Config {
 	return Config{
-		Collection:       "interno",
+		Collection:       "interno_eg2",
 		TenantID:         "tenant-a",
 		QdrantEndpoint:   "qdrant.internal:6334",
 		QdrantAPIKey:     "runtime-read-key",
 		EmbedderEndpoint: "http://embedder.internal:8080",
-		// These fixtures were built against BGE-M3 (collection `interno`, embed.Expected()'s pins) and
-		// the deployed profile is now EmbeddingGemma 2, so they name theirs. The EmbeddingGemma path is
-		// pinned by profile_test.go; this goes with the BGE-M3 profile in the cleanup PR.
-		ModelProfile: "bge-m3",
-		Areas:        []string{"infra", "research"},
+		Areas:            []string{"infra", "research"},
 	}
 }

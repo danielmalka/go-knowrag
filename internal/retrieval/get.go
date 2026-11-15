@@ -19,7 +19,7 @@ const noteLookupLimit = 64
 
 // GetByUID returns every visible chunk of one note, in document order.
 //
-// It is a filtered read, not a search: no embedding, no prefetch, no fusion. The tenant condition
+// It is a filtered read, not a search: no embedding and no query vector. The tenant condition
 // and the archived/private guards come from the same buildFilter Search uses, so a lookup cannot
 // see a note a search under the same flags would have hidden. Area, type, vault and tags are
 // ignored — the uid already names the note.

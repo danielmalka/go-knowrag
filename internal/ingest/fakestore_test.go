@@ -249,9 +249,11 @@ func (s *spyEmbedder) EmbedDocuments(ctx context.Context, texts []string) ([]emb
 // cross-tenant test, which is the only place two are meaningful.
 const testTenant = "tenant-a"
 
-// testHandshake is a complete, plausible BackendHandshakeInfo — all seven fields populated, because
-// ComputePointHash hashes all seven and a fixture that left one at its zero value would make the
-// per-field tests prove less than they claim.
+// testHandshake is a complete, plausible BackendHandshakeInfo for a backend with no task-prefix scheme
+// (PromptVersion left empty on purpose, so the plain embedding path is the one most tests exercise;
+// titled_test.go sets a scheme). Every other field is populated, because ComputePointHash hashes them
+// and a fixture that left one at its zero value would make the per-field tests prove less than they
+// claim.
 func testHandshake() embed.BackendHandshakeInfo {
 	return embed.BackendHandshakeInfo{
 		ModelRevision:     schema.DefaultProfile().Revision,
@@ -260,7 +262,6 @@ func testHandshake() embed.BackendHandshakeInfo {
 		Normalization:     schema.DefaultProfile().Normalization,
 		Pooling:           schema.DefaultProfile().Pooling,
 		Precision:         schema.DefaultProfile().PrimaryPrecision(),
-		SparseParams:      map[string]string{"indices": "token_id", "values": "lexical_weight"},
 	}
 }
 

@@ -222,15 +222,6 @@ var (
 	}
 )
 
-// sparseVectorsConfig is the sparse side of CreateCollection: one named sparse vector, or nil (the field
-// is omitted from the request) for a dense-only manifest entry.
-func sparseVectorsConfig(c schema.CollectionManifest) *qdrant.SparseVectorConfig {
-	if c.SparseVectorName == "" {
-		return nil
-	}
-	return qdrant.NewSparseVectorsConfig(map[string]*qdrant.SparseVectorParams{c.SparseVectorName: {}})
-}
-
 func qdrantDistance(d schema.Distance) qdrant.Distance { return qdrantDistances[d] }
 
 func qdrantFieldType(f schema.FieldType) qdrant.FieldType { return qdrantFieldTypes[f] }
@@ -243,9 +234,6 @@ func createCollectionRequest(c schema.CollectionManifest) *qdrant.CreateCollecti
 		VectorsConfig: qdrant.NewVectorsConfigMap(map[string]*qdrant.VectorParams{
 			c.DenseVectorName: {Size: c.DenseDim, Distance: qdrantDistance(c.Distance)},
 		}),
-		// The sparse side takes Qdrant's defaults: BGE-M3 emits learned lexical weights, so there
-		// is no IDF modifier to apply on top of them. A dense-only profile has no sparse vector.
-		SparseVectorsConfig: sparseVectorsConfig(c),
 		// Strict mode, with unindexed filtering off on both paths. Without it a query filtering on
 		// a field nobody indexed is answered by a full scan — the right answer, arrived at slowly
 		// enough that it looks like a performance mystery instead of the missing index it is.
@@ -312,29 +300,6 @@ func checkVectorDrift(c schema.CollectionManifest, info *qdrant.CollectionInfo) 
 			Property:   "dense vector distance",
 			Expected:   want.String(),
 			Actual:     dense.GetDistance().String(),
-			Observed:   "Qdrant",
-		}
-	}
-	sparseByName := params.GetSparseVectorsConfig().GetMap()
-	if c.SparseVectorName == "" {
-		// Dense-only: a live sparse vector means this is a collection of another profile under this name.
-		if len(sparseByName) > 0 {
-			return &DriftError{
-				Collection: c.Name,
-				Property:   "unexpected sparse vector (the profile is dense-only)",
-				Expected:   "none",
-				Actual:     strings.Join(slices.Sorted(maps.Keys(sparseByName)), ", "),
-				Observed:   "Qdrant",
-			}
-		}
-		return nil
-	}
-	if _, ok := sparseByName[c.SparseVectorName]; !ok {
-		return &DriftError{
-			Collection: c.Name,
-			Property:   "named sparse vector",
-			Expected:   c.SparseVectorName,
-			Actual:     strings.Join(slices.Sorted(maps.Keys(sparseByName)), ", "),
 			Observed:   "Qdrant",
 		}
 	}

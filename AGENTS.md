@@ -65,8 +65,8 @@ read-only é a linha que sobrevive a alguém quebrá-las.
 
 Escrever as 60–90 perguntas de avaliação saiu de requisito e virou **"quem sabe um dia"**. O dono
 decidiu assim sabendo o que perde, e o que se perde é específico: sem elas não há Recall@5 medido, e
-a escolha entre busca híbrida e densa continua sendo a que o código já traz, sustentada por
-raciocínio e não por número.
+a qualidade da busca continua sustentada por raciocínio e não por número (a troca do BGE-M3 híbrido
+pelo EmbeddingGemma 2 denso, de 2026-11-15, usou uma prova própria, descrita mais abaixo).
 
 **O que isso não é.** Não é abandono do instrumento: o runner, o Recall@K com intervalo de Wilson, a
 tabela de cobertura, a proveniência por git e o gate hermético existem, medem, e rodam no CI a cada
@@ -98,16 +98,19 @@ Substitui a de 2026-08-16 ("não é 24 h", janela 07:00–23:00) e a do item 10 
   resolver um nome), e qualquer outro valor encerra o processo com status 78. Não há
   opt-in para rede: expor o serviço exigiria antes uma autenticação, como decisão própria.
 - **Dependências Python com versões exatas** em `scripts/embedder-service/requirements.txt`.
-- **Virada de perfil (PR 6): o EmbeddingGemma 2 é o perfil efetivo, escolhido por configuração, não pelo
-  `DefaultProfile()`.** Os comandos (`cmd/cli`, `mcp-server`, `measure-*`) resolvem o perfil com
-  `config.Profile()` / `mcp-server Config.Profile()` (`MODEL_PROFILE` / `MCP_MODEL_PROFILE`, padrão
-  `embeddinggemma-2`) e o passam adiante: embedder (`NewServiceEmbedderFor`), `Searcher` (`Config.Profile`),
-  manifesto (`ManifestFor`), janela do chunk e `TitleMaxTokens`. `schema.DefaultProfile()` continua BGE-M3 só
-  como fallback da biblioteca e dos testes até a limpeza (PR 7) apagar esse perfil; por isso
-  `TestNoEntryPointReadsTheLibraryDefaultProfile` (`cmd/cli/profile_wiring_test.go`) reprova qualquer ponto de
-  entrada que o leia. Mudar o `DefaultProfileID` agora quebraria ~40 testes presos ao BGE-M3 que a PR 7
-  apaga. A collection configurada (`DEFAULT_COLLECTION`, `MCP_COLLECTION`) tem de ser do perfil: sem isso o
-  comando recusa antes de abrir conexão.
+- **Perfil único, sem seletor (limpeza, PR 7).** O BGE-M3 saiu do código (perfil, vetor esparso, RRF,
+  `SearchModeHybrid`, `--compare-modes`, parâmetro de vetor esparso do store, `SparseParams` do handshake e do
+  `point_hash`, golden do BGE-M3). Há um perfil registrado, o EmbeddingGemma 2, e `schema.DefaultProfile()` é ele.
+  **`MODEL_PROFILE`/`MCP_MODEL_PROFILE` foram removidos**: com um perfil só, o seletor não escolhe nada e só
+  poderia ser configurado errado; um valor sobrando no ambiente é ignorado. O registro (`Profiles`,
+  `ProfileByID`, `ManifestFor`) fica como a costura para um modelo futuro, que reintroduz um seletor
+  de propósito, numa PR própria. Os comandos pegam o perfil com `config.Profile()` / `Config.Profile()` do MCP,
+  que só confere que `DEFAULT_COLLECTION`/`MCP_COLLECTION` é uma coleção do perfil (`*_eg2`): as do BGE-M3
+  (`interno`, `clientes`, `base_paga`) são recusadas antes de abrir conexão. Os guardas de AST da PR 6
+  (`profile_guard*_test.go`) saíram junto: existiam para impedir um ponto de entrada de ler o perfil padrão da
+  biblioteca enquanto ele era o BGE-M3, e hoje o padrão da biblioteca é o único perfil. O `point_hash` perdeu
+  `embedder_sparse_params` e o literal congelado foi re-fixado; custou nada porque nenhum ponto do
+  EmbeddingGemma 2 tinha sido ingerido.
 - **Timeout da busca (MCP):** uma tentativa de 8 s, sem retry (`embedProfile`): a carga a frio do modelo mede
   3,0–5,9 s, e 1,5 s de verificação + 8 s = 9,5 s cabem no `searchDeadline` de 10 s. O handshake não carrega
   o modelo.

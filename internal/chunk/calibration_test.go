@@ -43,7 +43,7 @@ const (
 const probeTimeout = 30 * time.Second
 
 // TestChunkNote_Calibration_RealCorpus is S03 T10: it chunks every note of every configured vault
-// with the real BGE-M3 tokenizer and reports the two distributions the acceptance criterion names —
+// with the real model tokenizer and reports the two distributions the acceptance criterion names —
 // chunks per note and tokens per chunk. The numbers it logs are what
 // docs/eval/chunking-calibration.md is written from; the file is transcribed from this output rather
 // than emitted here, because docs/ is outside git (CLAUDE.md) and a test that writes into an
@@ -178,7 +178,7 @@ func TestChunkNote_Calibration_RealCorpus(t *testing.T) {
 	}
 
 	t.Logf("floor=%d ceiling=%d (chunker %s, hard window %d)",
-		clampCfg.FloorTokens, clampCfg.CeilingTokens, Version, HardTokenLimit)
+		clampCfg.FloorTokens, clampCfg.CeilingTokens, Version, hardLimit)
 	t.Logf("notes read: %d, of which produced no chunk (blank body): %d", len(notes), emptyNotes)
 	t.Logf("chunks produced: %d", len(tokensPerChunk))
 	t.Logf("chunks per note: %s", describe(chunksPerNote))
